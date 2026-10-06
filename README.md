@@ -124,17 +124,15 @@ flowchart TB
 > [!NOTE]
 > 交叉编译需要的第三方源码包都随仓库提供在 `third_party/sources/`（`opus`、`speexdsp`、`alsa-lib`），`build.rs`、`build_armv7.sh` 与 `scripts/build_alsa.sh` 都优先用它，这几步**不再联网**；可用 `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` / `XIAOZHI_ALSA_SRC` 指向自备的包覆盖。交叉工具链本身不入库（约 288MB），脚本只在本地没有时才下载。
 
-### 一键构建并运行
+### 在 PC 上运行（模拟器）
+
+`run.sh` 是**开发用的 PC 脚本**，只用来跑模拟器：它按宿主机编译，产物是普通的 x86 二进制，真机用不上（真机构建见下一节）。
 
 ```bash
-# 真机（RV1106，使用 /dev/fb0 与 /dev/input/event0）
-./run.sh
-
-# PC 上的 LVGL SDL 模拟器（480×320 窗口，鼠标模拟触摸）
-./run.sh --simulator
+./run.sh --simulator      # 480×320 窗口，鼠标模拟触摸
 ```
 
-`run.sh` 会依次：关掉占用 TCP 8080 的旧服务 → 配置并编译 `qzdesk_screen` 与 Rust 核心 → 在模拟器模式下带守护循环启动。
+`run.sh` 会依次：关掉占用 TCP 8080 的旧服务 → 配置并编译 `qzdesk_screen` 与 Rust 核心 → 带守护循环启动。
 
 常用开关：
 
@@ -145,17 +143,29 @@ flowchart TB
 | `QZDESK_JOBS=N` | 并行编译任务数 |
 | `QZDESK_REPLACE_PORT_8080=0` | 不自动关闭占用 8080 的旧进程 |
 
-### 手工构建
+### 真机（RV1106）构建
 
-<details>
-<summary>展开：CMake 命令与真机交叉编译</summary>
+真机是 ARMv7 / RV1106 的 Linux 板子：**不在设备上编译，也不用宿主机（x86）的产物**，界面与核心都从 Rockchip SDK 里出。
 
 ```bash
-# 真机
-cmake -S . -B /tmp/qzdesk-build
-cmake --build /tmp/qzdesk-build -j2
+cd <Rockchip SDK>       # 本仓库不含 SDK，需另行准备
+./build.sh lunch        # 首次：选板级 RV1106_QZdesk + SPI_NAND
+./build_qzdesk.sh       # 编界面 + 交叉编核心，最后打包 output/image/update.img
+```
 
-# 模拟器
+- 界面 `qzdesk_screen`：由 SDK 的交叉工具链经本仓库的 `CMakeLists.txt` 编出（SDK 里 `project/app/qzdesk/src` 指向本仓库）；
+- 核心 `xiaozhi_linux_rs`：走 `xiaozhi_core/build_armv7.sh`，静态 musl 链接，目标 rootfs 不需要额外动态库；
+- 产物落在 SDK 的 `project/app/out/bin/`，再打包成 `output/image/update.img` 烧到板子上。
+
+> [!NOTE]
+> Rockchip SDK 是独立仓库，**不随本仓库提供**。本仓库只有应用侧代码（界面 + 核心）；板级配置（面板时序、分区表、defconfig）都在 SDK 里。
+
+<details>
+<summary>展开：模拟器的手工 CMake 命令、以及只编某一部分</summary>
+
+模拟器（PC）：
+
+```bash
 cmake -S . -B /tmp/qzdesk-sim-build -DQZDESK_SIMULATOR=ON
 cmake --build /tmp/qzdesk-sim-build -j2
 /tmp/qzdesk-sim-build/qzdesk_screen
@@ -168,14 +178,15 @@ cmake --build /tmp/qzdesk-sim-build -j2
 - 指定 Rust 目标三元组：`-DQZDESK_CARGO_TARGET=<target>`
 - 默认 `CMAKE_BUILD_TYPE=Release`（LVGL 软件渲染在 `-O0` 下会明显卡顿），需调试请显式传 `Debug`
 
-RV1106 使用 uClibc 时走核心自带的交叉编译脚本（会准备专用工具链与 ALSA 链接环境）：
+只交叉编译核心（不经过 SDK 时）：
 
 ```bash
 cd xiaozhi_core
-bash scripts/armv7-unknown-linux-uclibceabihf/build.sh
+bash scripts/armv7-unknown-linux-uclibceabihf/build.sh   # RV1106 + uClibc
+./build_armv7.sh core                                    # 或静态 musl
 ```
 
-部署：把生成的 `xiaozhi_linux_rs`、其运行时配置 `xiaozhi_config.json` 与 `qzdesk_screen` 放到同一目录，先起核心再起界面；也可让界面自动拉起核心（见下）。
+部署：把 `qzdesk_screen`、`xiaozhi_linux_rs` 与运行时配置 `xiaozhi_config.json` 放到设备同一目录（SDK 默认 `/oem/usr/bin/`），先起核心再起界面；也可让界面自动拉起核心（见下）。
 
 </details>
 
@@ -303,7 +314,7 @@ bash scripts/armv7-unknown-linux-uclibceabihf/build.sh
 │   ├── web/                  # 网页控制台（单文件 HTML）
 │   ├── docs/                 # MCP / OTA / 音频设备 / GUI 适配说明
 │   └── scripts/              # 含 RV1106 uClibc 交叉编译脚本
-├── run.sh                    # 一键构建 + 运行
+├── run.sh                    # PC 模拟器：一键构建 + 运行（真机走 SDK 交叉编译）
 ├── CMakeLists.txt
 └── LICENSE                   # MIT
 ```
