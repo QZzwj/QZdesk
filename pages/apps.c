@@ -110,7 +110,7 @@ lv_obj_t *qz_apps_create(void)
     app_row(apps_screen, COL_RIGHT, row2, LV_SYMBOL_PLAY, "番茄钟", "专注与休息",
             QZ_ACCENT_TINT, QZ_ACCENT_DARK, open_applet,
             (void *)(intptr_t)QZ_APPLET_POMODORO);
-    app_row(apps_screen, COL_RIGHT, row3, LV_SYMBOL_IMAGE, "人脸识别", "摄像头 · RetinaFace",
+    app_row(apps_screen, COL_RIGHT, row3, LV_SYMBOL_EYE_OPEN, "存在检测", "有人靠近自动亮屏",
             QZ_ACCENT_TINT, QZ_ACCENT_DARK, open_applet,
             (void *)(intptr_t)QZ_APPLET_FACE);
     app_row(apps_screen, COL_LEFT, row3, LV_SYMBOL_GPS, "设备控制", "声音 · 背光",

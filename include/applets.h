@@ -8,7 +8,7 @@ typedef enum {
     QZ_APPLET_REMINDER,  /**< 定时提醒 */
     QZ_APPLET_POMODORO,  /**< 番茄钟 */
     QZ_APPLET_CONTROL,   /**< 设备控制 */
-    QZ_APPLET_FACE,      /**< 摄像头与人脸识别 */
+    QZ_APPLET_FACE,      /**< 存在检测（摄像头：有人靠近自动亮屏 + 打招呼） */
     QZ_APPLET_COUNT,
 } qz_applet_t;
 

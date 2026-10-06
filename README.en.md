@@ -33,6 +33,7 @@ A skill is a directory with a `SKILL.md`, imported from the web console; once im
 | Web console | A single-page console served by the device (default `:8080`): skills, live chat, weather, performance, smart home |
 | Device data | Weather comes straight from Open-Meteo (no API key) and performance samples `/proc` and `statvfs` every 2 seconds; the device UI and the web page read the same snapshot |
 | Board-free development | The same code runs on a PC through the LVGL SDL simulator (480×320 window); Wi-Fi / backlight / volume / timezone use the real interfaces and can all be overridden by environment variables |
+| Presence detection | Frame differencing on the camera decides "someone is here": it wakes the screen and has the assistant say hello (5-minute cooldown); plug in an RKNN model to turn it into face recognition |
 | Reminders & pomodoro | Stored in the core: voice, device UI and the web page read and write one copy, and a restart does not lose it; when a reminder fires it lands in the chat record |
 | Core logs | The last few hundred lines stay in memory; the web `logs` card and the device read the same source, so no ssh needed to debug |
 
@@ -107,7 +108,7 @@ On start, the core performs an OTA activation check against the cloud. For the f
 | --- | --- |
 | Home | Status bar (time / Wi-Fi / battery) + AI assistant card + settings and apps cards |
 | AI chat | Chat view ⇄ full-screen face, two modes; the chat view is bubbles plus an input bar, and the face switches between 5 expressions with the core state |
-| Apps | Skills / system status / timers / pomodoro / device control |
+| Apps | Skills / system status / timers / pomodoro / presence detection / device control |
 | Skills | Shows whether each skill is primary, secondary or off |
 | Settings | WLAN scan and connect, sound, backlight, time and timezone, about |
 

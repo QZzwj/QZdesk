@@ -242,6 +242,7 @@ rm -rf build && ./run.sh
 | 背光 | `/sys/class/backlight/backlight/brightness`（按同级 `max_brightness` 换算百分比；写 0 会保持最低一档，避免全黑） | `app/config.c` |
 | 音量 | `amixer -c 0 cset name='DAC LINEOUT Volume' <0..30>` | `app/config.c` |
 | 时区 | POSIX TZ 字符串（如 `CST-8`）：进程内 `setenv/tzset` 立即生效，并写入 `/etc/profile` 的 `export TZ=` 行 | `app/config.c` |
+| 存在检测 | `/dev/video*` 取 YUV 帧（`GREY` / `NV12` / `YUYV` 任选其一），下采样成 32×24 亮度网格做帧差；有人靠近就把背光拉到设置值并向核心报一次（核心让助手打招呼，5 分钟冷却）。没有摄像头时可用 `QZDESK_PRESENCE_FAKE=1` 造事件 | `app/face_camera.c` |
 
 `wpa_supplicant.conf` 缺 `ctrl_interface / ap_scan / update_config` 时会自动补上（只读
 rootfs 时跳过），否则 `wpa_cli` 无法连接。无线网卡、配置文件和背光节点都可用环境变量

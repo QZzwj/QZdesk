@@ -1075,37 +1075,150 @@ static void build_control_screen(void)
     lv_obj_add_event_cb(screen, control_screen_loaded, LV_EVENT_ALL, NULL);
 }
 
+/* ------------------------------------------------------------------------- *
+ * 存在检测（摄像头）
+ * ------------------------------------------------------------------------- */
+
+/* 后端与接口说明见 include/face_camera.h。这里只做两件事：
+ *
+ *   1. 「有人靠近」时把屏幕点亮（背光被调暗过就拉回来，用户调得更亮就不动）；
+ *   2. 把这件事报给核心，由它决定怎么打招呼 —— 问候语因此会和其他消息一样进
+ *      聊天记录，网页控制台也看得到，而不是只在设备上闪一下。
+ *
+ * 检测回调跑在工作线程上，所以它只置一个标记，真正的处理都在 LVGL 线程的
+ * `face_tick`（由 applet_tick 每秒调用）里。 */
+#define FACE_WAKE_BRIGHTNESS 35
+
+static lv_obj_t *face_state_label;
+static lv_obj_t *face_backend_label;
+static lv_obj_t *face_count_label;
+static lv_obj_t *face_action_caption;
+static volatile int face_presence_pending;
+static volatile int face_presence_arrived;
+
+/** 工作线程：只记标记，不要碰 LVGL 对象。 */
+static void face_presence_event(qz_presence_event_t event, void *user_data)
+{
+    (void)user_data;
+    face_presence_arrived = (event == QZ_PRESENCE_ARRIVE);
+    face_presence_pending = 1;
+}
+
+static void face_refresh(void)
+{
+    bool running = qz_face_camera_running();
+    bool available = qz_face_camera_available();
+    bool here = running && qz_face_camera_present();
+    char text[144];
+    char clock[24];
+
+    if (face_state_label) {
+        const char *state = running ? (here ? "已检测到有人" : "运行中 · 暂无人")
+                                    : (available ? "未启动" : "不可用");
+        lv_label_set_text(face_state_label, state);
+        lv_obj_set_style_text_color(face_state_label,
+                                   qz_color(here ? QZ_GREEN : QZ_TEXT_SECONDARY), 0);
+    }
+    if (face_backend_label) {
+        snprintf(text, sizeof(text), "%s · %s", qz_face_camera_backend(),
+                 qz_face_camera_status());
+        lv_label_set_text(face_backend_label, text);
+    }
+    if (face_count_label) {
+        unsigned long long stamp = qz_face_camera_last_seen();
+        if (stamp) {
+            time_t seconds = (time_t)stamp;
+            struct tm local;
+            localtime_r(&seconds, &local);
+            snprintf(clock, sizeof(clock), "%02d:%02d", local.tm_hour, local.tm_min);
+        } else {
+            snprintf(clock, sizeof(clock), "还没检测到");
+        }
+        snprintf(text, sizeof(text), "靠近 %d 次 · 最近 %s", qz_face_camera_arrivals(), clock);
+        lv_label_set_text(face_count_label, text);
+    }
+    if (face_action_caption) {
+        lv_label_set_text(face_action_caption, running ? "停止检测" : "启动检测");
+    }
+}
+
+static void face_toggle(lv_event_t *event)
+{
+    (void)event;
+    if (qz_face_camera_running()) {
+        qz_face_camera_stop();
+    } else {
+        /* 起不来时状态行会写明原因（没摄像头 / 格式不支持） */
+        qz_face_camera_start(face_presence_event, NULL);
+    }
+    face_refresh();
+}
+
+/** 每秒一次：把工作线程攒下的结果落到界面与核心上。 */
+static void face_tick(void)
+{
+    if (!face_presence_pending) return;
+    face_presence_pending = 0;
+
+    if (face_presence_arrived) {
+        int target = control_backlight > FACE_WAKE_BRIGHTNESS
+                         ? control_backlight
+                         : FACE_WAKE_BRIGHTNESS;
+        int current = qz_backlight_level();
+        if (current >= 0 && current < target) qz_backlight_set(target);
+        qzdesk_core_notify_presence(true);
+    } else {
+        qzdesk_core_notify_presence(false);
+    }
+    face_refresh();
+}
+
 static void build_face_screen(void)
 {
     lv_obj_t *screen = lv_obj_create(NULL);
     qz_style_screen(screen);
     screens[QZ_APPLET_FACE] = screen;
-    make_toolbar(screen, "人脸识别");
+    make_toolbar(screen, "存在检测");
 
-    lv_obj_t *card = make_card(screen, 64, 174);
+    lv_obj_t *card = make_card(screen, 64, 140);
     lv_obj_t *icon = qz_squircle(card, 42, QZ_ACCENT_TINT);
     lv_obj_align(icon, LV_ALIGN_TOP_LEFT, CARD_PAD, 16);
-    lv_obj_t *glyph = qz_symbol(icon, LV_SYMBOL_IMAGE, 19, qz_color(QZ_ACCENT_DARK));
+    lv_obj_t *glyph = qz_symbol(icon, LV_SYMBOL_EYE_OPEN, 19, qz_color(QZ_ACCENT_DARK));
     lv_obj_center(glyph);
 
-    lv_obj_t *title = qz_text(card, "摄像头 + 人脸识别", 15, qz_color(QZ_TEXT));
+    lv_obj_t *title = qz_text(card, "有人靠近自动亮屏", 15, qz_color(QZ_TEXT));
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, CARD_PAD + 54, 18);
-    lv_obj_t *status = qz_text(card, qz_face_camera_status(), 12, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_set_width(status, CONTENT_W - CARD_PAD * 2 - 20);
-    lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
-    lv_obj_align(status, LV_ALIGN_TOP_LEFT, CARD_PAD + 54, 47);
+
+    face_state_label = qz_text(card, "未启动", 12, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(face_state_label, LV_ALIGN_TOP_LEFT, CARD_PAD + 54, 45);
+
+    face_backend_label = qz_text(card, "", 10, qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_set_width(face_backend_label, CONTENT_W - CARD_PAD * 2 - 56);
+    lv_label_set_long_mode(face_backend_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(face_backend_label, LV_ALIGN_TOP_LEFT, CARD_PAD + 54, 67);
 
     lv_obj_t *hint = qz_text(card,
-        "设备版使用 RV1106 摄像头与 RKNN RetinaFace 后端；SDL 模拟器不访问摄像头。",
-        11, qz_color(QZ_TEXT_SECONDARY));
+        "走近时点亮屏幕并让助手打个招呼（5 分钟内只打一次）。检测走摄像头帧差，"
+        "不依赖模型；设备侧接上 RKNN 人脸模型即可升级为识别。",
+        10, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_set_width(hint, CONTENT_W - CARD_PAD * 2);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, CARD_PAD, 84);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, CARD_PAD, 92);
 
-    lv_obj_t *action = qz_button(card, qz_face_camera_available() ? "启动识别" : "模拟器不可用",
-                                 CONTENT_W - CARD_PAD * 2, 38);
-    lv_obj_align(action, LV_ALIGN_BOTTOM_MID, 0, -12);
-    if (!qz_face_camera_available()) lv_obj_add_state(action, LV_STATE_DISABLED);
+    lv_obj_t *counter = make_card(screen, 210, 50);
+    face_count_label = qz_text(counter, "靠近 0 次 · 最近还没检测到", 12,
+                               qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(face_count_label, LV_ALIGN_LEFT_MID, CARD_PAD, 0);
+
+    lv_obj_t *action = lv_button_create(screen);
+    lv_obj_set_size(action, CONTENT_W, 40);
+    lv_obj_align(action, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 268);
+    qz_style_primary_button(action);
+    face_action_caption = qz_text(action, "启动检测", 14, qz_color(QZ_TEXT_ON_ACCENT));
+    lv_obj_center(face_action_caption);
+    lv_obj_add_event_cb(action, face_toggle, LV_EVENT_CLICKED, NULL);
+
+    face_refresh();
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1118,6 +1231,7 @@ static void applet_tick(lv_timer_t *timer)
 
     (void)timer;
     pomo_tick();
+    face_tick();
     /* 提醒列表定期与核心对齐：语音刚加的、或刚响过被撤掉的一次性提醒 */
     if (--reminder_ticks <= 0) {
         reminder_ticks = REMINDER_POLL_TICKS;
@@ -1133,6 +1247,12 @@ void qz_applets_init(lv_obj_t *apps_screen)
     build_pomodoro_screen();
     build_control_screen();
     build_face_screen();
+    /* 「有人靠近自动亮屏 + 打招呼」是常驻行为，不要求用户先打开这一页：有可用
+     * 来源就自动开起来；没有（模拟器没指摄像头、板子没接）时静默略过，页面里
+     * 会写明原因。 */
+    if (qz_face_camera_available() && qz_face_camera_start(face_presence_event, NULL)) {
+        face_refresh();
+    }
     lv_timer_create(applet_tick, 1000, NULL);
 }
 

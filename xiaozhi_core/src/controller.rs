@@ -28,6 +28,15 @@ const TYPED_TURN_ECHO_WINDOW: Duration = Duration::from_secs(20);
 /// GUI 连上（或重启）时补多少条历史。逐条 UDP 发送，条数取一屏够看的量。
 const HISTORY_REPLAY_LIMIT: usize = 30;
 
+/// 「有人靠近」时喂给模型的那句话。写得像用户的指令，模型就会自然回一句问候；
+/// 它只上行去合成语音，不会作为用户气泡出现在聊天记录里（记录里留的是一条系统
+/// 提示，说明这次开口是存在检测触发的）。
+const PRESENCE_GREETING: &str = "（有人来到了设备前，请用你的口吻主动打个招呼，一句话就好）";
+
+/// 两次「靠近打招呼」之间至少隔多久。默认 5 分钟：在桌前走动不该被反复打断，
+/// 可用 `QZDESK_PRESENCE_COOLDOWN_SECS` 调整。
+const PRESENCE_COOLDOWN_SECS: u64 = 300;
+
 /// 交给核心处理的请求（区别于直接透传给服务器的原始报文）。
 ///
 /// 目前只有一件事：把文字合成成语音再发给云端。web 控制台与 GUI 走的是同一
@@ -61,6 +70,9 @@ pub struct CoreController {
     weather: WeatherService,
     /// 性能监控：设备页进来时只要一份现成快照，采样由它自己的任务负责。
     performance: PerformanceService,
+    /// 上次"有人靠近就打招呼"的时刻。有人在桌前走动不该被反复打断，所以按
+    /// `PRESENCE_COOLDOWN` 限流。
+    last_presence_greeting: Option<Instant>,
 }
 
 /// 归一化聊天文本：只保留字母和数字（各语种的文字都算字母），丢掉空白、标点
@@ -132,6 +144,7 @@ impl CoreController {
             injected_text: None,
             weather,
             performance,
+            last_presence_greeting: None,
         }
     }
 
@@ -445,6 +458,14 @@ impl CoreController {
         // 先把这条记进聊天记录：不管文字来自 GUI 输入框还是 web 控制台，两端都
         // 立刻看到同一句话，不用等合成完成。
         self.push_chat(ChatRole::User, &text).await;
+        self.inject_speech(text).await;
+    }
+
+    /// 注入一段「用户说的话」：本地合成成语音，再按麦克风同样的报文发上去。
+    ///
+    /// 聊天记录里留什么由调用方决定（文字聊天留用户气泡，存在检测留一条系统
+    /// 提示），这里只负责把声音送出去，并记下这轮文本用于识别云端回显。
+    async fn inject_speech(&mut self, text: String) {
         self.injected_text = Some((chat_text_key(&text), Instant::now()));
 
         // 合成可能要几百毫秒到数秒（取决于文本长度与 CPU），先做完再开始这一轮，
@@ -546,6 +567,39 @@ impl CoreController {
     }
 
     // 处理来自 GuiBridge 的事件
+    /// 存在检测回调（报文见 `app/face_camera.c` 与 `qzdesk_core_notify_presence`）：
+    /// 有人靠近时让助手打个招呼。
+    ///
+    /// 走的是和文字聊天同一条上行链路（合成 → 当成用户说的话发上去），所以问候语
+    /// 是模型按当时的主技能与上下文现说的，还能出声。聊天记录里留一条系统提示，
+    /// 说明这句话为什么会出现。
+    async fn handle_presence(&mut self, present: bool) {
+        if !present {
+            log::info!("存在检测：人离开了");
+            return;
+        }
+        let cooldown = std::env::var("QZDESK_PRESENCE_COOLDOWN_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(PRESENCE_COOLDOWN_SECS);
+        if let Some(last) = self.last_presence_greeting {
+            let waited = last.elapsed().as_secs();
+            if waited < cooldown {
+                log::info!(
+                    "存在检测：有人靠近，但距上次打招呼只过了 {} 秒（冷却 {} 秒），先不打扰",
+                    waited,
+                    cooldown
+                );
+                return;
+            }
+        }
+        self.last_presence_greeting = Some(Instant::now());
+        log::info!("存在检测：有人靠近，让助手打个招呼");
+        self.push_chat(ChatRole::System, "检测到有人靠近，正在打招呼")
+            .await;
+        self.inject_speech(PRESENCE_GREETING.to_string()).await;
+    }
+
     pub async fn handle_gui_event(&mut self, event: GuiEvent) {
         let GuiEvent::Message(msg) = event;
         log::info!("Received Message from GUI: {}", msg);
@@ -564,6 +618,18 @@ impl CoreController {
                 if let Err(e) = self.gui_bridge.send_message(&response).await {
                     log::error!("Failed to send GUI status response: {}", e);
                 }
+                return;
+            }
+
+            // 存在检测：有人靠近 / 离开。界面侧的摄像头检测（app/face_camera.c）只
+            // 报事实，怎么回应由核心决定 —— 亮屏是界面自己的事（背光在它那里），
+            // 这里负责让助手打个招呼。
+            if value.get("type").and_then(|item| item.as_str()) == Some("presence") {
+                let present = value
+                    .get("present")
+                    .and_then(|item| item.as_bool())
+                    .unwrap_or(false);
+                self.handle_presence(present).await;
                 return;
             }
 

@@ -174,6 +174,17 @@ bool qzdesk_core_request_history(void);
  * toast, not by this return value.
  */
 bool qzdesk_core_send_text(const char *text);
+
+/**
+ * Tell the core that someone arrived in front of the device (or left).
+ *
+ * Sends `{"type":"presence","present":true|false}`. The core decides what to do
+ * with it — by default it wakes the screen and has the assistant say hello, with
+ * a cooldown so people walking past do not trigger it twice. Doing it here keeps
+ * the greeting in the same chat record the web console shows.
+ */
+bool qzdesk_core_notify_presence(bool present);
+
 void qzdesk_core_poll(qzdesk_core_event_cb_t callback, void *user_data);
 /**
  * Register an extra event handler.

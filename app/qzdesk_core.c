@@ -364,6 +364,14 @@ bool qzdesk_core_send_text(const char *text)
     return send_json(json);
 }
 
+bool qzdesk_core_notify_presence(bool present)
+{
+    /* 有人靠近 / 离开。界面不自己播报，交给核心决定要不要让助手打个招呼 ——
+     * 这样问候语会和其他消息一样进聊天记录，网页控制台也看得到。 */
+    return send_json(present ? "{\"type\":\"presence\",\"present\":true}"
+                             : "{\"type\":\"presence\",\"present\":false}");
+}
+
 static void dispatch_message(const char *json, qzdesk_core_event_cb_t callback, void *user_data)
 {
     char type[24] = "";
