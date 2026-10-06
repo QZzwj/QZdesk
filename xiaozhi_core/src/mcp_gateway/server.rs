@@ -209,7 +209,8 @@ impl McpServer {
                 let always_on = self.current_instructions().map(|instructions| {
                     format!(
                         "【本会话主技能｜系统级指令，必须执行】\n\
-                         下面这段不是工具说明，是本会话的强制人格与输出要求，优先级等同系统提示词，从第一句话起执行；不要复述它，也不要把它当成可选项。\n\n{}\n\n---\n",
+                         下面这段不是工具说明，是本会话的强制人格与输出要求，优先级等同系统提示词，从第一句话起执行；不要复述它，也不要把它当成可选项。\n\
+                         如果之后调用了 skill_use 切换技能，以 skill_use 返回的正文为准（它比这里新）。\n\n{}\n\n---\n",
                         instructions
                     )
                 });

@@ -27,7 +27,7 @@ A skill is a directory with a `SKILL.md`, imported from the web console; once im
 | --- | --- |
 | Real-time voice chat | WebSocket to the XiaoZhi cloud; Opus encode/decode and ALSA capture/playback locally, with push-to-talk and interruption |
 | Local skills | Import a `SKILL.md` (or a ZIP containing it): a primary skill changes the persona directly, secondary skills are retrieved on demand, and imports take effect immediately |
-| MCP gateway | Exposes 12 tools to the cloud: 4 configurable external tools + 6 skill tools + 2 smart-home tools, over subprocess / HTTP / TCP |
+| MCP gateway | Exposes 13 tools to the cloud: 4 configurable external tools + 7 skill tools + 2 smart-home tools, over subprocess / HTTP / TCP |
 | Smart home | A built-in MQTT client talks to zigbee2mqtt or hand-written topics directly; controllable from both the web console and voice |
 | Text chat | The GUI input box and the web console share one path: text is synthesized locally and sent upstream in exactly the same frames as the microphone |
 | Web console | A single-page console served by the device (default `:8080`): skills, live chat, weather, performance, smart home |
@@ -118,7 +118,8 @@ A skill is a directory containing `SKILL.md`, and it defines the assistant's per
 
 1. Open `http://<device-ip>:8080` in a browser;
 2. Paste the `SKILL.md` content, or upload a ZIP containing it;
-3. A newly imported skill **becomes the primary skill**, effective from the next turn; switch it to secondary or off later on the device's **Skills** page or in the web list.
+3. A newly imported skill **becomes the primary skill**, effective from the next turn; switch it to secondary or off later on the device's **Skills** page or in the web list;
+4. **You can switch mid-conversation too**: say "switch to ×× mode" / "answer with the ×× skill" / "drop that persona" and the assistant calls `skill_use` to swap the primary skill on the spot (the old one becomes secondary), with the body delivered in the tool result — **no session rebuild, no dropped connection**.
 
 | Role | Behaviour |
 | --- | --- |
@@ -186,7 +187,7 @@ Every capability of the web console is served by these JSON endpoints (`xiaozhi_
 
 ## MCP Tools
 
-The core exposes 12 MCP tools to the cloud (`tools/list`), registered from the `[mcp]` section of `config.toml` plus built-in modules:
+The core exposes 13 MCP tools to the cloud (`tools/list`), registered from the `[mcp]` section of `config.toml` plus built-in modules:
 
 | Tool | Source | Description |
 | --- | --- | --- |
@@ -195,6 +196,7 @@ The core exposes 12 MCP tools to the cloud (`tools/list`), registered from the `
 | `set_timer` | built-in | Create a reminder; when it fires the notice goes into the chat record, visible on the device and the web page |
 | `pomodoro` | built-in | Pomodoro (focus / break cycles, reports the time left) |
 | `skill_list` / `skill_search` / `skill_read` | built-in | List / search / read local skills |
+| `skill_use` | built-in | Switch skills inside the current session: say "switch to TCM mode" and the body arrives with the tool result, no session rebuild |
 | `skill_status` / `skill_validate` / `skill_reload` | built-in | Skill diagnostics, validation and rescan |
 | `device_list` / `device_control` | built-in | Smart-home device listing and control |
 

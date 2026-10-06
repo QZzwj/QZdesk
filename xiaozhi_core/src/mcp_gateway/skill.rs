@@ -73,7 +73,7 @@ fn default_user_skill_root() -> PathBuf {
 /// A Skill is always retained in the local pool after installation.  The
 /// selection below only controls whether the cloud agent may use it, and how
 /// it is loaded into a conversation.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillRole {
     #[default]
@@ -161,6 +161,10 @@ struct SkillIndex {
 #[derive(Clone)]
 pub struct SkillManager {
     roots: Vec<PathBuf>,
+    /// 角色选择的落盘位置。`None` = 按安装根目录推（生产路径，可被
+    /// `XIAOZHI_SKILL_STATE_FILE` 覆盖）；测试里显式给一个临时文件，
+    /// 免得测试把用户真实的 `skill_state.json` 覆盖掉。
+    state_file: Option<PathBuf>,
     index: Arc<Mutex<SkillIndex>>,
 }
 
@@ -190,6 +194,20 @@ impl SkillManager {
         }
         Self {
             roots: unique_roots,
+            state_file: None,
+            index: Arc::new(Mutex::new(SkillIndex::default())),
+        }
+    }
+
+    /// 只用于测试：技能目录与状态文件都落在给定的临时目录里。
+    ///
+    /// 不去改进程级环境变量（并行跑起来不稳），也不会碰到用户真实的
+    /// `skill_state.json` —— 测试改角色曾经真把开发机上的选择写坏过。
+    #[cfg(test)]
+    pub(crate) fn for_test_dir(dir: PathBuf) -> Self {
+        Self {
+            roots: vec![dir.clone()],
+            state_file: Some(dir.join("skill_state.json")),
             index: Arc::new(Mutex::new(SkillIndex::default())),
         }
     }
@@ -262,6 +280,9 @@ impl SkillManager {
     }
 
     fn state_path(&self) -> PathBuf {
+        if let Some(path) = &self.state_file {
+            return path.clone();
+        }
         if let Ok(path) = env::var("XIAOZHI_SKILL_STATE_FILE") {
             return PathBuf::from(path);
         }
@@ -673,6 +694,27 @@ impl SkillManager {
         }
         let mut state = self.load_state();
         state.skills.insert(name.to_string(), SkillSelection { role });
+        self.save_state(&state)
+    }
+
+    /// 把一个 Skill 设成**唯一**主技能（原来的主技能降为备用）。
+    ///
+    /// 语音说「换成中医模式」走这里：一次写盘生效，不会留下两个主技能同时注入。
+    /// 与网页控制台逐条改的选择是同一份状态，所以改完网页上也看得到。
+    pub(crate) fn switch_primary(&self, name: &str) -> Result<(), String> {
+        validate_skill_name(name)?;
+        let discovered: Vec<String> = self
+            .skill_dirs()
+            .into_iter()
+            .map(|(dir_name, _)| dir_name)
+            .collect();
+        if !discovered.iter().any(|dir_name| dir_name == name) {
+            return Err(format!("Skill '{}' 不存在", name));
+        }
+        let mut state = self.load_state();
+        for (dir_name, role) in primary_switch_plan(&state, &discovered, name) {
+            state.skills.insert(dir_name, SkillSelection { role });
+        }
         self.save_state(&state)
     }
 
@@ -1442,6 +1484,114 @@ impl McpTool for SkillReadTool {
     }
 }
 
+/// 会话里切换技能：用户说「换成中医模式」「用查资料那个技能回答」「别用这个人设了」时调用。
+///
+/// 以前换主技能只能去网页控制台改，而改完核心会**重建会话**（WebSocket 断线重连）
+/// 才能把新的正文送上去 —— 换一句话的人设要付一次重连的代价，对话也断在那里。
+/// 这个工具把整件事收进当前会话：
+///
+///   1. 落盘角色：与网页控制台改的是同一份选择，重连或重启后依然生效；
+///   2. 把切换后的技能正文**直接放进返回值**，这一轮就生效，不必等重连；
+///   3. 设为主技能时把原主技能降为备用（见 `primary_switch_plan`）—— 切换而不是
+///      叠加，两套人设同时注入会互相打架。
+pub struct SkillUseTool {
+    manager: SkillManager,
+}
+
+impl SkillUseTool {
+    pub fn new(manager: SkillManager) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl McpTool for SkillUseTool {
+    fn name(&self) -> &str {
+        "skill_use"
+    }
+
+    fn description(&self) -> &str {
+        "在当前会话里切换正在使用的 Skill（人设 / 知识库），不需要重建会话、不会掉线。\
+         用户说「换成××模式」「用××技能回答」「别用这个人设了」「把它改成备用」时调用。\
+         name 是技能名（先用 skill_list 查准确名字）；role 默认 primary —— 设为主技能，\
+         原来的主技能自动降为备用；也可以给 secondary 或 none。返回的 instructions 是\
+         切换后当前生效的主技能正文，以它为准。"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "description": "Skill 目录名，先用 skill_list 查" },
+                "role": {
+                    "type": "string",
+                    "enum": ["primary", "secondary", "none"],
+                    "description": "切换成什么角色，默认 primary"
+                }
+            }
+        })
+    }
+
+    async fn call(&self, params: Value) -> Result<Value, String> {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Ok(json!({ "status": "error", "message": "name 不能为空" }));
+        }
+        let role_value = params
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("primary")
+            .trim();
+        let role = match SkillRole::parse(role_value) {
+            Ok(role) => role,
+            Err(message) => return Ok(json!({ "status": "error", "message": message })),
+        };
+
+        let effect = match role {
+            SkillRole::Primary => self.manager.switch_primary(&name),
+            other => self.manager.set_role(&name, other),
+        };
+        if let Err(message) = effect {
+            /* 名字写错是最常见的失败：把可用列表一起带回去，模型下一轮就能改对，
+             * 不用再单独调一次 skill_list。 */
+            return Ok(json!({
+                "status": "error",
+                "message": message,
+                "skills": self.manager.list_for_model(),
+            }));
+        }
+
+        let label = match role {
+            SkillRole::Primary => "主技能（正文已随本次返回给你，现在起按它回答）",
+            SkillRole::Secondary => "备用（不占上下文，需要时用 skill_search / skill_read 检索）",
+            SkillRole::None => "关闭（不再参与对话）",
+        };
+        log::info!(
+            "skill_use: {} -> {}（会话内直接生效，未重建会话）",
+            name,
+            role.as_str()
+        );
+        Ok(json!({
+            "status": "ok",
+            "skill": name,
+            "role": role.as_str(),
+            "message": format!("已切换：{} 现在是{}", name, label),
+            /* 切换后的完整指令块（主技能正文 + 备用目录 + 使用规则）。它比会话开始时
+             * 随 skill_list 描述注入的那一份新，所以必须把优先级写清楚，否则模型会
+             * 同时看到两套人设。 */
+            "instructions": self.manager.instructions().unwrap_or_default(),
+            "precedence": "上面的 instructions 是本会话此刻生效的主技能与备用目录，\
+                           优先级高于会话开始时注入的那一份：以它为准，不要复述它，直接按它回答。",
+        }))
+    }
+}
+
 /// 诊断：现在的 Skill 配置到底是什么、有没有真的生效。
 ///
 /// 之前排查「主技能没完全生效」「备用技能没被读取」只能翻日志；这个工具让模型
@@ -1640,6 +1790,32 @@ fn role_for_newly_installed(
     Some(SkillRole::Primary)
 }
 
+/// 「换成某个技能」时要写下的角色变化：目标升为主技能，原来的主技能降为备用。
+///
+/// 是**切换**而不是叠加：两个主技能会同时把正文注入同一个会话，两套人设互相打架，
+/// 用户说「换成中医模式」时显然不想要这个结果。用户显式关掉的技能不在计划里 ——
+/// 换主技能不该顺手把谁打开。
+///
+/// 纯函数，规则直接可测；`discovered` 传磁盘上扫到的技能名（与
+/// `build_instructions` 看到的是同一批），免得动到已经不存在的条目。
+fn primary_switch_plan(
+    state: &SkillState,
+    discovered: &[String],
+    name: &str,
+) -> Vec<(String, SkillRole)> {
+    let mut plan = Vec::new();
+    for dir_name in discovered {
+        if dir_name == name {
+            continue;
+        }
+        if SkillManager::selection(state, dir_name).role == SkillRole::Primary {
+            plan.push((dir_name.clone(), SkillRole::Secondary));
+        }
+    }
+    plan.push((name.to_string(), SkillRole::Primary));
+    plan
+}
+
 /// 注入给模型的头一段：技能规则的硬约束。
 ///
 /// 抽成独立函数是为了能被测试盯住——这几条是「AI 是否真的遵守 Skill」的兜底：
@@ -1700,6 +1876,95 @@ mod tests {
             },
         );
         assert_eq!(role_for_newly_installed(&state, "tcm", false), None);
+    }
+
+    #[test]
+    fn switching_a_skill_replaces_the_primary_instead_of_stacking() {
+        let mut state = SkillState::default();
+        state.skills.insert(
+            "hqq".to_string(),
+            SkillSelection {
+                role: SkillRole::Primary,
+            },
+        );
+        state.skills.insert(
+            "tcm".to_string(),
+            SkillSelection {
+                role: SkillRole::Secondary,
+            },
+        );
+        state.skills.insert(
+            "closed".to_string(),
+            SkillSelection {
+                role: SkillRole::None,
+            },
+        );
+        let discovered: Vec<String> = ["hqq", "tcm", "closed"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        let plan = primary_switch_plan(&state, &discovered, "tcm");
+        assert!(
+            plan.contains(&("hqq".to_string(), SkillRole::Secondary)),
+            "原主技能要降为备用，否则两套人设会同时注入"
+        );
+        assert!(plan.contains(&("tcm".to_string(), SkillRole::Primary)));
+        assert!(
+            !plan.iter().any(|(name, _)| name == "closed"),
+            "用户显式关掉的技能不该被顺手打开"
+        );
+
+        // 当前没有主技能时也一样：只有目标升为主技能
+        let plan = primary_switch_plan(&SkillState::default(), &discovered, "hqq");
+        assert_eq!(plan, vec![("hqq".to_string(), SkillRole::Primary)]);
+    }
+
+    /// `skill_use` 真正要保证的三件事：正文随返回值下发（不必等重连）、选择落盘、
+    /// 原主技能降级（不叠加）。
+    #[tokio::test]
+    async fn skill_use_switches_the_primary_and_hands_back_its_body() {
+        let dir = env::temp_dir().join(format!("qzdesk-skill-use-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("hqq")).unwrap();
+        fs::create_dir_all(dir.join("tcm")).unwrap();
+        fs::write(dir.join("hqq").join("SKILL.md"), "# HQQ\n你是 HQQ 模式。").unwrap();
+        fs::write(dir.join("tcm").join("SKILL.md"), "# 中医\n你是中医模式。").unwrap();
+
+        let manager = SkillManager::for_test_dir(dir.clone());
+        manager.set_role("hqq", SkillRole::Primary).unwrap();
+        manager.set_role("tcm", SkillRole::Secondary).unwrap();
+
+        let tool = SkillUseTool::new(manager.clone());
+        let switched = tool.call(json!({ "name": "tcm" })).await.unwrap();
+        assert_eq!(switched["status"], "ok");
+        assert_eq!(switched["role"], "primary");
+        // 正文就在返回值里：模型这一轮就能按它回答，不需要重建会话
+        assert!(
+            switched["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("你是中医模式。"),
+            "切换后的主技能正文应当随工具结果下发"
+        );
+
+        // 选择落盘了：重连 / 重启后依然是这个选择
+        let state = manager.load_state();
+        assert_eq!(
+            state.skills.get("tcm").map(|item| item.role),
+            Some(SkillRole::Primary)
+        );
+        assert_eq!(
+            state.skills.get("hqq").map(|item| item.role),
+            Some(SkillRole::Secondary)
+        );
+
+        // 名字写错时把可用列表带回去，模型下一轮就能改对
+        let wrong = tool.call(json!({ "name": "不存在的技能" })).await.unwrap();
+        assert_eq!(wrong["status"], "error");
+        assert!(!wrong["skills"].is_null(), "要顺带告诉模型有哪些技能可选");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn chunk(title: &str, text: &str) -> IndexedChunk {

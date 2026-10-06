@@ -11,7 +11,7 @@ pub use server::McpServer;
 use tool::DynamicTool;
 use skill::{
     SkillListTool, SkillManager, SkillReadTool, SkillReloadTool, SkillSearchTool, SkillStatusTool,
-    SkillValidateTool,
+    SkillUseTool, SkillValidateTool,
 };
 
 pub fn init_mcp_gateway(configs: Vec<ExternalToolConfig>, skill_manager: SkillManager) -> McpServer {
@@ -29,12 +29,14 @@ pub fn init_mcp_gateway(configs: Vec<ExternalToolConfig>, skill_manager: SkillMa
     server.register_tool(Box::new(SkillListTool::new(skill_manager.clone())));
     server.register_tool(Box::new(SkillSearchTool::new(skill_manager.clone())));
     server.register_tool(Box::new(SkillReadTool::new(skill_manager.clone())));
+    // 会话内切换技能（「换成中医模式」）：正文随工具返回值下发，不用重建会话
+    server.register_tool(Box::new(SkillUseTool::new(skill_manager.clone())));
     // 诊断三件套：出问题时能用一句话问清楚「技能到底有没有生效」
     server.register_tool(Box::new(SkillStatusTool::new(skill_manager.clone())));
     server.register_tool(Box::new(SkillValidateTool::new(skill_manager.clone())));
     server.register_tool(Box::new(SkillReloadTool::new(skill_manager)));
     log::info!(
-        "Registered local Skill tools: skill_list, skill_search, skill_read, skill_status, skill_validate, skill_reload"
+        "Registered local Skill tools: skill_list, skill_search, skill_read, skill_use, skill_status, skill_validate, skill_reload"
     );
     server
 }
