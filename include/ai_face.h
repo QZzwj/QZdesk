@@ -5,11 +5,14 @@
 
 /** Expression states required by the assistant page. */
 typedef enum {
-    QZ_FACE_IDLE = 0, /* 待机 */
-    QZ_FACE_SPEAKING, /* 说话 */
-    QZ_FACE_THINKING, /* 思考 */
-    QZ_FACE_HAPPY,    /* 开心 */
-    QZ_FACE_CONFUSED, /* 困惑 */
+    QZ_FACE_IDLE = 0,   /* 待机 */
+    QZ_FACE_SPEAKING,   /* 说话 */
+    QZ_FACE_THINKING,   /* 思考 */
+    QZ_FACE_HAPPY,      /* 开心 */
+    QZ_FACE_CONFUSED,   /* 困惑 */
+    QZ_FACE_SURPRISED,  /* 惊讶 */
+    QZ_FACE_SLEEPY,     /* 困倦 */
+    QZ_FACE_WINK,       /* 眨眼逗一下 */
     QZ_FACE_STATE_COUNT,
 } qz_face_state_t;
 

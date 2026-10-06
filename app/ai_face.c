@@ -77,6 +77,10 @@ typedef struct {
     int32_t body_dy;
     int32_t body_dx;
     int32_t ear_dy;
+    int32_t wink;      /* 右眼额外闭合量：1000 = 单眼闭（眨眼逗一下） */
+    int32_t cross;     /* 瞳孔对眼量：正数向内 */
+    int32_t squash;    /* 头的挤压拉伸：正数=变高变窄，负数=变矮变宽 */
+    int32_t sparkle;   /* 星光装饰的不透明度 0..255 */
 } qz_face_params_t;
 
 /* 参数通道：每个循环/一次性动效挂在一个唯一的 var 上，互不干扰。
@@ -88,6 +92,7 @@ enum {
     QZ_CH_BODY_X,
     QZ_CH_LOOK_X,
     QZ_CH_LOOK_Y,
+    QZ_CH_SPARKLE,
     QZ_CH_COUNT
 };
 
@@ -107,6 +112,7 @@ typedef struct {
     lv_obj_t *brow[2];
     lv_obj_t *mouth;
     lv_obj_t *cheek[2];
+    lv_obj_t *sparkle[4];  /* 两处星光，每处一根竖条 + 一根横条 */
     lv_obj_t *dots[3];
     lv_timer_t *blink_timer;
     lv_timer_t *look_timer;
@@ -120,14 +126,18 @@ typedef struct {
 } qz_face_t;
 
 /* 各表情的参数。数值都能在屏幕上解释：eye_open 1000=全开、640=眯眼笑，
- * brow_* 负数=上扬，mouth_w/h 一起决定"闭嘴 / 咧开 / 张开 / o 形"。 */
+ * brow_* 负数=上扬，mouth_w/h 一起决定"闭嘴 / 咧开 / 张开 / o 形"，
+ * ear_dy 负数=耳朵竖起、正数=耷拉，wink 是右眼额外闭合（眨眼逗一下用）。 */
 static const qz_face_params_t k_state[QZ_FACE_STATE_COUNT] = {
-    /*               eye_open look_x look_y brow_l brow_r mouth_w mouth_h cheek body_dy body_dx ear_dy */
-    [QZ_FACE_IDLE]     = { 1000,     6,     4,    -6,    -6,    118,     32,     0,      0,      0,     0 },
-    [QZ_FACE_SPEAKING] = { 1000,     3,     0,   -14,   -14,    134,    260,     0,      0,      0,     0 },
-    [QZ_FACE_THINKING] = {  860,    26,   -18,   -46,    -8,     78,     34,     0,      0,      0,     6 },
-    [QZ_FACE_HAPPY]    = {  640,     0,    -4,   -52,   -52,    210,    120,   130,      0,      0,   -48 },
-    [QZ_FACE_CONFUSED] = { 1000,   -24,     8,    10,   -64,     70,     60,    24,      0,    -18,     8 },
+    /*  eye_open look_x look_y brow_l brow_r mouth_w mouth_h cheek body_dy body_dx ear_dy wink cross squash sparkle */
+    [QZ_FACE_IDLE]      = { 1000,    6,    4,   -6,   -6,  118,  32,   0,   0,   0,   0,   0,  0,   0,   0 },
+    [QZ_FACE_SPEAKING]  = { 1000,    3,    0,  -14,  -14,  134, 260,   0,   0,   0,   0,   0,  0,   0,   0 },
+    [QZ_FACE_THINKING]  = {  860,   26,  -18,  -46,   -8,   78,  34,   0,   0,   0,   6,   0,  0,   0,   0 },
+    [QZ_FACE_HAPPY]     = {  640,    0,   -4,  -52,  -52,  210, 120, 130,   0,   0, -48,   0,  0,  40, 210 },
+    [QZ_FACE_CONFUSED]  = { 1000,  -24,    8,   10,  -64,   70,  60,  24,   0, -18,   8,   0,  0,   0,   0 },
+    [QZ_FACE_SURPRISED] = { 1000,   -4,    4,  -70,  -70,   76,  76,  40,   0,   0, -60,   0,  0, -30,   0 },
+    [QZ_FACE_SLEEPY]    = {  260,    0,    6,    8,    8,   60,  34,  60,   0,   0,  40,   0,  0,   0,   0 },
+    [QZ_FACE_WINK]      = { 1000,   10,   -6,  -30,   -6,  150,  90, 120,   0,   0, -20, 960,  0,   0, 190 },
 };
 
 /* ------------------------------------------------------------------------- *
@@ -163,9 +173,6 @@ static void anim_opa(void *var, int32_t value);
 static void apply_params(qz_face_t *face)
 {
     const qz_face_params_t *p = &face->p;
-    int32_t eye_h = pm(face, EYE_H) * p->eye_open / 1000;
-
-    if (eye_h < 2) eye_h = 2;
 
     lv_obj_set_style_translate_x(face->root, pm(face, p->body_dx), 0);
     lv_obj_set_style_translate_y(face->root, pm(face, p->body_dy), 0);
@@ -176,19 +183,24 @@ static void apply_params(qz_face_t *face)
         place(face->ear[i], pm(face, 500 + side * EAR_DX), pm(face, EAR_Y + p->ear_dy),
               pm(face, EAR_W), pm(face, EAR_H));
     }
-    place(face->head, pm(face, 500), pm(face, HEAD_Y), pm(face, HEAD_W), pm(face, HEAD_H));
+    /* 挤压拉伸：往高里拉就同时收窄，体积感才不塌 */
+    place(face->head, pm(face, 500), pm(face, HEAD_Y),
+          pm(face, HEAD_W) - pm(face, p->squash) / 2, pm(face, HEAD_H) + pm(face, p->squash));
 
     for (int i = 0; i < 2; i++) {
         int32_t side = (i == 0) ? -1 : 1;
         int32_t eye_cx = pm(face, 500 + side * EYE_DX);
         int32_t eye_cy = pm(face, EYE_Y);
+        /* wink 只作用在右眼：眨眼逗一下、单眼闭 */
+        int32_t open_pm = (i == 1) ? p->eye_open * (1000 - p->wink) / 1000 : p->eye_open;
+        int32_t eye_h = pm(face, EYE_H) * open_pm / 1000;
 
+        if (eye_h < 2) eye_h = 2;
         place(face->eye[i], eye_cx, eye_cy, pm(face, EYE_W), eye_h);
-        /* 瞳孔：眼睛快合上时先消失，避免留一条白缝 */
-        /* 瞳孔行程只在眼睛内（look_* 的幅度就是这么定的），并略微偏上像高光 */
-        place(face->pupil[i], eye_cx + pm(face, p->look_x), eye_cy + pm(face, p->look_y) - pm(face, 20),
-              pm(face, PUPIL), pm(face, PUPIL));
-        lv_obj_set_style_opa(face->pupil[i], p->eye_open < 420 ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+        /* 瞳孔：眼睛快合上时先消失，避免留一条白缝；cross 让两眼向内（对眼） */
+        place(face->pupil[i], eye_cx + pm(face, p->look_x) + pm(face, side * p->cross),
+              eye_cy + pm(face, p->look_y) - pm(face, 20), pm(face, PUPIL), pm(face, PUPIL));
+        lv_obj_set_style_opa(face->pupil[i], open_pm < 420 ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
         /* 眉毛跟着视线走一点，看起来是"长在脸上"的 */
         place(face->brow[i], eye_cx + pm(face, p->look_x * 2 / 3),
               pm(face, BROW_Y + (i == 0 ? p->brow_l : p->brow_r)),
@@ -201,6 +213,19 @@ static void apply_params(qz_face_t *face)
         place(face->cheek[i], pm(face, 500 + side * CHEEK_DX), pm(face, CHEEK_Y),
               pm(face, CHEEK_W), pm(face, CHEEK_W));
         lv_obj_set_style_opa(face->cheek[i], (lv_opa_t)p->cheek, 0);
+    }
+
+    /* 星光：两处位置各一个"+"（竖条 + 横条），只在开心/眨眼这类表情里亮 */
+    for (int i = 0; i < 2; i++) {
+        int32_t cx = pm(face, i == 0 ? 240 : 800);
+        int32_t cy = pm(face, i == 0 ? 110 : 168);
+        int32_t len = pm(face, i == 0 ? 112 : 82);
+        int32_t thick = pm(face, i == 0 ? 24 : 18);
+
+        place(face->sparkle[i * 2], cx, cy, thick, len);
+        place(face->sparkle[i * 2 + 1], cx, cy, len, thick);
+        lv_obj_set_style_opa(face->sparkle[i * 2], (lv_opa_t)p->sparkle, 0);
+        lv_obj_set_style_opa(face->sparkle[i * 2 + 1], (lv_opa_t)p->sparkle, 0);
     }
 }
 
@@ -251,6 +276,7 @@ static int32_t param_ref(const qz_face_t *face, int32_t kind)
         case QZ_CH_BODY_X: return face->p.body_dx;
         case QZ_CH_LOOK_X: return face->p.look_x;
         case QZ_CH_LOOK_Y: return face->p.look_y;
+        case QZ_CH_SPARKLE: return face->p.sparkle;
         default: return 0;
     }
 }
@@ -268,6 +294,7 @@ static void anim_channel(void *var, int32_t value)
         case QZ_CH_BODY_X: face->p.body_dx = value; break;
         case QZ_CH_LOOK_X: face->p.look_x = value; break;
         case QZ_CH_LOOK_Y: face->p.look_y = value; break;
+        case QZ_CH_SPARKLE: face->p.sparkle = value; break;
         default: break;
     }
     apply_params(face);
@@ -351,12 +378,16 @@ static void blink_tick(lv_timer_t *timer)
     lv_timer_set_period(timer, rand_between(QZ_BLINK_MIN_MS, QZ_BLINK_MAX_MS));
 }
 
-/** 开发用：QZDESK_FACE_CYCLE=1 时逐个轮播表情，便于在屏幕上核对参数。 */
+/** 开发用：QZDESK_FACE_CYCLE=1 时逐个轮播表情，便于在屏幕上核对参数。
+ *  值可以给停留毫秒数（QZDESK_FACE_CYCLE=3000），并且每切一次都会把状态号打到
+ *  stderr —— 抓帧脚本可以据此按状态名存图，不用猜时间点。 */
 static void cycle_tick(lv_timer_t *timer)
 {
     qz_face_t *face = (qz_face_t *)lv_timer_get_user_data(timer);
+    qz_face_state_t next = (qz_face_state_t)((face->state + 1) % QZ_FACE_STATE_COUNT);
 
-    qz_face_set_state(face->root, (qz_face_state_t)((face->state + 1) % QZ_FACE_STATE_COUNT));
+    qz_face_set_state(face->root, next);
+    fprintf(stderr, "face cycle -> %d\n", (int)next);
 }
 
 static void look_tick(lv_timer_t *timer)
@@ -408,10 +439,27 @@ static void begin_loops(qz_face_t *face)
 
         case QZ_FACE_HAPPY:
             channel_loop(face, QZ_CH_BODY_Y, -40, 460, delay);
+            channel_loop(face, QZ_CH_SPARKLE, 90, 760, delay);   /* 星光一闪一闪 */
+            break;
+
+        case QZ_FACE_WINK:
+            channel_loop(face, QZ_CH_BODY_Y, -26, 620, delay);
+            channel_loop(face, QZ_CH_SPARKLE, 90, 700, delay);
+            break;
+
+        case QZ_FACE_SURPRISED:
+            channel_loop(face, QZ_CH_BODY_Y, -22, 160, delay);   /* 受惊的那种小抖 */
+            break;
+
+        case QZ_FACE_SLEEPY:
+            channel_loop(face, QZ_CH_BODY_Y, -30, 3400, delay);  /* 缓慢点头 */
             break;
 
         case QZ_FACE_CONFUSED:
             channel_loop(face, QZ_CH_BODY_X, 18, 1200, delay);
+            /* 瞳孔走 Lissajous：两轴周期不同，看起来像想不明白地打转 */
+            channel_loop(face, QZ_CH_LOOK_X, 26, 1500, delay);
+            channel_loop(face, QZ_CH_LOOK_Y, 18, 1000, delay);
             break;
 
         case QZ_FACE_IDLE:
@@ -503,6 +551,11 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t size)
     }
     face->mouth = shape(face->root, QZ_INK, LV_OPA_COVER);
 
+    /* 星光装饰：两处位置各一个"+"（竖条 + 横条），初始全透明 */
+    for (int i = 0; i < 4; i++) {
+        face->sparkle[i] = shape(face->root, QZ_ACCENT, LV_OPA_TRANSP);
+    }
+
     /* 思考气泡：画在右上角，只在 thinking 时脉冲 */
     for (int i = 0; i < 3; i++) {
         lv_obj_t *dot = shape(face->root, QZ_FACE_BUBBLE, LV_OPA_COVER);
@@ -521,8 +574,11 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t size)
 
     face->blink_timer = lv_timer_create(blink_tick, rand_between(QZ_BLINK_MIN_MS, QZ_BLINK_MAX_MS), face);
     face->look_timer = lv_timer_create(look_tick, rand_between(QZ_LOOK_MIN_MS, QZ_LOOK_MAX_MS), face);
-    if (getenv("QZDESK_FACE_CYCLE")) {
-        lv_timer_create(cycle_tick, 1800, face);
+    const char *cycle = getenv("QZDESK_FACE_CYCLE");
+    if (cycle && cycle[0] != '\0') {
+        int32_t dwell = atoi(cycle);
+        if (dwell <= 0) dwell = 1800;
+        lv_timer_create(cycle_tick, (uint32_t)dwell, face);
     }
     begin_loops(face);
     return face->root;
@@ -538,6 +594,9 @@ const char *qz_face_state_text(qz_face_state_t state)
         case QZ_FACE_THINKING: return "让我想一想…";
         case QZ_FACE_HAPPY: return "好开心见到你！";
         case QZ_FACE_CONFUSED: return "我好像没听懂…";
+        case QZ_FACE_SURPRISED: return "咦？";
+        case QZ_FACE_SLEEPY: return "我有点困了…";
+        case QZ_FACE_WINK: return "嘿，我在这儿～";
         case QZ_FACE_IDLE:
         default: return "我在听你说～";
     }
