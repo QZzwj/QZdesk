@@ -705,7 +705,10 @@ static qz_icon_t qz_symbol_icon(const char *symbol)
 
 lv_obj_t *qz_icon_image(lv_obj_t *parent, qz_icon_t icon, int32_t px, lv_color_t color)
 {
-    const lv_image_dsc_t *glyph = qz_icon(icon, (int)px);
+    /* 传进来的是设计稿尺寸：先缩到当前面板再挑素材（素材是"不小于请求尺寸里
+     * 最小的一档"，见 qz_icon）。 */
+    int32_t want = qz_scale_px(px);
+    const lv_image_dsc_t *glyph = qz_icon(icon, (int)want);
     lv_obj_t *image;
     if (!glyph) return NULL;
 
@@ -714,6 +717,14 @@ lv_obj_t *qz_icon_image(lv_obj_t *parent, qz_icon_t icon, int32_t px, lv_color_t
     /* A8 蒙版 + 全量重着色：颜色就是主题色，浅色/深色共用一份资源 */
     lv_obj_set_style_image_recolor(image, color, 0);
     lv_obj_set_style_image_recolor_opa(image, LV_OPA_COVER, 0);
+#if QZ_SCALE_NUM < QZ_SCALE_DEN
+    /* 面板比设计稿小：素材最小一档只有 14px，仍会比周围的字与留白大出一截，
+     * 于是按设计尺寸反算一个 zoom（`lv_image_set_scale` 会被 scale.h 再缩到
+     * 面板），把它压到想要的大小。480 基准下这段不参与编译，行为与以前一致。 */
+    if (px > 0 && (int32_t)glyph->header.w > want) {
+        lv_image_set_scale(image, (uint32_t)(256 * px / glyph->header.w));
+    }
+#endif
     lv_obj_clear_flag(image, LV_OBJ_FLAG_CLICKABLE);
     return image;
 }

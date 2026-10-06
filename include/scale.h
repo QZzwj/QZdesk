@@ -61,6 +61,18 @@ static inline lv_coord_t qz_scale_px(int32_t value)
     return (lv_coord_t)(scaled / QZ_SCALE_DEN);
 }
 
+/**
+ * 图片**内容**缩放：LVGL 的 zoom 以 256 为 1:1。
+ *
+ * 外框（`lv_obj_set_size`）被缩了、内容不缩，渲染器就按对齐方式居中裁切 ——
+ * 现象是「图片显示不全」（桌面页的吉祥物就是这么被切掉的）。所以凡是按设计
+ * 像素算出来的 zoom 都要一起缩。
+ */
+static inline uint32_t qz_scale_zoom(uint32_t zoom)
+{
+    return (uint32_t)(((uint64_t)zoom * QZ_SCALE_NUM + QZ_SCALE_DEN / 2) / QZ_SCALE_DEN);
+}
+
 /** 字号缩放，带上限（见 QZ_MIN_FONT_PX）。 */
 static inline int32_t qz_scale_font(int32_t px)
 {
@@ -150,6 +162,10 @@ static inline void qz_set_style_size(lv_obj_t *obj, int32_t width, int32_t heigh
     lv_obj_set_style_shadow_offset_y((obj), qz_scale_px(value), selector)
 #define lv_obj_set_style_translate_x(obj, value, selector) \
     lv_obj_set_style_translate_x((obj), qz_scale_px(value), selector)
+/* 图片内容缩放（zoom 以 256 为 1:1）：内容必须和外框一起缩，否则被裁切。 */
+#define lv_image_set_scale(obj, zoom) lv_image_set_scale((obj), qz_scale_zoom(zoom))
+#define lv_image_set_scale_x(obj, zoom) lv_image_set_scale_x((obj), qz_scale_zoom(zoom))
+#define lv_image_set_scale_y(obj, zoom) lv_image_set_scale_y((obj), qz_scale_zoom(zoom))
 #define lv_obj_set_style_translate_y(obj, value, selector) \
     lv_obj_set_style_translate_y((obj), qz_scale_px(value), selector)
 #define lv_obj_set_style_text_line_space(obj, value, selector) \

@@ -180,10 +180,12 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t size)
     lv_obj_center(face->image);
     /* The baked art is square, so one uniform zoom fits every usage (60/88/164).
      * Image scaling is done inline by the renderer — unlike lv_obj transforms it
-     * does not allocate a layer buffer. */
-    if (size != QZ_MASCOT_SIZE) {
-        lv_image_set_scale(face->image, (uint32_t)(256 * size / QZ_MASCOT_SIZE));
-    }
+     * does not allocate a layer buffer.
+     *
+     * 无条件设置：面板比设计稿小时，外框已经缩了（见 include/scale.h），内容若
+     * 停在 1:1 就会被居中裁掉 —— 那正是"图片显示不全"。zoom 按设计像素算，
+     * 再由 scale.h 缩到面板。 */
+    lv_image_set_scale(face->image, (uint32_t)(256 * size / QZ_MASCOT_SIZE));
     lv_obj_clear_flag(face->image, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(face->image, LV_OBJ_FLAG_SCROLLABLE);
 
