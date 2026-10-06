@@ -1,5 +1,6 @@
 #include "assistant.h"
 #include "ai_face.h"
+#include "applets.h"
 #include "theme.h"
 #include "qzdesk_core.h"
 #include <stdio.h>
@@ -216,6 +217,34 @@ static void arm_state_timer(uint32_t delay_ms, qz_face_state_t target)
     lv_timer_set_repeat_count(state_timer, 1);
 }
 
+/** 首次握手补历史的时间戳：补发窗口内不触发下面的自动跳页。 */
+static uint32_t history_started_at;
+
+/**
+ * 助手回复宣布「开始番茄钟」时自动跳到番茄钟页。
+ *
+ * 触发条件刻意保守：消息要同时含「番茄钟 / pomodoro」和「开始」——语音链路
+ * 的「% pomodoro…番茄钟开始啦，专注25分钟！」与核心自己写的播报都认得出；
+ * 而阶段性与收尾的播报（「休息结束，开始 25 分钟专注」不含番茄钟、「番茄钟
+ * 已结束 / 完成」不含开始）都不会误跳。番茄钟页建好时会自己与核心对一次表，
+ * 跳过去看到的就是当前倒计时。
+ */
+static void maybe_jump_pomodoro(const char *text)
+{
+    lv_obj_t *pomo;
+
+    /* GUI 连上核心时会补发最近聊天记录，协议上与实时消息无法区分；历史里若有
+     * 旧的「番茄钟开始啦」，开机就会把人拽过去。补发是毫秒级的，3 秒窗口足够。 */
+    if (lv_tick_elaps(history_started_at) < 3000) return;
+    if (!text || !strstr(text, "开始")) return;
+    if (!strstr(text, "番茄钟") && !strstr(text, "pomodoro") && !strstr(text, "Pomodoro")) return;
+
+    pomo = qz_applets_screen(QZ_APPLET_POMODORO);
+    if (pomo && lv_screen_active() != pomo) {
+        qz_screen_load(pomo, LV_SCR_LOAD_ANIM_FADE_ON, QZ_DUR_SCREEN);
+    }
+}
+
 static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
 {
     (void)user_data;
@@ -229,6 +258,7 @@ static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
         static bool history_requested;
         if (!history_requested) {
             history_requested = true;
+            history_started_at = lv_tick_get();
             qzdesk_core_request_history();
         }
         const char *status = "离线";
@@ -260,6 +290,7 @@ static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
             set_caption("回复中", qz_face_state_text(QZ_FACE_SPEAKING));
             apply_face_state(QZ_FACE_SPEAKING);
             arm_state_timer(6000, QZ_FACE_IDLE);
+            maybe_jump_pomodoro(event->text);
         }
     } else if (event->type == QZDESK_CORE_EVENT_TOAST && event->text[0] != '\0') {
         stop_typing();
