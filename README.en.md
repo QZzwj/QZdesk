@@ -115,13 +115,14 @@ Protocols and ports between nodes are listed in the table below. Edge labels (`-
 | Rust + Cargo | The core uses edition 2024 |
 | SDL2 | Simulator only |
 | ALSA development libraries | Core audio (the `alsa` crate) |
+| opus / speexdsp | Native builds use the system packages (`libopus-dev`, `libspeexdsp-dev`); cross builds use the sources under `third_party/sources/` |
 | Python 3 | Two MCP tool scripts (`set_timer.py`, `pomodoro.py`) |
 
 > [!NOTE]
 > LVGL 9.2.3 and the panel's `lv_conf.h` are bundled in `third_party/` (`lvgl/`, `lv_conf.h`, `conf/dev_conf.h`). The three must stay side by side — `lv_conf.h` does `#include "conf/dev_conf.h"`, so do not split them up.
 
 > [!NOTE]
-> The core build downloads `opus` and `speexdsp` sources from GitHub Releases and compiles them locally, so **the first build requires network access**.
+> The `opus` and `speexdsp` source tarballs ship with the repository under `third_party/sources/`. Cross builds (or forced static linking) compile them locally with **no network access**; point `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` at your own tarballs to override them.
 
 ### Build and run in one command
 

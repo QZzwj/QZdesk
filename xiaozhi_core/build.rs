@@ -341,10 +341,17 @@ fn download_and_extract(url: &str, name: &str, version: &str, out_path: &Path) -
     let tarball_path = out_path.join(format!("{}-{}.tar.gz", name, version));
 
     if !tarball_path.exists() {
-        println!("cargo:warning=Downloading {} from {}", name, url);
-        let response = reqwest::blocking::get(url).unwrap_or_else(|e| panic!("Failed to download {}: {}", name, e));
-        let bytes = response.bytes().unwrap_or_else(|e| panic!("Failed to read bytes for {}: {}", name, e));
-        std::fs::write(&tarball_path, bytes).unwrap_or_else(|e| panic!("Failed to save tarball for {}: {}", name, e));
+        // 优先用仓库里随附的源码包：构建（尤其是交叉编译）不必联网。
+        if let Some(vendored) = vendored_source(name, version) {
+            println!("cargo:warning=Using vendored {} source: {}", name, vendored.display());
+            fs::copy(&vendored, &tarball_path)
+                .unwrap_or_else(|e| panic!("Failed to copy vendored {} source: {}", name, e));
+        } else {
+            println!("cargo:warning=Downloading {} from {}", name, url);
+            let response = reqwest::blocking::get(url).unwrap_or_else(|e| panic!("Failed to download {}: {}", name, e));
+            let bytes = response.bytes().unwrap_or_else(|e| panic!("Failed to read bytes for {}: {}", name, e));
+            std::fs::write(&tarball_path, bytes).unwrap_or_else(|e| panic!("Failed to save tarball for {}: {}", name, e));
+        }
     }
 
     println!("cargo:warning=Extracting {}...", name);
@@ -354,4 +361,32 @@ fn download_and_extract(url: &str, name: &str, version: &str, out_path: &Path) -
     archive.unpack(out_path).unwrap_or_else(|e| panic!("Failed to unpack archive for {}: {}", name, e));
 
     extract_dir
+}
+
+/// 仓库里随附的第三方源码包：`third_party/sources/<name>-<version>.tar.gz`。
+///
+/// 这些包原本是构建时从 GitHub Releases 现下的，现在随仓库提供，交叉编译不必联网。
+/// 仍然可以用 `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` 指向自己的包覆盖它；
+/// 环境变量和随附包都没有时，才回退到下载。
+fn vendored_source(name: &str, version: &str) -> Option<std::path::PathBuf> {
+    let env_key = format!("XIAOZHI_{}_SRC", name.to_uppercase());
+    if let Ok(path) = env::var(&env_key) {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+        println!(
+            "cargo:warning={} points at a missing file ({}), falling back",
+            env_key,
+            path.display()
+        );
+    }
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").ok()?;
+    let candidate = Path::new(&manifest_dir)
+        .join("..")
+        .join("third_party")
+        .join("sources")
+        .join(format!("{}-{}.tar.gz", name, version));
+    candidate.is_file().then_some(candidate)
 }

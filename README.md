@@ -115,13 +115,14 @@ flowchart TB
 | Rust + Cargo | 核心使用 edition 2024 |
 | SDL2 | 仅模拟器需要 |
 | ALSA 开发库 | 核心音频（`alsa` crate） |
+| opus / speexdsp | 本机编译用系统开发包（`libopus-dev`、`libspeexdsp-dev`）；交叉编译用仓库内 `third_party/sources/` 的源码 |
 | Python 3 | 两个 MCP 工具脚本（`set_timer.py`、`pomodoro.py`） |
 
 > [!NOTE]
 > LVGL 9.2.3 与面板的 `lv_conf.h` 直接内置在 `third_party/`（`lvgl/`、`lv_conf.h`、`conf/dev_conf.h`）。三者必须保持同级——`lv_conf.h` 里有 `#include "conf/dev_conf.h"`，调整时不要拆开。
 
 > [!NOTE]
-> 核心构建会从 GitHub Releases 下载 `opus` 与 `speexdsp` 源码并本地编译，因此**首次构建需要网络**。
+> `opus` 与 `speexdsp` 的源码包已随仓库提供在 `third_party/sources/`：交叉编译或强制静态链接时直接用它们本地编译，**无需联网**；也可用 `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` 指向自己的包。
 
 ### 一键构建并运行
 
