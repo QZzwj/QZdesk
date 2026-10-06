@@ -49,7 +49,6 @@ add_executable(qzdesk_screen
     app/theme.c
     app/ai_face.c
     app/face_camera.c
-    app/mascot_assets.c
     app/icon_assets.c
     app/config.c
     app/wifi.c
