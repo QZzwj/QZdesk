@@ -1,0 +1,2002 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1246FF">
+<title>QZdesk Skill 控制台</title>
+<style>
+
+:root{
+  --page:#f2f5f9;
+  --page-top:#fbfcfe;
+
+  /* —— 材质填充量 ——
+     卡片里有正文和列表，比参考项目稍实一档，否则小字在滚动时读不稳。 */
+  --glass-chrome:rgba(255,255,255,.24);
+  --glass-float: rgba(255,255,255,.30);
+  --glass-card:  rgba(255,255,255,.40);
+  --glass-solid: rgba(255,255,255,.86);   /* 控件：输入必须能读，不能透 */
+  --glass-well:  rgba(15,23,42,.05);      /* 凹槽：列表底、代码块、进度条底 */
+
+  --frost-chrome:blur(13px) saturate(200%);
+  --frost-float: blur(12px) saturate(200%);
+
+  --line:        rgba(15,23,42,.11);
+  --line-strong: rgba(15,23,42,.18);
+
+  /* 没有提亮兜底，字色就得自己站得住。小字比大字的抗锯齿损耗大得多，
+   * 所以次级/三级都往下压一档，实际渲染出来才接近这个对比度。 */
+  --fg:  #08101d;   /* 正文  ~13.5:1 */
+  --fg-2:#2b3542;   /* 次级  ~8.1:1  */
+  --fg-3:#3d4857;   /* 三级  ~6.4:1  */
+
+  --brand:#007AFF;
+  --brand-dark:#0062CC;
+  --brand-soft:rgba(0,122,255,.10);
+  --brand-tint:rgba(0,122,255,.14);
+  --ok:#34C759;
+  --warn:#FF9500;
+  --warn-ink:#8A5300;
+  --warn-soft:rgba(255,149,0,.14);
+  --err:#FF3B30;
+  --violet:#AF52DE;
+
+  /* —— 缓动令牌 —— */
+  --ease-out:cubic-bezier(.23,1,.32,1);
+  --ease-in-out:cubic-bezier(.77,0,.175,1);
+  --ease-drawer:cubic-bezier(.32,.72,0,1);
+
+  /* 半径同心 */
+  --r-chrome:26px;
+  --r-card:22px;
+  --r-float:18px;
+  --r-ctl:12px;
+  --radius:var(--r-card);
+  --radius-sm:var(--r-ctl);
+
+  --shadow-float:0 1px 2px rgba(16,24,40,.08),
+                 0 10px 24px -6px rgba(16,24,40,.20),
+                 0 32px 64px -16px rgba(16,24,40,.22);
+  --shadow-card: 0 1px 2px rgba(16,24,40,.06),
+                 0 8px 22px -6px rgba(16,24,40,.13),
+                 0 28px 56px -16px rgba(16,24,40,.16);
+  --ring:0 0 0 1px rgba(16,24,40,.09);
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+
+body{
+  margin:0;min-height:100dvh;
+  background:var(--page);color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",
+              "PingFang SC","Hiragino Sans GB","Microsoft YaHei",
+              "Noto Sans CJK SC","Source Han Sans SC","WenQuanYi Micro Hei",
+              system-ui,sans-serif;
+  font-size:14px;line-height:1.55;
+  /* 不用 -webkit-font-smoothing:antialiased：它把笔画削细一档，中文小字正是
+   * 靠笔画密度撑可读性的，削完就发灰。交给平台默认抗锯齿，字才站得住。 */
+  overflow-x:hidden;
+}
+::selection{background:rgba(0,122,255,.22);color:var(--fg)}
+button,select,input,textarea{font:inherit}
+button:focus-visible,select:focus-visible,input:focus-visible,
+textarea:focus-visible,summary:focus-visible{
+  outline:2px solid var(--brand);outline-offset:2px;
+}
+
+
+/* 底色：只留一层很淡的冷色光晕，主角交给上面的波浪层 */
+body::before{
+  content:"";position:fixed;inset:-6% -6% -6% -6%;z-index:-2;pointer-events:none;
+  background:
+    radial-gradient(58vmin 38vmin at 14% 4%,
+      rgba(142,209,252,.34) 0%, rgba(142,209,252,0) 72%),
+    radial-gradient(46vmin 32vmin at 90% 8%,
+      rgba(175,142,255,.20) 0%, rgba(175,142,255,0) 74%),
+    linear-gradient(160deg,#eaf2fd,#e6eef9);
+  transform:translate3d(0,0,0);
+  animation:drift 72s var(--ease-in-out) infinite;
+}
+
+/* —— 背景波浪 ——
+   层级：`::before` 是浅色底（-2），这一层是波浪（-1），内容在 0 之上。
+   关键在 mask：波浪只染页面顶部，约 78% 处完全透明，于是中下部回到浅色底，
+   卡片与文字的对比度不受影响（浅色玻璃 UI 最怕背景把对比度吃掉）。
+   动画是 46 秒一轮的极缓慢平移，几乎感觉不到，但页面不死板。 */
+.backdrop{
+  position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;
+  -webkit-mask-image:linear-gradient(to bottom,
+    #000 0%, rgba(0,0,0,.78) 30%, rgba(0,0,0,.34) 56%, transparent 78%);
+          mask-image:linear-gradient(to bottom,
+    #000 0%, rgba(0,0,0,.78) 30%, rgba(0,0,0,.34) 56%, transparent 78%);
+}
+.backdrop svg{
+  position:absolute;inset:0;width:100%;height:100%;display:block;
+  animation:wave-drift 46s var(--ease-in-out) infinite;
+}
+@keyframes wave-drift{
+  0%,100%{transform:translate3d(0,0,0)}
+  50%    {transform:translate3d(-1.3%,.7%,0)}
+}
+@media (prefers-reduced-motion:reduce){
+  .backdrop svg{animation:none}
+  body::before{animation:none}
+}
+@keyframes drift{
+  0%,100%{transform:translate3d(0,0,0) scale(1.02)}
+  50%    {transform:translate3d(-1.4%,-1.2%,0) scale(1.05)}
+}
+/* 内容滑到浮空导航下方时先淡掉，而不是撞上一条硬边 */
+body::after{
+  content:"";position:fixed;top:0;left:0;right:0;height:118px;z-index:30;
+  pointer-events:none;opacity:0;
+  background:linear-gradient(to bottom,
+    rgba(244,247,251,1) 0%, rgba(244,247,251,1) 54%,
+    rgba(244,247,251,.55) 74%, rgba(244,247,251,0) 100%);
+  transition:opacity .28s var(--ease-out);
+}
+body.scrolled::after{opacity:1}
+
+.num,.metric,.mono,.stat-row strong,.stat-main strong{
+  font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;
+}
+
+/* ===========================================================================
+   浮空导航胶囊
+   =========================================================================== */
+.appbar{
+  position:sticky;top:12px;z-index:40;
+  width:calc(100% - 36px);max-width:1240px;margin:12px auto 0;
+}
+.appbar-inner{
+  position:relative;isolation:isolate;
+  display:flex;align-items:center;gap:14px;
+  padding:10px 16px;border-radius:var(--r-chrome);
+  background-color:var(--glass-chrome);
+  -webkit-backdrop-filter:var(--frost-chrome);
+          backdrop-filter:var(--frost-chrome);
+  box-shadow:
+    0 0 0 1px rgba(16,24,40,.09),   /* 月牙边：水滴轮廓是暗的，不是白的 */
+    0 1px 2px rgba(16,24,40,.05),
+    var(--shadow-float);
+}
+.appbar-inner>*{position:relative;z-index:2}
+/* 跟着指针走的高光：像玻璃真的接住了一点光（只挂在这个子树很小的表面上） */
+.appbar-inner::after{
+  content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+  border-radius:inherit;opacity:0;
+  background:radial-gradient(240px 160px at var(--mx,50%) var(--my,-20%),
+             rgba(255,255,255,.30),rgba(255,255,255,0) 70%);
+  transition:opacity .3s var(--ease-out);
+}
+@media (hover:hover) and (pointer:fine){
+  .appbar-inner:hover::after{opacity:1}
+}
+
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.logo{
+  width:34px;height:34px;border-radius:11px;flex:none;
+  display:grid;place-items:center;color:#fff;
+  background:linear-gradient(150deg,var(--brand),#5AA9FF);
+  box-shadow:0 4px 12px rgba(0,98,204,.26);
+}
+.brand-text{display:flex;flex-direction:column;min-width:0}
+.brand-text strong{
+  font-size:15px;font-weight:640;letter-spacing:-.014em;line-height:1.25;
+  white-space:nowrap;
+}
+.brand-text small{font-size:12px;color:var(--fg-2);letter-spacing:.006em;white-space:nowrap}
+
+.pills{display:flex;align-items:center;gap:9px;margin-left:auto;flex-wrap:wrap}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:5px 11px;border-radius:999px;
+  /* 玻璃几乎全透，文字直接压在玻璃上对比度会随背景漂移；
+     给胶囊一层固定浅底，对比度就与背后无关了 —— iOS vibrancy 的做法 */
+  background:rgba(255,255,255,.62);
+  box-shadow:var(--ring);
+  font-size:12.5px;font-weight:600;color:var(--fg);
+  letter-spacing:.008em;white-space:nowrap;
+  transition:transform .17s var(--ease-out),color .17s var(--ease-out);
+}
+.pill.pop{transform:scale(1.06);color:var(--brand)}
+.pill.sm{font-size:12px;padding:4px 9px}
+.dot{
+  width:7px;height:7px;border-radius:50%;background:var(--fg-3);flex:none;
+  box-shadow:0 0 0 3.5px rgba(15,23,42,.08);
+  transition:background .3s ease,box-shadow .3s ease;
+}
+.dot.live{background:var(--ok);box-shadow:0 0 0 3.5px rgba(52,199,89,.20)}
+.dot.busy{background:var(--warn);box-shadow:0 0 0 3.5px rgba(255,149,0,.20)}
+.dot.offline{background:var(--err);box-shadow:0 0 0 3.5px rgba(255,59,48,.20)}
+
+/* ===========================================================================
+   布局
+   =========================================================================== */
+.wrap{
+  width:calc(100% - 36px);max-width:1440px;margin:0 auto;
+  padding:16px 0 32px;
+  display:grid;grid-template-columns:250px minmax(0,1fr);gap:14px;align-items:start;
+}
+.col{display:flex;flex-direction:column;gap:18px;min-width:0}
+.sidebar{display:flex;flex-direction:column;gap:14px;min-width:0}
+.wrap>.col{
+  display:grid;grid-column:2;grid-template-columns:minmax(0,1fr) 360px;
+  grid-template-rows:auto auto;gap:14px;align-items:start;
+}
+.skills-card{grid-column:1;grid-row:1;max-height:calc(100dvh - 116px);overflow:auto}
+.chat-card{
+
+  grid-column:2;grid-row:1 / span 2;align-self:start;
+  position:sticky;top:0;z-index:1;
+  height:calc(100dvh - 116px);min-height:0;
+}
+.editor-card{grid-column:1;grid-row:2;align-self:start}
+
+/* ===========================================================================
+   卡片：结构层，材质更实（不做 backdrop-filter，见文件头）
+   =========================================================================== */
+.card{
+  position:relative;isolation:isolate;
+  border-radius:var(--r-card);
+  background-color:var(--glass-card);
+  box-shadow:var(--ring),0 1px 2px rgba(16,24,40,.05),var(--shadow-card);
+  overflow:hidden;
+}
+.card>*{position:relative;z-index:2}
+.card-head,.chat-head{
+  display:flex;align-items:flex-start;gap:14px;justify-content:space-between;
+  padding:16px 18px 13px;border-bottom:1px solid var(--line);
+}
+.card-head h2,.chat-head h2{
+  margin:2px 0 0;font-size:17px;font-weight:640;letter-spacing:-.016em;
+}
+.eyebrow{
+  margin:0;font-size:11px;font-weight:660;color:var(--fg-2);
+  letter-spacing:.10em;text-transform:uppercase;
+}
+.card-head .btn{flex:none}
+
+/* —— 侧栏 —— */
+.side-intro{
+  padding:18px;border-radius:var(--r-card);
+  background-color:var(--glass-card);
+  box-shadow:var(--ring),var(--shadow-card);
+}
+.side-intro h1{margin:6px 0 6px;font-size:20px;font-weight:660;letter-spacing:-.02em}
+.side-intro p{margin:0;font-size:13px;color:var(--fg-2)}
+.side-intro .eyebrow{margin-bottom:2px}
+
+.side-stats{
+  position:relative;overflow:hidden;
+  padding:16px 18px;border-radius:var(--r-card);
+  background:linear-gradient(155deg,#0f1c33,#16283f);
+  color:#fff;box-shadow:0 14px 30px -12px rgba(15,28,51,.55);
+}
+.side-stats::after{   /* 一点玻璃感：右上角的光斑 */
+  content:"";position:absolute;inset:-40% -30% auto auto;width:190px;height:190px;
+  border-radius:50%;background:radial-gradient(circle,rgba(90,169,255,.42),transparent 68%);
+  pointer-events:none;
+}
+.stat-main{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.stat-main span{font-size:12px;color:#9FB2CC;letter-spacing:.02em}
+.stat-main strong{
+  font-size:30px;font-weight:680;letter-spacing:-.03em;line-height:1.1;
+  transition:transform .17s var(--ease-out),color .17s var(--ease-out);
+}
+.stat-row{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  margin-top:9px;padding-top:9px;border-top:1px solid rgba(255,255,255,.10);
+  font-size:12.5px;color:#B7C6DC;
+}
+.stat-row strong{
+  font-size:15px;font-weight:640;color:#fff;
+  transition:transform .17s var(--ease-out),color .17s var(--ease-out);
+}
+/* 只在数值真的变化时弹一下 —— 状态指示，不是装饰 */
+.stat-main strong.pop,.stat-row strong.pop{transform:scale(1.14);color:#7FBCFF}
+.stat-mark{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:7px}
+.stat-mark.blue{background:#4C9BFF;box-shadow:0 0 0 3px rgba(76,155,255,.18)}
+.stat-mark.amber{background:#FFB340;box-shadow:0 0 0 3px rgba(255,179,64,.18)}
+
+.side-guide{
+  padding:16px 18px;border-radius:var(--r-card);
+  background-color:var(--glass-card);box-shadow:var(--ring),var(--shadow-card);
+}
+.side-label{
+  font-size:11px;font-weight:660;color:var(--fg-2);
+  letter-spacing:.10em;text-transform:uppercase;
+}
+.side-guide ol{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:9px}
+.side-guide li{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--fg-2)}
+.side-guide li b{
+  width:22px;height:22px;border-radius:50%;flex:none;display:grid;place-items:center;
+  background:var(--brand-soft);color:var(--brand-dark);
+  font-size:11px;font-weight:660;font-variant-numeric:tabular-nums;
+}
+.side-foot{
+  display:flex;align-items:center;gap:8px;
+  padding:2px 6px;font-size:12px;color:var(--fg-2);
+}
+.side-foot-dot{
+  width:6px;height:6px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 0 3px rgba(52,199,89,.14);
+}
+
+/* —— 天气：与设备首页读的是核心里的同一份快照 ——
+   接口挂了只影响这一块，Skill 列表与聊天照常。 */
+.side-weather{
+  padding:15px 18px 14px;border-radius:var(--r-card);
+  background-color:var(--glass-card);box-shadow:var(--ring),var(--shadow-card);
+}
+/* 标题旁边不再有小标（kicker）：标题与右上角的按钮居中对齐，头部更干净 */
+.weather-head{display:flex;align-items:center;gap:10px;justify-content:space-between}
+.weather-head h2{margin:0;font-size:15px;font-weight:640;letter-spacing:-.012em}
+.weather-head .btn{flex:none}
+.weather-main{display:flex;align-items:center;gap:9px;margin-top:11px}
+/* 浏览器里可以用 emoji 当图标：那边不缺字形，不必像设备上那样自绘 */
+.weather-icon{
+  font-family:"Segoe UI Symbol","Noto Sans Symbols 2",sans-serif;
+  font-size:27px;line-height:1;color:var(--brand);transition:opacity .18s ease
+}
+.weather-temp{
+  font-size:30px;font-weight:680;letter-spacing:-.03em;line-height:1;
+  font-variant-numeric:tabular-nums;
+}
+.weather-desc{font-size:13px;color:var(--fg-2);min-width:0}
+.weather-grid{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;
+  margin:12px 0 0;padding:11px 0 0;border-top:1px solid var(--line);
+}
+.weather-grid dt{margin:0;font-size:11px;color:var(--fg-3);letter-spacing:.02em}
+.weather-grid dd{
+  margin:1px 0 0;font-size:12.5px;font-weight:580;color:var(--fg);
+  font-variant-numeric:tabular-nums;
+}
+.weather-note{margin:10px 0 0;font-size:11.5px;color:var(--fg-3)}
+.side-weather.is-stale .weather-note{color:var(--warn-ink)}
+.side-weather.is-error .weather-desc{color:var(--warn-ink)}
+.side-weather.is-loading .weather-icon{opacity:.5}
+
+/* —— 性能监控：与天气同一张卡片形状 ——
+   四个核心指标 + 两个补充指标一眼看完；曲线用迷你火花线表示趋势，
+   颜色与文字都由核心给的 level 决定（异常不靠颜色单打）。 */
+.perf-actions{display:flex;align-items:center;gap:6px;flex:none}
+.perf-actions .btn{padding:0 9px;min-height:28px;font-size:12px}
+.perf-main{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-top:11px}
+.perf-value{
+  font-size:27px;font-weight:680;letter-spacing:-.03em;line-height:1;
+  font-variant-numeric:tabular-nums;color:var(--fg);
+}
+.perf-value.is-warn{color:var(--warn-ink)}
+.perf-value.is-critical{color:#B3261E}
+.perf-level{font-size:12.5px;color:var(--fg-2);min-width:0}
+.side-performance dd.is-warn{color:var(--warn-ink)}
+.side-performance dd.is-critical{color:#B3261E}
+.side-performance dd.is-unavailable{color:var(--fg-3)}
+.perf-spark{
+  width:100%;height:34px;display:block;margin:11px 0 0;
+  border-radius:9px;background:var(--glass-well);
+}
+.perf-spark polyline{
+  fill:none;stroke:var(--brand);stroke-width:1.5;
+  stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;
+}
+.side-performance.is-paused .perf-value{opacity:.55}
+
+/* ===========================================================================
+   Skill 列表
+   =========================================================================== */
+.legend{
+  list-style:none;margin:16px 18px 4px;padding:12px 14px;
+  border-radius:14px;background:var(--glass-well);border:1px solid var(--line);
+  display:flex;flex-direction:column;gap:8px;
+}
+.legend li{display:flex;align-items:flex-start;gap:9px;font-size:12.5px;color:var(--fg-2);line-height:1.55}
+.legend .tag{flex:none;margin-top:1px}
+
+.tag{
+  display:inline-flex;align-items:center;
+  font-size:12px;font-weight:640;line-height:1;letter-spacing:.012em;
+  padding:4px 10px;border-radius:999px;white-space:nowrap;
+  background:rgba(255,255,255,.7);box-shadow:var(--ring);
+  transform-origin:left center;
+}
+.tag.primary{color:var(--brand-dark);background:var(--brand-tint);box-shadow:0 0 0 1px rgba(0,122,255,.22)}
+.tag.secondary{color:var(--warn-ink);background:var(--warn-soft);box-shadow:0 0 0 1px rgba(255,149,0,.24)}
+.tag.none{color:var(--fg-2);background:rgba(15,23,42,.07);box-shadow:0 0 0 1px rgba(15,23,42,.10)}
+
+.skills{list-style:none;margin:12px 18px 18px;padding:0;display:flex;flex-direction:column;gap:11px}
+.skill{
+  position:relative;
+  padding:14px 15px;border-radius:16px;
+  background:#fff;
+  box-shadow:var(--ring),0 1px 2px rgba(16,24,40,.05),0 8px 20px -14px rgba(16,24,40,.28);
+  transition:transform .18s var(--ease-out),box-shadow .18s ease,border-color .18s ease;
+  will-change:transform;
+}
+@media (hover:hover) and (pointer:fine){
+  .skill:hover{
+    transform:translateY(-2px);
+    box-shadow:0 0 0 1px rgba(0,122,255,.22),0 10px 24px -12px rgba(16,24,40,.32);
+  }
+}
+.skill-top{display:flex;align-items:flex-start;gap:12px}
+.avatar{
+  width:36px;height:36px;border-radius:11px;flex:none;
+  display:grid;place-items:center;color:var(--brand-dark);
+  background:linear-gradient(150deg,var(--brand-tint),rgba(175,82,222,.14));
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.6);
+}
+.skill-meta{min-width:0;flex:1}
+.skill-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.skill-name{font-size:15px;font-weight:640;letter-spacing:-.006em}
+.skill-id{
+  font-size:12px;color:var(--fg-2);font-weight:540;
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+.skill-desc{margin:7px 0 0;font-size:13.5px;color:var(--fg-2);line-height:1.66;word-break:break-word}
+.desc-toggle{
+  margin-left:6px;padding:0;border:0;background:none;cursor:pointer;
+  color:var(--brand);font-size:12.5px;font-weight:560;
+}
+.desc-toggle:hover{color:var(--brand-dark)}
+.skill-foot{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  margin-top:12px;padding-top:11px;border-top:1px solid var(--line);
+}
+.spacer{flex:1}
+
+/* 分段控件：触摸下比下拉框好用，也能一眼看出当前状态 */
+.seg{
+  display:inline-flex;gap:4px;padding:4px;
+  background:var(--glass-well);border:1px solid var(--line);border-radius:13px;
+}
+.seg button{
+  min-height:34px;padding:0 14px;
+  border:0;border-radius:9px;
+  /* 未选中项也要像"能点的标签"，不能看着像一排灰字：给一层浅底 + 正文色 */
+  background:rgba(255,255,255,.66);
+  color:var(--fg);font-size:13.5px;font-weight:620;cursor:pointer;
+  transition:background-color .18s ease,color .18s ease,transform .12s var(--ease-out);
+}
+.seg button:hover{background:#fff}
+.seg button[aria-pressed="true"]{background:#fff;box-shadow:0 1px 3px rgba(16,24,40,.14)}
+.seg button[aria-pressed="true"][data-role="primary"]{background:var(--brand);color:#fff;box-shadow:0 2px 8px rgba(0,98,204,.28)}
+.seg button[aria-pressed="true"][data-role="secondary"]{background:var(--warn);color:#fff;box-shadow:0 2px 8px rgba(255,149,0,.30)}
+.seg button:active{transform:scale(.96)}
+.seg button:disabled{opacity:.5;cursor:progress}
+
+.empty{
+  padding:34px 18px;text-align:center;color:var(--fg-3);font-size:13px;line-height:1.7;
+}
+.empty svg{margin:0 auto 12px;color:#A9B6CB;display:block}
+
+/* ===========================================================================
+   按钮：反馈发生在按下那一帧
+   =========================================================================== */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  min-height:40px;padding:0 16px;
+  border:1px solid transparent;border-radius:var(--r-ctl);
+  background:var(--brand);color:#fff;
+  font-size:13px;font-weight:580;letter-spacing:.004em;
+  cursor:pointer;-webkit-user-select:none;user-select:none;
+  -webkit-tap-highlight-color:transparent;
+  box-shadow:0 1px 2px rgba(0,98,204,.24),inset 0 1px 0 rgba(255,255,255,.26);
+  transition:transform .14s var(--ease-out),background .18s ease,
+             border-color .18s ease,box-shadow .18s ease,opacity .18s ease;
+}
+.btn.sm{min-height:34px;padding:0 12px;font-size:12.5px;border-radius:10px}
+.btn:active,.btn.press{transform:scale(.965);background:var(--brand-dark)}
+.btn.ghost{
+  background:var(--glass-solid);color:var(--fg);border-color:var(--line);
+  box-shadow:0 1px 1.5px rgba(16,24,40,.05);
+}
+.btn.ghost:active,.btn.ghost.press{background:#fff;border-color:var(--line-strong)}
+.btn.danger{background:transparent;color:var(--err);border-color:rgba(255,59,48,.30);box-shadow:none}
+.btn.danger:active,.btn.danger.press{background:rgba(255,59,48,.09);transform:scale(.965)}
+.btn:disabled{opacity:.46;cursor:not-allowed;transform:none}
+.btn.busy{pointer-events:none;opacity:.75}
+.btn.busy::after{
+  content:"";display:inline-block;width:11px;height:11px;margin-left:8px;
+  border:1.6px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;
+  vertical-align:-1px;animation:spin .7s linear infinite;
+}
+.btn.ghost.busy::after{border-color:rgba(15,23,42,.25);border-top-color:var(--fg-2)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (hover:hover) and (pointer:fine){
+  .btn:not(.ghost):not(.danger):hover{background:#0A84FF}
+  .btn.ghost:hover{background:#fff;border-color:var(--line-strong)}
+  .btn.danger:hover{background:rgba(255,59,48,.07)}
+}
+
+/* 输入控件一律不透明，不和玻璃叠玻璃 */
+.field{display:flex;flex-direction:column;gap:7px;margin-top:14px}
+.field>label,.field-label{font-size:12.5px;font-weight:560;color:var(--fg-2);letter-spacing:.008em}
+.field small,.hint{font-size:12.5px;color:var(--fg-2);font-weight:540;letter-spacing:.008em}
+input[type=text],input[type=number],textarea,select{
+  -webkit-appearance:none;appearance:none;
+  width:100%;padding:10px 12px;
+  background:var(--glass-solid);color:var(--fg);
+  border:1px solid var(--line);border-radius:var(--r-ctl);
+  font-size:13.5px;font-family:inherit;outline:none;
+  transition:border-color .18s ease,box-shadow .18s ease,background .18s ease;
+}
+input::placeholder,textarea::placeholder{color:var(--fg-3)}
+input:focus,textarea:focus,select:focus{
+  border-color:var(--brand);box-shadow:0 0 0 3.5px rgba(0,122,255,.18);outline:none;
+}
+input:disabled{background:var(--glass-well);color:var(--fg-3)}
+textarea{resize:vertical;line-height:1.6}
+#content{
+  min-height:180px;
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  font-size:12.5px;
+}
+
+/* 拖放区 */
+.dropzone{
+  position:relative;
+  display:flex;align-items:center;gap:12px;
+  padding:15px 16px;border-radius:14px;cursor:pointer;
+  background:rgba(255,255,255,.5);
+  border:1.5px dashed var(--line-strong);
+  transition:background .18s ease,border-color .18s ease,transform .14s var(--ease-out);
+}
+.dropzone:hover{background:var(--brand-soft);border-color:rgba(0,122,255,.45)}
+.dropzone.over{background:var(--brand-tint);border-color:var(--brand);transform:scale(1.01)}
+.dropzone strong{display:block;font-size:13.5px;font-weight:580;color:var(--fg)}
+.dropzone span span{display:block;font-size:12px;color:var(--fg-2);margin-top:1px}
+.dropzone input[type=file]{display:none}
+.dz-icon{
+  width:38px;height:38px;border-radius:12px;flex:none;display:grid;place-items:center;
+  background:#fff;color:var(--brand);box-shadow:var(--ring);
+}
+
+.tip{
+  display:flex;align-items:flex-start;gap:8px;
+  padding:11px 13px;border-radius:13px;
+  background:var(--warn-soft);border:1px solid rgba(255,149,0,.24);
+  color:#6B4200;font-size:12px;line-height:1.6;
+}
+.tip svg{flex:none;margin-top:2px;color:var(--warn)}
+
+.msg{min-height:20px;margin:10px 0 0;font-size:12.5px;font-weight:520;color:var(--fg-2);letter-spacing:.006em}
+.msg.ok{color:#1B7A38}
+.msg.err{color:var(--err)}
+.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:15px}
+
+/* —— 添加 / 编辑 Skill —— */
+.editor-card{padding:0}
+.editor summary{
+  display:flex;align-items:center;gap:10px;
+  padding:16px 18px;cursor:pointer;list-style:none;
+}
+.editor summary::-webkit-details-marker{display:none}
+.editor .s-title{font-size:15px;font-weight:620;letter-spacing:-.01em}
+.editor .s-act{
+  margin-left:auto;font-size:12px;font-weight:560;color:var(--brand);
+}
+.editor .s-act::after{
+  content:"";display:inline-block;width:7px;height:7px;margin-left:7px;
+  border-right:1.6px solid currentColor;border-bottom:1.6px solid currentColor;
+  transform:rotate(45deg) translateY(-2px);
+  transition:transform .22s var(--ease-out);
+}
+.editor[open] .s-act::after{transform:rotate(-135deg) translateY(-1px)}
+.editor[open]>*:not(summary){animation:reveal .28s var(--ease-out) both}
+@keyframes reveal{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.editor>p.hint{margin:0;padding:0 18px}
+.editor .field,.editor .actions,.editor .msg,.editor .tip{margin-left:18px;margin-right:18px}
+.editor .tip{margin-bottom:18px}
+.editor .field{padding:0}
+.editor .actions{margin-top:16px}
+.editor>p.hint{padding-bottom:4px}
+
+/* ===========================================================================
+   对话
+   =========================================================================== */
+.chat-card{display:flex;flex-direction:column}
+.chat-state{
+  display:inline-flex;align-items:center;gap:7px;flex:none;
+  padding:6px 11px;border-radius:999px;
+  background:rgba(255,255,255,.62);box-shadow:var(--ring);
+  font-size:12px;color:var(--fg-2);white-space:nowrap;
+}
+.chat-state.busy{color:var(--warn-ink)}
+.chat-state.offline{color:#9A2318}
+.chat-messages{
+  height:auto;min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;
+  padding:18px;display:flex;flex-direction:column;gap:10px;
+  background:linear-gradient(180deg,rgba(255,255,255,.34),rgba(255,255,255,.06));
+}
+.chat-empty{
+  margin:auto;text-align:center;color:var(--fg-3);font-size:13px;line-height:1.7;
+}
+.chat-bubble{
+  max-width:min(84%,660px);padding:10px 14px;border-radius:15px;
+  font-size:13.5px;line-height:1.62;white-space:pre-wrap;word-break:break-word;
+  box-shadow:var(--ring),0 1px 2px rgba(16,24,40,.05);
+  will-change:transform,opacity;
+}
+.chat-bubble.assistant{align-self:flex-start;background:#fff;border-bottom-left-radius:6px}
+.chat-bubble.user{
+  align-self:flex-end;color:#fff;border-bottom-right-radius:6px;
+  background:linear-gradient(150deg,#0A84FF,#0062CC);
+  box-shadow:0 6px 16px -8px rgba(0,98,204,.65);
+}
+.chat-bubble.system{
+  align-self:center;max-width:92%;
+  background:var(--warn-soft);border:1px solid rgba(255,149,0,.26);
+  color:#6B4200;font-size:12.5px;border-radius:999px;padding:8px 14px;
+}
+.chat-compose{
+  display:flex;align-items:flex-end;gap:8px;
+  padding:11px 12px;border-top:1px solid var(--line);
+}
+.chat-compose textarea{
+  flex:1 1 auto;min-width:0;min-height:46px;max-height:140px;resize:none;
+  padding:12px 12px;font-size:14px;line-height:1.5;
+}
+.chat-compose .btn{flex:none;min-height:46px;padding:0 14px;font-size:13.5px}
+.chat-note{
+  margin:0;padding:9px 14px 12px;font-size:11.5px;line-height:1.5;
+  color:var(--fg-3);letter-spacing:.004em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  border-top:1px dashed var(--line);
+  background:rgba(15,23,42,.018);
+}
+
+/* ===========================================================================
+   提示条：进出一条路径，位移跑在合成器上
+   =========================================================================== */
+#toast-host{
+  position:fixed;right:20px;bottom:20px;z-index:90;
+  display:flex;flex-direction:column;align-items:flex-end;gap:10px;
+  pointer-events:none;
+}
+.toast{
+  pointer-events:auto;
+  display:flex;gap:11px;align-items:flex-start;
+  min-width:250px;max-width:min(400px,84vw);
+  padding:12px 15px;border-radius:var(--r-float);
+  background-color:var(--glass-float);
+  -webkit-backdrop-filter:var(--frost-float);
+          backdrop-filter:var(--frost-float);
+  box-shadow:var(--ring),var(--shadow-float);
+  /* 用 transition 而不是 keyframes：连弹多条时能从当前值续接，不会从头重放 */
+  transition:transform .28s var(--ease-out),opacity .28s var(--ease-out);
+  will-change:transform,opacity;
+}
+.toast .ico{
+  width:20px;height:20px;border-radius:50%;flex:none;margin-top:1px;
+  display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700;
+}
+.toast[data-tone=ok]  .ico{background:var(--ok)}
+.toast[data-tone=err] .ico{background:var(--err)}
+.toast[data-tone=warn] .ico{background:var(--warn)}
+.toast[data-tone=info] .ico{background:var(--brand)}
+.toast b{display:block;font-size:13px;font-weight:620;letter-spacing:-.004em}
+.toast span{display:block;font-size:12.5px;color:var(--fg-2);margin-top:1px;line-height:1.45}
+
+/* ===========================================================================
+   无障碍：三个信号各自降级，而不是"统一关掉"
+   =========================================================================== */
+@media (prefers-reduced-motion:reduce){
+  body::before{animation:none}
+  button{transition:background .18s ease,opacity .18s ease}
+  .btn:active,.btn.press,.seg button:active{transform:none;opacity:.78}
+  .skill{transition:box-shadow .18s ease}
+  .stat-main strong,.stat-row strong,.pill{transition:color .2s ease}
+  .stat-main strong.pop,.stat-row strong.pop,.pill.pop{transform:none}
+  .editor[open]>*:not(summary){animation:none}
+  .toast{transition:opacity .2s ease}
+}
+@media (prefers-reduced-transparency:reduce){
+  :root{
+    --glass-chrome:rgba(255,255,255,.98);
+    --glass-float:rgba(255,255,255,.99);
+    --glass-card:rgba(255,255,255,1);
+  }
+  body::before{animation:none}
+  .appbar-inner,.toast{-webkit-backdrop-filter:none;backdrop-filter:none}
+}
+@media (prefers-contrast:more){
+  :root{
+    --glass-chrome:rgba(255,255,255,1);
+    --glass-card:rgba(255,255,255,1);
+    --line:rgba(15,23,42,.34);
+    --line-strong:rgba(15,23,42,.5);
+    --fg-2:#334155;--fg-3:#475569;
+  }
+}
+/* 触摸目标：粗指针下补到 44px（苹果 HIG / WCAG 2.5.5） */
+@media (pointer:coarse){
+  .btn,.btn.sm{min-height:44px;padding:0 16px}
+  .seg button{min-height:40px}
+  input[type=text],textarea,select{min-height:44px}
+}
+
+@media (max-width:900px){
+  .wrap{grid-template-columns:1fr;padding-top:16px}
+  .wrap>.col{display:flex;grid-column:auto}
+  .skills-card,.chat-card,.editor-card{grid-column:auto;grid-row:auto}
+  .chat-card{position:static;min-height:0}
+  .sidebar{order:2}
+  .col{order:1}
+  .side-guide{display:none}
+}
+@media (min-width:901px) and (max-width:1100px){
+  .wrap{grid-template-columns:220px minmax(0,1fr)}
+  .wrap>.col{grid-template-columns:minmax(0,1fr) 320px}
+}
+@media (max-width:620px){
+  .appbar{width:calc(100% - 20px);top:8px}
+  .appbar-inner{flex-wrap:wrap;gap:10px;padding:10px 13px}
+  .wrap{width:calc(100% - 20px)}
+  .brand-text small{display:none}
+  .pills{width:100%;margin-left:0}
+  .chat-messages{height:320px;padding:14px}
+  .chat-bubble{max-width:92%}
+  .legend,.skills{margin-left:13px;margin-right:13px}
+  .card-head,.chat-head{padding-left:13px;padding-right:13px}
+  .editor .field,.editor .actions,.editor .msg,.editor .tip,
+  .editor>p.hint{margin-left:13px;margin-right:13px}
+  .chat-compose{padding:11px 13px}
+}
+</style>
+</head>
+<body>
+
+<!-- 背景波浪：纯装饰，固定不动，不接任何指针事件 -->
+<div class="backdrop" aria-hidden="true">
+  <svg viewBox="0 0 1440 690" preserveAspectRatio="none" focusable="false">
+    <defs>
+      <linearGradient id="qzWave" x1="100%" y1="52%" x2="0%" y2="48%">
+        <stop offset="5%" stop-color="#1246ff"/>
+        <stop offset="95%" stop-color="#8ED1FC"/>
+      </linearGradient>
+    </defs>
+    <!-- 四层同形不同深浅：越靠上的浪越实，往下逐层变淡 -->
+    <path fill="url(#qzWave)" fill-opacity="0.34"
+      d="M 0,700 L 0,105 C 60.73582439265013,123.17304229868049 121.47164878530026,141.34608459736097 177,131 C 232.52835121469974,120.65391540263904 282.849229251449,81.78870390923665 338,82 C 393.150770748551,82.21129609076335 453.13143420890367,121.49909976569245 504,119 C 554.8685657910963,116.50090023430755 596.6250339129363,72.21489702799357 647,63 C 697.3749660870637,53.78510297200642 756.3684301393514,79.64131212233322 810,88 C 863.6315698606486,96.35868787766678 911.9012455296584,87.21985448267357 964,96 C 1016.0987544703416,104.78014551732643 1072.0265877420152,131.4792699469725 1130,140 C 1187.9734122579848,148.5207300530275 1247.9924035022814,138.8630657294364 1300,130 C 1352.0075964977186,121.13693427056357 1396.0037982488593,113.0684671352818 1440,105 L 1440,700 L 0,700 Z"/>
+    <path fill="url(#qzWave)" fill-opacity="0.26"
+      d="M 0,700 L 0,245 C 52.9262301146874,226.8318411641386 105.8524602293748,208.66368232827722 165,212 C 224.1475397706252,215.33631767172278 289.51638919718823,240.17711185102974 343,253 C 396.48361080281177,265.82288814897026 438.0819829818721,266.62787026760384 491,277 C 543.9180170181279,287.37212973239616 608.1556788753237,307.31140707855474 662,291 C 715.8443211246763,274.68859292144526 759.2953015168331,222.12650141817733 805,198 C 850.7046984831669,173.87349858182267 898.6631150573437,178.182587248736 959,205 C 1019.3368849426563,231.817412751264 1092.052238253792,281.14314958687874 1139,290 C 1185.947761746208,298.85685041312126 1207.127931927488,267.24481440374893 1253,253 C 1298.872068072512,238.7551855962511 1369.436034036256,241.87759279812553 1440,245 L 1440,700 L 0,700 Z"/>
+    <path fill="url(#qzWave)" fill-opacity="0.18"
+      d="M 0,700 L 0,385 C 57.9192502158096,365.7219632507091 115.8385004316192,346.44392650141816 173,355 C 230.1614995683808,363.55607349858184 286.5652484893328,399.94625724503635 339,418 C 391.4347515106672,436.05374275496365 439.9005056110494,435.7710445184363 488,415 C 536.0994943889506,394.2289554815637 583.8327290664693,352.9695646812184 641,332 C 698.1672709335307,311.0304353187816 764.7685781230733,310.3506967566901 822,336 C 879.2314218769267,361.6493032433099 927.0929584412381,413.6276482920212 982,427 C 1036.9070415587619,440.3723517079788 1098.8595881119743,415.13871007522505 1145,395 C 1191.1404118880257,374.86128992477495 1221.4686891108645,359.8175114070786 1268,359 C 1314.5313108891355,358.1824885929214 1377.2656554445678,371.5912442964607 1440,385 L 1440,700 L 0,700 Z"/>
+    <path fill="url(#qzWave)" fill-opacity="0.12"
+      d="M 0,700 L 0,525 C 35.59960537674189,516.5161425576521 71.19921075348378,508.03228511530403 131,496 C 190.80078924651622,483.96771488469597 274.80276236280673,468.38700209643605 340,475 C 405.19723763719327,481.61299790356395 451.58973979528923,510.41970649895177 500,513 C 548.4102602047108,515.5802935010482 598.8382784560364,491.9341719077569 652,485 C 705.1617215439636,478.0658280922431 761.0571463805649,487.84360587002095 807,511 C 852.9428536194351,534.156394129979 888.9331360217043,570.6914046121593 933,561 C 977.0668639782957,551.3085953878407 1029.210309532618,495.3907756813417 1095,488 C 1160.789690467382,480.6092243186583 1240.2256258478235,521.7454926624738 1300,536 C 1359.7743741521765,550.2545073375262 1399.8871870760881,537.6272536687632 1440,525 L 1440,700 L 0,700 Z"/>
+  </svg>
+</div>
+
+<header class="appbar">
+  <div class="appbar-inner">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>
+          <circle cx="12" cy="12" r="3.2"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <strong>QZdesk Skill 控制台</strong>
+        <small>QZdesk 设备本地服务</small>
+      </span>
+    </div>
+    <div class="pills">
+      <span class="pill" id="summary">配置载入中…</span>
+      <span class="pill"><i class="dot live"></i><span>本地服务在线</span></span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <aside class="sidebar" aria-label="控制台概览">
+
+    <section class="side-stats" aria-label="Skill 统计">
+      <div class="stat-main">
+        <span>已安装 Skill</span>
+        <strong id="metricTotal">0</strong>
+      </div>
+      <div class="stat-row">
+        <span><i class="stat-mark blue"></i>主技能</span>
+        <strong id="metricPrimary">0</strong>
+      </div>
+      <div class="stat-row">
+        <span><i class="stat-mark amber"></i>备用技能</span>
+        <strong id="metricSecondary">0</strong>
+      </div>
+    </section>
+
+    <section class="side-weather" id="weatherPanel" aria-label="天气">
+      <div class="weather-head">
+        <div>
+          <h2 id="weatherCity">未设置位置</h2>
+        </div>
+        <button class="btn ghost sm" id="weatherRefresh" type="button" title="立即刷新天气">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>
+          </svg>
+          刷新
+        </button>
+      </div>
+      <div class="weather-main">
+        <span class="weather-icon" id="weatherIcon" aria-hidden="true">🌡️</span>
+        <span class="weather-temp" id="weatherTemp">--°</span>
+        <span class="weather-desc" id="weatherDesc">正在获取…</span>
+      </div>
+      <dl class="weather-grid">
+        <div><dt>体感</dt><dd id="weatherFeels">--</dd></div>
+        <div><dt>湿度</dt><dd id="weatherHumidity">--</dd></div>
+        <div><dt>风速</dt><dd id="weatherWind">--</dd></div>
+        <div><dt>今日</dt><dd id="weatherRange">--</dd></div>
+      </dl>
+      <p class="weather-note" id="weatherNote">数据更新 --:--</p>
+    </section>
+
+    <section class="side-weather side-performance" id="performanceCard" aria-label="性能监控">
+      <div class="weather-head">
+        <div>
+          <h2 id="perfState">性能监控</h2>
+        </div>
+        <div class="perf-actions">
+          <button class="btn ghost sm" id="perfToggle" type="button" title="暂停或继续自动刷新">暂停</button>
+          <button class="btn ghost sm" id="perfRefresh" type="button" title="立即刷新一次">刷新</button>
+        </div>
+      </div>
+      <div class="perf-main">
+        <span class="perf-value" id="perfCpuTile">--</span>
+        <span class="perf-level" id="perfCpuNote">CPU</span>
+      </div>
+      <dl class="weather-grid">
+        <div><dt>内存</dt><dd id="perfMemoryTile">--</dd></div>
+        <div><dt>磁盘</dt><dd id="perfStorageTile">--</dd></div>
+        <div><dt>温度</dt><dd id="perfTempTile">--</dd></div>
+        <div><dt>网络延迟</dt><dd id="perfLatency">--</dd></div>
+        <div><dt>运行时间</dt><dd id="perfUptime">--</dd></div>
+        <div><dt>Wi-Fi</dt><dd id="perfWifi">--</dd></div>
+      </dl>
+      <!-- 固定 60 个点位的迷你曲线：只换坐标，不新增节点 -->
+      <svg class="perf-spark" viewBox="0 0 300 34" preserveAspectRatio="none" aria-hidden="true">
+        <polyline id="perfLine" points=""/>
+      </svg>
+      <p class="weather-note" id="perfNote">数据更新 --:--:--</p>
+    </section>
+
+    <section class="side-guide">
+      <div class="side-label">使用流程</div>
+      <ol>
+        <li><b>01</b><span>安装或编辑 Skill</span></li>
+        <li><b>02</b><span>选择加载方式</span></li>
+        <li><b>03</b><span>保存并自动重建会话</span></li>
+      </ol>
+    </section>
+
+    <div class="side-foot"><span class="side-foot-dot"></span>本地设备服务</div>
+  </aside>
+
+  <div class="col">
+    <section class="card skills-card" aria-labelledby="skillsTitle">
+      <div class="card-head">
+        <div>
+          <p class="eyebrow">SKILLS / LIBRARY</p>
+          <h2 id="skillsTitle">Skill 列表</h2>
+        </div>
+        <button class="btn ghost sm" id="refreshBtn" onclick="load()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>
+          </svg>
+          刷新
+        </button>
+      </div>
+      <ul class="legend">
+        <li><span class="tag primary">主技能</span><span>会话建立时直接注入 SKILL.md 正文，等同于系统指令（人设、写作规范等）</span></li>
+        <li><span class="tag secondary">备用技能</span><span>只提供名字与说明；用户问题相关时，模型检索章节后读取（知识库、手册等）</span></li>
+        <li><span class="tag none">关闭</span><span>保留在设备上，模型看不到也不参与对话</span></li>
+      </ul>
+      <ul class="skills" id="skills"></ul>
+      <p class="msg" id="skillMsg" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="card chat-card" aria-labelledby="chatTitle">
+      <div class="chat-head">
+        <div>
+          <p class="eyebrow">DESKAI / CHAT</p>
+          <h2 id="chatTitle">QZdesk 对话</h2>
+        </div>
+        <span class="chat-state" id="chatState"><i class="dot live"></i><span>连接中</span></span>
+      </div>
+      <div class="chat-messages" id="chatMessages" aria-live="polite">
+        <div class="chat-empty" id="chatEmpty">正在连接 QZdesk，可以直接开始对话。</div>
+      </div>
+      <form class="chat-compose" id="chatForm">
+        <textarea id="chatInput" rows="1" placeholder="Enter 发送 / Shift+Enter 换行" maxlength="4000"></textarea>
+        <button class="btn" id="chatSend" type="submit">发送</button>
+      </form>
+      <p class="chat-note">主技能直接生效 · 备用技能 AI 按需检索</p>
+    </section>
+
+    <section class="card editor-card">
+      <details class="editor" id="editorBox">
+        <summary>
+          <span class="s-title" id="formTitle">添加 Skill</span>
+          <span class="s-act" id="formToggleHint">展开</span>
+        </summary>
+        <p class="hint" id="formSub">上传包含 SKILL.md 的 ZIP，或直接粘贴 SKILL.md 内容。新导入的 Skill 会自动设为主技能。</p>
+
+        <div class="field" style="margin-top:14px">
+          <label for="name">目录名称</label>
+          <input id="name" type="text" placeholder="例如 tcm" autocapitalize="off" autocorrect="off" spellcheck="false">
+          <small>只能用字母、数字、下划线、短横线、点</small>
+        </div>
+
+        <div class="field">
+          <span class="field-label">方式一：上传 ZIP</span>
+          <label class="dropzone" id="dropzone" for="zip">
+            <span class="dz-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 16V4M7 9l5-5 5 5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+              </svg>
+            </span>
+            <span>
+              <strong id="zipName">点击选择 ZIP，或拖到这里</strong>
+              <span>压缩包内必须包含 SKILL.md</span>
+            </span>
+            <input id="zip" type="file" accept=".zip,application/zip">
+          </label>
+        </div>
+
+        <div class="field">
+          <label for="content" id="contentLabel">方式二：直接粘贴 SKILL.md</label>
+          <textarea id="content" placeholder="粘贴 SKILL.md 内容；若开头有 name: 会自动填入目录名称"></textarea>
+        </div>
+
+        <div class="actions">
+          <button class="btn" id="saveBtn" onclick="saveSkill()">保存文本</button>
+          <button class="btn ghost" id="uploadBtn" onclick="uploadZip()">上传 ZIP</button>
+          <button class="btn ghost" id="cancelEditBtn" style="display:none" onclick="closeEditor()">取消编辑</button>
+        </div>
+        <p class="msg" id="addMsg" role="status" aria-live="polite"></p>
+
+        <div class="tip" style="margin-top:14px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>
+          </svg>
+          <span id="limitsTip">ZIP 上限 64 MiB，解压后上限 32 MB、512 个文件；保存或切换使用方式后会话会自动重建，无需重启设备。</span>
+        </div>
+      </details>
+    </section>
+  </div>
+
+</main>
+
+<div id="toast-host"></div>
+
+<script>
+const ROLE_LABEL = { none: '关闭', primary: '主技能', secondary: '备用技能' };
+const ROLE_TAG_CLASS = { none: 'none', primary: 'primary', secondary: 'secondary' };
+let editingId = null;
+/** 最近一次加载到的 Skill 列表：编辑时要查它是否只读（writable）。 */
+let skillCache = [];
+
+const $ = sel => document.querySelector(sel);
+
+function setMsg(id, text, ok) {
+  const el = $('#' + id);
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'msg' + (text ? (ok === false ? ' err' : ' ok') : '');
+}
+
+/* 异步操作期间禁用按钮，避免重复提交（.busy 负责转圈） */
+function busy(btn, text) {
+  if (!btn) return () => {};
+  const html = btn.innerHTML;
+  btn.disabled = true;
+  btn.classList.add('busy');
+  if (text) btn.textContent = text;
+  return () => {
+    btn.disabled = false;
+    btn.classList.remove('busy');
+    btn.innerHTML = html;
+  };
+}
+
+/* 统一的接口调用。
+ *
+ * 先取文本再解析：设备重启、Unauthorized、或者服务返回一页纯文本时，页面会
+ * 拿到一句能看懂的说明，而不是 "Unexpected token < in JSON"。接口自己用
+ * {"ok":false,"error":"…"} 表达的业务错误仍然原样返回给调用方。
+ */
+async function fetchJson(url, options) {
+  let res;
+  try {
+    res = await fetch(url, options);
+  } catch (error) {
+    throw new Error('无法连接设备服务：' + ((error && error.message) || '网络错误'));
+  }
+  const raw = await res.text().catch(() => '');
+  let data = null;
+  if (raw) {
+    try { data = JSON.parse(raw); } catch (_) { data = null; }
+  }
+  if (!data || typeof data !== 'object') {
+    const hint = raw.trim() ? raw.trim().slice(0, 80) : '服务没有返回内容';
+    throw new Error(res.ok ? '接口返回的不是 JSON：' + hint : `请求失败（HTTP ${res.status}）：${hint}`);
+  }
+  if (!res.ok && data.error === undefined) {
+    throw new Error(`请求失败（HTTP ${res.status}）`);
+  }
+  return data;
+}
+
+/* ---------------- 图标 ---------------- */
+const ICON_SKILL = '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3v5h5"/><path d="M19 8v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5z"/><path d="M9 13h6M9 17h4"/></svg>';
+const ICON_EMPTY = '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5-9 5-9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>';
+
+/* ---------------- 列表与配置 ---------------- */
+async function load() {
+  const stop = busy($('#refreshBtn'), '载入中…');
+  setMsg('skillMsg', '正在加载…');
+  let data;
+  try {
+    const out = await fetchJson('/api/skills');
+    data = out;
+  } catch (err) {
+    setMsg('skillMsg', '读取配置失败：' + err, false);
+    stop();
+    return;
+  }
+  stop();
+  setMsg('skillMsg', '');
+  skillCache = Array.isArray(data.skills) ? data.skills : [];
+
+  const summary = data.summary || { primary: 0, secondary: 0 };
+  /* 数值只在真的变化时弹一下 —— 状态指示，不是装饰。
+     版本号一并写出来：排查「改了怎么还是旧内容」时，先看这里变没变。 */
+  flash($('#summary'),
+    '主技能 ' + summary.primary + ' 个 · 备用技能 ' + summary.secondary + ' 个'
+    + (summary.version ? ' · 版本 ' + String(summary.version).slice(0, 8) : ''));
+  flash($('#metricTotal'), data.skills.length);
+  flash($('#metricPrimary'), summary.primary);
+  flash($('#metricSecondary'), summary.secondary);
+  /* 上限按启动介质显示：SD 卡启动不做解压限制，NAND 启动保留限制 */
+  const limits = data.limits;
+  if (limits) {
+    const zipMiB = Math.round((limits.zipBytes || 0) / 1048576);
+    const tail = '保存或切换使用方式后会话会自动重建，无需重启设备。';
+    if (limits.sdCard) {
+      $('#limitsTip').textContent =
+        '当前从 SD 卡启动：解压大小与文件数不做限制（ZIP 单包仍限 ' + zipMiB + ' MiB，受设备内存限制）。' + tail;
+    } else {
+      const maxMB = Math.round((limits.unpackedBytes || 0) / 1048576);
+      $('#limitsTip').textContent =
+        '当前从 SPI NAND 启动：ZIP 上限 ' + zipMiB + ' MiB，解压后上限 ' + maxMB + ' MB、' +
+        (limits.maxFiles || 0) + ' 个文件。' + tail;
+    }
+  }
+
+  const ul = $('#skills');
+  ul.innerHTML = '';
+  if (!data.skills.length) {
+    ul.innerHTML = '<li class="empty">' + ICON_EMPTY +
+      '还没有安装任何 Skill<br>展开下方「添加 Skill」上传 ZIP 或粘贴 SKILL.md</li>';
+    return;
+  }
+
+  /* 行进场走弹簧 + 错开（错开有上限，否则第 20 行要等近一秒才出现） */
+  data.skills.forEach((skill, index) => {
+    staggerIn(ul.appendChild(renderSkill(skill)), index);
+  });
+}
+
+function renderSkill(skill) {
+  const li = document.createElement('li');
+  li.className = 'skill';
+  li.innerHTML =
+    '<div class="skill-top">' +
+      '<span class="avatar" aria-hidden="true">' + ICON_SKILL + '</span>' +
+      '<div class="skill-meta">' +
+        '<div class="skill-title">' +
+          '<span class="skill-name"></span>' +
+          '<span class="tag ' + (ROLE_TAG_CLASS[skill.role] || 'none') + '" data-role-tag></span>' +
+          '<span class="skill-id"></span>' +
+        '</div>' +
+        '<p class="skill-desc"></p>' +
+      '</div>' +
+    '</div>' +
+    '<div class="skill-foot">' +
+      '<div class="seg" role="group" aria-label="' + skill.id + ' 的使用方式">' +
+        '<button type="button" data-role="none">关闭</button>' +
+        '<button type="button" data-role="primary">主技能</button>' +
+        '<button type="button" data-role="secondary">备用</button>' +
+      '</div>' +
+      '<span class="spacer"></span>' +
+      '<button class="btn ghost sm" type="button" data-act="edit">编辑</button>' +
+      '<button class="btn danger sm" type="button" data-act="delete">删除</button>' +
+    '</div>';
+
+  li.querySelector('.skill-name').textContent = skill.name;
+  li.querySelector('.skill-id').textContent = skill.id;
+  applyRole(li, skill.role || 'none');
+
+  const desc = li.querySelector('.skill-desc');
+  const full = skill.description || '（SKILL.md 没有描述，也没有可用作说明的正文首行）';
+  const chars = Array.from(full);
+  let expanded = false;
+  const renderDesc = () => {
+    desc.textContent = expanded || chars.length <= 60 ? full : chars.slice(0, 60).join('') + '…';
+    if (chars.length > 60) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'desc-toggle';
+      toggle.textContent = expanded ? '收起' : '展开';
+      toggle.onclick = () => { expanded = !expanded; renderDesc(); };
+      desc.appendChild(toggle);
+    }
+  };
+  renderDesc();
+
+  for (const btn of li.querySelectorAll('.seg button')) {
+    btn.onclick = () => setRole(skill.id, btn.dataset.role, li);
+  }
+
+  li.querySelector('[data-act="edit"]').onclick = () => openEditor(skill.id);
+  li.querySelector('[data-act="delete"]').onclick = async (e) => {
+    if (!confirm('确定删除 ' + skill.id + ' ？该操作会同时删除其参考文件。')) return;
+    const stop = busy(e.currentTarget, '删除中…');
+    try {
+      const out = await fetchJson('/api/skills/' + encodeURIComponent(skill.id), { method: 'DELETE' });
+      if (!out.ok) {
+        setMsg('skillMsg', out.error || '删除失败', false);
+        stop();
+        return;
+      }
+      if (editingId === skill.id) closeEditor();
+      setMsg('skillMsg', skill.id + ' 已删除');
+      toast('ok', 'Skill 已删除', skill.id);
+      load();
+    } catch (err) {
+      setMsg('skillMsg', '删除失败：' + err, false);
+      stop();
+    }
+  };
+
+  return li;
+}
+
+function applyRole(li, role) {
+  for (const btn of li.querySelectorAll('.seg button')) {
+    btn.setAttribute('aria-pressed', String(btn.dataset.role === role));
+  }
+  const tag = li.querySelector('[data-role-tag]');
+  if (tag) {
+    tag.className = 'tag ' + (ROLE_TAG_CLASS[role] || 'none');
+    tag.textContent = ROLE_LABEL[role] || role;
+  }
+}
+
+async function setRole(id, role, li) {
+  const group = li.querySelector('.seg');
+  const buttons = Array.from(group.querySelectorAll('button'));
+  buttons.forEach(b => { b.disabled = true; });
+  try {
+    const out = await fetchJson('/api/skills/' + encodeURIComponent(id) + '/selection', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role })
+    });
+    if (!out.ok) {
+      setMsg('skillMsg', out.error || '保存失败', false);
+      return;
+    }
+    applyRole(li, role);
+    /* Say what the change actually does: the three roles now differ in how the
+     * Skill reaches the model, not just in a label. */
+    const effect = role === 'primary' ? '正文随会话注入，下一条消息起直接生效'
+                 : role === 'secondary' ? '不再占用上下文，问题相关时才被检索'
+                 : '模型不再看到它';
+    setMsg('skillMsg', id + ' 已设为「' + ROLE_LABEL[role] + '」：' + effect + '（会话已重建）');
+    toast('ok', '已设为「' + ROLE_LABEL[role] + '」', id + '：' + effect);
+    load();
+  } catch (err) {
+    setMsg('skillMsg', '保存失败：' + err, false);
+  } finally {
+    buttons.forEach(b => { b.disabled = false; });
+  }
+}
+
+/* ---------------- DeskAI 对话 ---------------- */
+let chatStream = null;
+
+function setChatState(label, kind) {
+  const state = $('#chatState');
+  if (!state) return;
+  state.className = 'chat-state' + (kind ? ' ' + kind : '');
+  state.innerHTML = '<i class="dot ' + (kind === 'offline' ? '' : kind === 'busy' ? 'busy' : 'live') + '"></i><span></span>';
+  state.querySelector('span').textContent = label;
+}
+
+/* 核心里的记录带 user / assistant / system 三种角色，页面上对应三种气泡；
+ * 未知角色一律按助手显示。 */
+function chatRoleClass(role) {
+  return role === 'user' ? 'user' : role === 'system' ? 'system' : 'assistant';
+}
+
+function addChatMessage(text, role, animate) {
+  if (!text || !text.trim()) return;
+  const empty = $('#chatEmpty');
+  if (empty) empty.remove();
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble ' + chatRoleClass(role);
+  bubble.textContent = text.trim();
+  const box = $('#chatMessages');
+  box.appendChild(bubble);
+  /* 补历史时不逐条弹入：一次几十条会变成一串无意义的抖动 */
+  if (animate !== false) bubbleIn(bubble);
+  box.scrollTop = box.scrollHeight;
+}
+
+/* 先连实时流、再补历史，两条来源用记录自带的 id 对齐：历史里最大 id 之后的
+ * 实时消息才需要追加，所以既不会漏也不会重复。 */
+let chatReady = false;
+let chatLastId = 0;
+const chatPending = [];
+
+function chatEntryId(data) {
+  const id = data && Number(data.id);
+  return Number.isFinite(id) ? id : 0;
+}
+
+async function loadChatHistory() {
+  try {
+    /* 统一走 fetchJson：服务重启或返回非 JSON 时这里会抛错，页面照旧从空面板开始 */
+    const data = await fetchJson('/api/chat/history');
+    const messages = Array.isArray(data && data.messages) ? data.messages : [];
+    messages.forEach(item => {
+      chatLastId = Math.max(chatLastId, chatEntryId(item));
+      addChatMessage(item && item.text, item && item.role, false);
+    });
+  } catch (_) { /* 取不到历史就从空面板开始，后面的消息仍会实时到达 */ }
+  chatReady = true;
+  chatPending.forEach(item => {
+    if (chatEntryId(item) > chatLastId) addChatMessage(item && item.text, item && item.role);
+  });
+  chatPending.length = 0;
+}
+
+function connectChatStream() {
+  if (!window.EventSource) {
+    setChatState('浏览器不支持实时回复', 'offline');
+    return;
+  }
+  if (chatStream) chatStream.close();
+  chatStream = new EventSource('/api/chat/stream');
+  chatStream.onopen = () => setChatState('在线', '');
+  chatStream.onerror = () => setChatState('等待连接', 'busy');
+  chatStream.onmessage = event => {
+    let data;
+    try { data = JSON.parse(event.data); } catch (_) { return; }
+    /* 记录在核心侧就已经成对写好（含去重），这里只负责显示：这个页面和设备
+     * 屏幕上的对话是同一份，顺序也一致。 */
+    setChatState('在线', '');
+    if (!chatReady) { chatPending.push(data); return; }
+    if (chatEntryId(data) > chatLastId) addChatMessage(data && data.text, data && data.role);
+    chatLastId = Math.max(chatLastId, chatEntryId(data));
+  };
+}
+
+$('#chatForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = $('#chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+  const stop = busy($('#chatSend'), '发送中…');
+  input.value = '';
+  input.style.height = '46px';
+  /* 不在本地先画一条气泡：核心收到后会把它记成用户消息再推回来，这样网页与
+   * 设备屏幕上的这条消息是同一条记录，不会出现“一边有、一边没有”。 */
+  setChatState('等待回复', 'busy');
+  try {
+    const out = await fetchJson('/api/chat/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    if (!out.ok) {
+      addChatMessage(out.error || '发送失败，请先启用一个主技能。', 'system');
+      setChatState('需要配置', 'offline');
+      toast('err', '发送失败', out.error || '请先在列表里启用一个主技能');
+    }
+    /* 202 = 已交给核心：文字会在设备侧合成成语音再上行，回复照常从 SSE 流里回来 */
+  } catch (err) {
+    addChatMessage('网络通道不可用：' + err, 'system');
+    setChatState('离线', 'offline');
+  } finally {
+    stop();
+  }
+});
+
+$('#chatInput').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    $('#chatForm').requestSubmit();
+  }
+});
+$('#chatInput').addEventListener('input', event => {
+  event.target.style.height = '46px';
+  event.target.style.height = Math.min(event.target.scrollHeight, 140) + 'px';
+});
+connectChatStream();
+/* 先订阅实时流再补历史：中间这一小段的实时消息会在 loadChatHistory() 里按 id
+ * 去重后补上，既不会漏也不会重复。 */
+loadChatHistory();
+
+/* ---------------- 查看 / 编辑 ---------------- */
+const editorBox = $('#editorBox');
+editorBox.addEventListener('toggle', () => {
+  $('#formToggleHint').textContent = editorBox.open ? '收起' : '展开';
+});
+
+async function openEditor(id) {
+  try {
+    const out = await fetchJson('/api/skills/' + encodeURIComponent(id) + '/content');
+    if (!out.ok) {
+      setMsg('skillMsg', out.error || '读取失败', false);
+      return;
+    }
+    editingId = id;
+    const current = skillCache.find(item => item && item.id === id) || {};
+    $('#formTitle').textContent = '编辑 Skill：' + id;
+    /* 只读技能（OEM / 源码目录）也能改，但保存会写成用户目录里的覆盖版本：
+       这一点必须说清，否则用户会以为改动落在原目录上。 */
+    $('#formSub').textContent = current.writable === false
+      ? '这是只读 Skill（位于 OEM 或源码目录）：保存后会创建用户覆盖版本，原目录不动。'
+      : '修改后点「保存文本」即可覆盖原 SKILL.md，保存后会话自动重建。';
+    $('#name').value = id;
+    $('#name').disabled = true;
+    $('#content').value = out.content;
+    $('#saveBtn').textContent = '保存修改';
+    $('#uploadBtn').style.display = 'none';
+    $('#cancelEditBtn').style.display = '';
+    editorBox.open = true;
+    editorBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setMsg('addMsg', '已载入 ' + id + ' 的 SKILL.md');
+  } catch (err) {
+    setMsg('skillMsg', '读取失败：' + err, false);
+  }
+}
+
+function closeEditor() {
+  editingId = null;
+  $('#formTitle').textContent = '添加 Skill';
+  $('#formSub').textContent = '上传包含 SKILL.md 的 ZIP，或直接粘贴 SKILL.md 内容。新导入的 Skill 会自动设为主技能。';
+  $('#name').value = '';
+  $('#name').disabled = false;
+  $('#content').value = '';
+  $('#saveBtn').textContent = '保存文本';
+  $('#uploadBtn').style.display = '';
+  $('#cancelEditBtn').style.display = 'none';
+  resetZip();
+  setMsg('addMsg', '');
+}
+
+/* ---------------- ZIP 选择（点击 + 拖放） ---------------- */
+function resetZip() {
+  const zip = $('#zip');
+  if (zip) zip.value = '';
+  $('#zipName').textContent = '点击选择 ZIP，或拖到这里';
+}
+
+const dropzone = $('#dropzone');
+const zipInput = $('#zip');
+zipInput.addEventListener('change', () => {
+  const file = zipInput.files[0];
+  $('#zipName').textContent = file ? file.name + ' · ' + Math.max(1, Math.round(file.size / 1024)) + ' KB' : '点击选择 ZIP，或拖到这里';
+});
+['dragenter', 'dragover'].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault();
+  dropzone.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault();
+  dropzone.classList.remove('over');
+}));
+dropzone.addEventListener('drop', e => {
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!file) return;
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  zipInput.files = transfer.files;
+  $('#zipName').textContent = file.name + ' · ' + Math.max(1, Math.round(file.size / 1024)) + ' KB';
+});
+
+/* ---------------- 新增 / 覆盖 ---------------- */
+async function saveSkill() {
+  const name = $('#name').value.trim();
+  const content = $('#content').value;
+  if (!name || !content.trim()) {
+    setMsg('addMsg', '请填写目录名称和 SKILL.md 内容', false);
+    return;
+  }
+  const stop = busy($('#saveBtn'), '保存中…');
+  try {
+    const out = await fetchJson('/api/skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, content })
+    });
+    if (!out.ok) {
+      setMsg('addMsg', out.error || '保存失败', false);
+      return;
+    }
+    setMsg('addMsg', editingId ? '已保存修改，会话已自动重建生效' : '保存成功，已作为主技能生效（可在列表中改成备用或关闭）');
+    toast('ok', editingId ? '已保存修改' : 'Skill 已保存', name + ' · 会话重建后生效');
+    closeEditor();
+    load();
+  } catch (err) {
+    setMsg('addMsg', '保存失败：' + err, false);
+  } finally {
+    stop();
+  }
+}
+
+async function uploadZip() {
+  const name = $('#name').value.trim();
+  const file = $('#zip').files[0];
+  if (!name || !file) {
+    setMsg('addMsg', '请填写目录名称并选择 ZIP 文件', false);
+    return;
+  }
+  const stop = busy($('#uploadBtn'), '上传中…');
+  setMsg('addMsg', '正在上传并解压…');
+  try {
+    /* Browser request headers only accept ISO-8859-1. Skill names may be
+       Chinese or contain emoji, so keep the name in a UTF-8 request envelope. */
+    const zip = new Uint8Array(await file.arrayBuffer());
+    const nameBytes = new TextEncoder().encode(name);
+    const body = new Uint8Array(4 + nameBytes.length + zip.length);
+    new DataView(body.buffer).setUint32(0, nameBytes.length);
+    body.set(nameBytes, 4);
+    body.set(zip, 4 + nameBytes.length);
+    const out = await fetchJson('/api/skills/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-qzdesk-skill-zip' },
+      body
+    });
+    if (!out.ok) {
+      setMsg('addMsg', out.error || '上传失败', false);
+      return;
+    }
+    setMsg('addMsg', '上传成功，已作为主技能生效（可在列表中改成备用或关闭）');
+    toast('ok', 'ZIP 已安装', name + ' 已解压并设为主技能');
+    closeEditor();
+    load();
+  } catch (err) {
+    setMsg('addMsg', '上传失败：' + err, false);
+  } finally {
+    stop();
+  }
+}
+
+/* 粘贴 SKILL.md 时自动识别 name: 字段填目录名 */
+$('#content').addEventListener('input', () => {
+  if (editingId) return;
+  const nameInput = $('#name');
+  if (nameInput.value.trim()) return;
+  const match = $('#content').value.match(/^\s*name\s*:\s*"?([A-Za-z0-9_.\-]+)"?\s*$/m);
+  if (match) nameInput.value = match[1];
+});
+
+/* ===========================================================================
+   动效
+   ---------------------------------------------------------------------------
+   固定时长的贝塞尔曲线只有"到位"一种结局；弹簧是二阶系统，会过冲、会回摆、
+   自己收敛 —— 那一点过冲就是"流体"的来源。这里把弹簧积分成关键帧交给
+   element.animate()：既有弹簧的手感，又跑在合成器线程上，不占主线程。
+   其余过渡一律交给 CSS transition，同样跑在合成器上，且能从当前值续接。
+   =========================================================================== */
+const mqMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const mqFine = matchMedia('(hover: hover) and (pointer: fine)');
+const reducedMotion = () => mqMotion.matches;
+
+/* 把弹簧积分成关键帧：a = -ω²(x-target) - 2ζωv，固定子步长保证不同刷新率手感一致 */
+function springFrames(from, to, opt) {
+  opt = opt || {};
+  const damping = opt.damping != null ? opt.damping : 1;
+  const response = opt.response != null ? opt.response : .4;
+  const velocity = opt.velocity || 0;
+  const build = opt.build;
+  const w = 2 * Math.PI / response, z = damping;
+  const h = 1 / 240;
+  let x = from, v = velocity, t = 0, acc = 1e9;
+  const out = [];
+  const limit = response * 8 + .35;
+  while (t < limit) {
+    v += (-w * w * (x - to) - 2 * z * w * v) * h;
+    x += v * h;
+    t += h; acc += h;
+    if (acc >= 1 / 120) { acc = 0; out.push([t, x]); }
+    if (Math.abs(x - to) < 1e-4 && Math.abs(v) < 1e-3) break;
+  }
+  const total = Math.max(t, .06);
+  const keyframes = out.map(([tt, vv]) =>
+    Object.assign({ offset: Math.min(tt / total, 1) }, build(vv)));
+  keyframes.push(Object.assign({ offset: 1 }, build(to)));
+  return { keyframes: keyframes, duration: total * 1000 };
+}
+
+/* fill 用 backwards 而不是 both：动画结束后元素自然回到静止态，
+   不会留下一个永久的 transform 把 fixed 子元素带偏 */
+function springIn(el, opt) {
+  if (!el || !el.animate) return;
+  const from = opt.from != null ? opt.from : 1;
+  const to = opt.to != null ? opt.to : 0;
+  if (reducedMotion()) {
+    /* 减少动态：不做位移，只保留一次短的交叉淡入 */
+    el.animate(to < from ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 0 }, { opacity: 1 }],
+               { duration: 200, easing: 'ease', fill: 'backwards' });
+    return;
+  }
+  const r = springFrames(from, to, opt);
+  el.animate(r.keyframes, {
+    duration: r.duration, easing: 'linear', fill: 'backwards', delay: opt.delay || 0
+  });
+}
+
+/* 落定式入场：从 0 弹到 1，位移只有几像素 */
+function riseIn(el, delay) {
+  springIn(el, {
+    from: 0, to: 1, damping: .86, response: .5, delay: delay || 0,
+    build: p => ({
+      opacity: String(Math.max(0, Math.min(1, p))),
+      transform: 'translateY(' + ((1 - p) * 10).toFixed(2) + 'px)'
+    })
+  });
+}
+
+/* 列表行错开进场：错开上限 5 档，否则第 20 行要等近一秒，那不叫节奏叫卡顿 */
+function staggerIn(el, index) {
+  springIn(el, {
+    from: 0, to: 1, damping: .84, response: .46, delay: Math.min(index, 5) * 45,
+    build: p => ({
+      opacity: String(Math.max(0, Math.min(1, p))),
+      transform: 'translateY(' + ((1 - p) * 8).toFixed(2) + 'px)'
+    })
+  });
+}
+
+/* 聊天气泡：略微放大 + 上移，像刚被推进对话里 */
+function bubbleIn(el) {
+  springIn(el, {
+    from: 0, to: 1, damping: .82, response: .42,
+    build: p => ({
+      opacity: String(Math.max(0, Math.min(1, p))),
+      transform: 'translateY(' + ((1 - p) * 6).toFixed(2) + 'px) scale(' +
+                 (.97 + p * .03).toFixed(3) + ')'
+    })
+  });
+}
+
+/* 数值只有真的变了才弹一下：状态指示，不是装饰 */
+function flash(el, text) {
+  if (!el) return;
+  const next = String(text);
+  if (el.textContent === next) return;
+  el.textContent = next;
+  el.classList.remove('pop');
+  void el.offsetWidth;            /* 强制重排，让动画能重新触发 */
+  el.classList.add('pop');
+  setTimeout(() => el.classList.remove('pop'), 300);
+}
+
+/* 按下即反馈：不等抬起、不等 click */
+document.addEventListener('pointerdown', event => {
+  const btn = event.target.closest('button');
+  if (!btn || btn.disabled) return;
+  btn.classList.add('press');
+  const off = () => btn.classList.remove('press');
+  btn.addEventListener('pointerup', off, { once: true });
+  btn.addEventListener('pointercancel', off, { once: true });
+  btn.addEventListener('pointerleave', off, { once: true });
+}, true);
+
+/* 玻璃高光跟随指针（只挂在这个子树很小的表面上） */
+if (mqFine.matches) {
+  const bar = document.querySelector('.appbar-inner');
+  if (bar) {
+    bar.addEventListener('pointermove', event => {
+      const rect = bar.getBoundingClientRect();
+      bar.style.setProperty('--mx', ((event.clientX - rect.left) / rect.width * 100).toFixed(1) + '%');
+      bar.style.setProperty('--my', ((event.clientY - rect.top) / rect.height * 100).toFixed(1) + '%');
+    }, { passive: true });
+  }
+}
+
+/* 内容滚到浮空导航下方之前先淡掉，导航就能一直保持薄 */
+function syncScrollState() {
+  document.body.classList.toggle('scrolled', window.scrollY > 6);
+}
+window.addEventListener('scroll', syncScrollState, { passive: true });
+syncScrollState();
+
+/* 提示条：进出一条路径，位移只碰 transform / opacity（合成器友好），
+   用 transition 而不是 keyframes —— 连弹多条时能从当前值续接，不会从头重放 */
+const toastHost = $('#toast-host');
+const TOAST_ICON = { ok: '✓', err: '!', warn: '!', info: 'i' };
+
+function toast(tone, title, desc, life) {
+  if (!toastHost) return;
+  tone = tone || 'info';
+  const card = document.createElement('div');
+  card.className = 'toast';
+  card.dataset.tone = tone;
+  const icon = document.createElement('div');
+  icon.className = 'ico';
+  icon.textContent = TOAST_ICON[tone] || 'i';
+  const body = document.createElement('div');
+  const head = document.createElement('b');
+  head.textContent = title;
+  body.appendChild(head);
+  if (desc) {
+    const note = document.createElement('span');
+    note.textContent = desc;
+    body.appendChild(note);
+  }
+  card.appendChild(icon);
+  card.appendChild(body);
+  toastHost.appendChild(card);
+
+  card.style.transform = 'translateX(115%)';
+  card.style.opacity = '0';
+  requestAnimationFrame(() => {
+    card.style.transform = 'none';
+    card.style.opacity = '1';
+  });
+
+  let timer = setTimeout(bye, life || 3800);
+  function bye() {
+    clearTimeout(timer);
+    card.style.transform = 'translateX(115%)';
+    card.style.opacity = '0';
+    setTimeout(() => card.remove(), 340);
+  }
+  card.addEventListener('pointerenter', () => clearTimeout(timer));
+  card.addEventListener('pointerleave', () => { timer = setTimeout(bye, 1600); });
+  card.addEventListener('click', bye);
+}
+
+/* ---------------- 天气 ---------------- */
+/* 设备首页那张卡片与这一块读的是核心里的同一份快照：谁刷新，两边都会变。 */
+const WEATHER_ICON = {
+  sun: '☀', cloud: '☁', fog: '≋', drizzle: '☂', rain: '☂',
+  snow: '❄', shower: '☂', thunder: 'ϟ', hail: '❄', unknown: '—',
+};
+let weatherBusy = false;
+
+function weatherNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : null;
+}
+
+/* 写文本前先确认元素在：天气区少一个节点就抛出异常的话，后面所有初始化
+ * （包括 Skill 列表的收尾）都会被带停 —— 一个装饰性字段不该有这个权力。 */
+function setWeatherText(id, value) {
+  const el = $('#' + id);
+  if (el) el.textContent = value;
+}
+
+function renderWeather(payload) {
+  const panel = $('#weatherPanel');
+  const weather = (payload && payload.weather) || {};
+  const ok = !!(payload && payload.ok);
+  const temperature = weatherNumber(weather.temperature);
+  const feels = weatherNumber(weather.apparent);
+  const humidity = weatherNumber(weather.humidity);
+  const wind = weatherNumber(weather.wind);
+  const high = weatherNumber(weather.high);
+  const low = weatherNumber(weather.low);
+
+  setWeatherText('weatherCity', weather.city || '未设置位置');
+  setWeatherText('weatherIcon', temperature === null
+    ? '🌡️'
+    : (WEATHER_ICON[weather.icon] || WEATHER_ICON.unknown));
+  setWeatherText('weatherTemp', temperature === null ? '--°' : temperature + '°');
+  setWeatherText('weatherDesc', temperature === null
+    ? ((payload && payload.error) || weather.message || '天气暂不可用')
+    : (weather.text || '—'));
+  setWeatherText('weatherFeels', feels === null ? '--' : feels + '°');
+  setWeatherText('weatherHumidity', humidity === null ? '--' : humidity + '%');
+  setWeatherText('weatherWind', wind === null ? '--' : wind + ' ' + (weather.wind_unit || 'm/s'));
+  setWeatherText('weatherRange', (high === null || low === null) ? '--' : low + '° ~ ' + high + '°');
+  setWeatherText('weatherNote', weather.updated_full
+    ? '数据更新 ' + weather.updated_full + (ok ? '' : '（' + (weather.message || '不是最新数据') + '）')
+    : (weather.message || '数据更新 --:--'));
+
+  if (panel) {
+    panel.classList.toggle('is-loading', weather.status === 'loading');
+    panel.classList.toggle('is-stale', weather.status === 'stale');
+    panel.classList.toggle('is-error', !ok);
+  }
+}
+
+async function loadWeather() {
+  try {
+    renderWeather(await fetchJson('/api/weather'));
+  } catch (error) {
+    /* 天气接口挂了只让这一块显示不出来：Skill 列表与聊天各自独立，不受影响。 */
+    renderWeather({ ok: false, error: '天气暂不可用', weather: {} });
+    setWeatherText('weatherNote', '天气接口不可用：' + error.message);
+  }
+}
+
+async function refreshWeather() {
+  if (weatherBusy) return;
+  weatherBusy = true;
+  const panel = $('#weatherPanel');
+  const stop = busy($('#weatherRefresh'), '刷新中');
+  /* 只让图标转圈，旧数据留在原地 —— 与设备首页的行为一致 */
+  if (panel) panel.classList.add('is-loading');
+  try {
+    renderWeather(await fetchJson('/api/weather/refresh', { method: 'POST' }));
+  } catch (error) {
+    if (panel) panel.classList.remove('is-loading');
+    setWeatherText('weatherNote', '刷新失败：' + error.message);
+    toast('err', '天气刷新失败', error.message);
+  } finally {
+    weatherBusy = false;
+    stop();
+  }
+}
+
+/* 首屏：卡片与侧栏依次落定 */
+document.querySelectorAll('.card, .side-intro, .side-stats, .side-weather, .side-guide')
+  .forEach((el, index) => riseIn(el, Math.min(index, 6) * 55));
+
+load();
+$('#weatherRefresh').addEventListener('click', refreshWeather);
+loadWeather();
+/* 核心每 10 分钟自己刷新一次，页面 5 分钟对一次就够，不必更勤 */
+setInterval(loadWeather, 300000);
+
+/* ---------------- 性能监控 ---------------- */
+/* 与设备「性能监控」页读的是核心里同一份采样：页面不自己采样，阈值也由核心给
+ * （level 字段），所以两端的颜色与文字不会出现分歧。 */
+const PERF_LEVEL_TEXT = { ok: '正常', warn: '偏高', critical: '危险', unavailable: '不可用' };
+const PERF_ROLE_TEXT = { core: '核心', ui: '界面', top_cpu: 'CPU 最高', top_memory: '内存最高' };
+const PERF_SERVICE_TEXT = { running: '运行中', stopped: '已停止', disabled: '已关闭' };
+const PERF_REFRESH_MS = 2000;
+const PERF_POINTS = 60;
+
+let performanceTimer = null;
+let performancePaused = false;
+let performanceBusy = false;
+let perfSeries = [];
+let perfLastUpdate = '--:--:--';
+
+function setTextById(id, value) {
+  const el = $('#' + id);
+  if (el) el.textContent = value;
+}
+
+function perfSize(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '--';
+  const megabytes = value / 1048576;
+  if (megabytes >= 1024) return (megabytes / 1024).toFixed(1) + 'GB';
+  if (megabytes >= 100) return Math.round(megabytes) + 'MB';
+  return megabytes.toFixed(1) + 'MB';
+}
+
+function perfDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return '--';
+  const days = Math.floor(value / 86400);
+  const hours = Math.floor((value % 86400) / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  if (days > 0) return days + ' 天 ' + hours + ' 小时';
+  if (hours > 0) return hours + ' 小时 ' + minutes + ' 分';
+  return minutes + ' 分 ' + Math.floor(value % 60) + ' 秒';
+}
+
+function perfPercent(value) {
+  /* null / 空串是「没有这个值」，不能走 Number() —— Number(null) 是 0，
+   * 那会把"温度不可用"显示成 0.0°C。 */
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
+}
+
+/* 主指标（CPU）：大字号，颜色只作加分项 —— 文字已经说清状态 */
+function setPerfValue(id, text, level, available) {
+  const el = $('#' + id);
+  if (!el) return;
+  el.textContent = available ? text : '不可用';
+  el.classList.remove('is-warn', 'is-critical');
+  if (available && (level === 'warn' || level === 'critical')) el.classList.add('is-' + level);
+}
+
+/* 次要指标：数值与等级文字同格，例如「49.2% · 正常」 */
+function setPerfCell(id, text, level, available) {
+  const el = $('#' + id);
+  if (!el) return;
+  el.classList.remove('is-warn', 'is-critical', 'is-unavailable');
+  if (!available) {
+    el.textContent = '不可用';
+    el.classList.add('is-unavailable');
+    return;
+  }
+  /* 有等级才加间隔号：运行时间这类没有等级的值不该拖一条空的尾巴 */
+  const levelText = PERF_LEVEL_TEXT[level] || '';
+  el.textContent = levelText ? text + ' · ' + levelText : text;
+  if (level === 'warn' || level === 'critical') el.classList.add('is-' + level);
+}
+
+function drawPerfChart() {
+  const line = $('#perfLine');
+  if (!line) return;
+  const values = perfSeries.slice(-PERF_POINTS);
+  const filler = values.length ? values[0] : 0;
+  const padded = new Array(Math.max(0, PERF_POINTS - values.length)).fill(filler).concat(values);
+  const points = padded.map(function (value, index) {
+    const x = (index / (PERF_POINTS - 1)) * 300;
+    /* viewBox 高 34：上下各留 2px，0% 贴底、100% 贴顶 */
+    const y = 32 - Math.max(0, Math.min(100, Number(value) || 0)) * 0.3;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  });
+  line.setAttribute('points', points.join(' '));
+}
+
+function renderPerformance(payload) {
+  const data = payload || {};
+  const cpu = data.cpu || {};
+  const memory = data.memory || {};
+  const storage = data.storage || {};
+  const temperature = data.temperature || {};
+  const wifi = data.wifi || {};
+  const network = data.network || {};
+  const services = data.services || {};
+  const load = data.load || {};
+
+  const cpuPercent = perfPercent(cpu.usage_percent);
+  setPerfValue('perfCpuTile', cpuPercent === null ? '--' : cpuPercent.toFixed(1) + '%',
+               cpu.level, cpuPercent !== null);
+  setTextById('perfCpuNote', cpuPercent === null
+    ? 'CPU 不可用'
+    : 'CPU · 负载 ' + Number(load.one || 0).toFixed(2));
+
+  const memoryPercent = perfPercent(memory.usage_percent);
+  setPerfCell('perfMemoryTile', memoryPercent === null ? '' : memoryPercent.toFixed(1) + '%',
+              memory.level, memoryPercent !== null);
+
+  const storagePercent = perfPercent(storage.usage_percent);
+  setPerfCell('perfStorageTile', storagePercent === null ? '' : storagePercent.toFixed(1) + '%',
+              storage.level, storagePercent !== null);
+
+  const celsius = perfPercent(temperature.celsius);
+  setPerfCell('perfTempTile', celsius === null ? '' : celsius.toFixed(1) + '°C',
+              temperature.level, celsius !== null);
+
+  const latency = perfPercent(network.latency_ms);
+  setPerfCell('perfLatency', latency === null ? '' : latency.toFixed(1) + ' ms',
+              network.level, latency !== null);
+
+  const uptime = Number(data.uptime_secs);
+  setPerfCell('perfUptime', perfDuration(data.uptime_secs), '', Number.isFinite(uptime) && uptime > 0);
+
+  const dbm = perfPercent(wifi.signal_dbm);
+  setPerfCell('perfWifi', dbm === null ? '' : dbm + ' dBm', wifi.level, dbm !== null);
+
+  if (cpuPercent !== null) {
+    perfSeries.push(cpuPercent);
+    while (perfSeries.length > PERF_POINTS) perfSeries.shift();
+  }
+  drawPerfChart();
+
+  const timestamp = Number(data.timestamp);
+  const when = new Date((Number.isFinite(timestamp) && timestamp > 0
+    ? timestamp : Math.floor(Date.now() / 1000)) * 1000);
+  perfLastUpdate = when.toLocaleTimeString();
+  const errors = Array.isArray(data.errors) ? data.errors : [];
+  const note = $('#perfNote');
+  if (note) {
+    note.classList.toggle('is-error', errors.length > 0);
+    note.textContent = '更新 ' + perfLastUpdate
+      + ' · 核心 ' + (PERF_SERVICE_TEXT[services.qzdesk_core] || '未知')
+      + (errors.length ? ' · ' + errors.length + ' 项不可用' : ' · 全部正常');
+  }
+}
+
+async function loadPerformance() {
+  if (performanceBusy) return;
+  performanceBusy = true;
+  try {
+    renderPerformance(await fetchJson('/api/performance'));
+  } catch (error) {
+    /* 接口挂了只影响这一块：Skill 列表与聊天各自独立。
+     * 网络错误保留上一次数据，只在底部说明。 */
+    const note = $('#perfNote');
+    if (note) {
+      note.classList.add('is-error');
+      note.textContent = '数据更新 ' + perfLastUpdate + ' · 性能接口不可用：' + error.message;
+    }
+  } finally {
+    performanceBusy = false;
+  }
+}
+
+async function loadPerformanceHistory() {
+  try {
+    const data = await fetchJson('/api/performance/history');
+    const samples = Array.isArray(data.samples) ? data.samples : [];
+    perfSeries = samples.map(function (item) {
+      return perfPercent(item.cpu_percent) || 0;
+    }).slice(-PERF_POINTS);
+    drawPerfChart();
+  } catch (_) { /* 历史拿不到就让实时点自己攒，曲线照样会画出来 */ }
+}
+
+/* 先清再起：反复切换不会叠加出多个定时器 */
+function stopPerformance() {
+  if (performanceTimer) {
+    clearInterval(performanceTimer);
+    performanceTimer = null;
+  }
+}
+
+function startPerformance() {
+  stopPerformance();
+  if (performancePaused) return;
+  performanceTimer = setInterval(loadPerformance, PERF_REFRESH_MS);
+}
+
+function setPerformanceState(text, paused) {
+  const card = $('#performanceCard');
+  if (card) card.classList.toggle('is-paused', !!paused);
+  const button = $('#perfToggle');
+  if (button) button.textContent = paused ? '继续' : '暂停';
+  const note = $('#perfNote');
+  if (note && paused) {
+    note.classList.remove('is-error');
+    note.textContent = '已暂停 · 上次更新 ' + perfLastUpdate;
+  }
+}
+
+$('#perfRefresh').addEventListener('click', function () {
+  loadPerformance();
+  loadPerformanceHistory();
+});
+$('#perfToggle').addEventListener('click', function () {
+  performancePaused = !performancePaused;
+  if (performancePaused) {
+    stopPerformance();
+    setPerformanceState('已暂停', true);
+  } else {
+    setPerformanceState('实时', false);
+    loadPerformance();
+    startPerformance();
+  }
+});
+/* 切到后台就停采样请求，切回来再继续（用户暂停时不自动恢复） */
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) {
+    stopPerformance();
+  } else if (!performancePaused) {
+    loadPerformance();
+    startPerformance();
+  }
+});
+/* 离开页面：清掉定时器与聊天流的连接，不给设备留无谓的连接 */
+window.addEventListener('pagehide', function () {
+  stopPerformance();
+  if (chatStream) chatStream.close();
+});
+
+setPerformanceState('实时', false);
+loadPerformanceHistory();
+loadPerformance();
+startPerformance();
+</script>
+</body>
+</html>

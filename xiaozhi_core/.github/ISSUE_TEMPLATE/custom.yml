@@ -1,0 +1,12 @@
+name: General Discussion / Custom Issue
+description: Anything else that doesn't fit into Bug or Feature categories
+title: "[Custom]: "
+body:
+  - type: textarea
+    id: content
+    attributes:
+      label: Discussion Content
+      description: Feel free to express your ideas or report something unique.
+      placeholder: Write your content here...
+    validations:
+      required: true

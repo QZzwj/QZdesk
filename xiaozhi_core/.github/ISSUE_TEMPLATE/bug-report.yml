@@ -1,0 +1,74 @@
+name: Bug Report
+description: Report a software or hardware-related issue
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide as much information as possible to help us reproduce the issue.
+  - type: input
+    id: version
+    attributes:
+      label: Software Version
+      description: Which version or git commit are you using?
+      placeholder: e.g., v1.2.0 or commit a1b2c3d
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware Device
+      description: Specify the board or SoC model.
+      placeholder: e.g., Luckfox Pico, RV1106, Raspberry Pi
+    validations:
+      required: true
+  - type: input
+    id: soundcard
+    attributes:
+      label: Sound Card Device
+      description: "Specify your audio hardware. Options: On-board (Internal Codec/I2S), USB Audio Device, etc."
+      placeholder: e.g., On-board I2S
+    validations:
+      required: true
+  - type: input
+    id: bug_category
+    attributes:
+      label: Bug Category
+      description: "Describe the nature of the issue. Examples: Hardware Bug (abnormal sound, noise), Software Logic Bug (auth error, connection failure)."
+      placeholder: e.g., Software Logic Bug
+    validations:
+      required: true
+  - type: input
+    id: rootfs
+    attributes:
+      label: Rootfs Environment
+      description: "Specify your rootfs environment. Options: Buildroot, Busybox, Armbian, Ubuntu, or others."
+      placeholder: e.g., Buildroot
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction Steps
+      description: How can we reproduce the issue?
+      placeholder: |
+        1. Power on the device...
+        2. Run the command...
+        3. See the error...
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have checked existing issues and this is not a duplicate.
+          required: true
+        - label: I have provided system logs (dmesg, journalctl, etc.) if applicable.
+          required: false

@@ -1,0 +1,186 @@
+name: Cross Compile
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '编译目标'
+        required: true
+        type: choice
+        options:
+          - all
+          - armv7-unknown-linux-uclibceabihf
+          - armv7-unknown-linux-gnueabihf
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+        default: 'all'
+      version:
+        description: '版本标签 (例如: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build-armv7-uclibc:
+    if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'armv7-unknown-linux-uclibceabihf' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y wget make pkg-config libasound2-dev
+
+      - name: Cache toolchain & C libraries
+        uses: actions/cache@v4
+        with:
+          path: third_party/armv7-unknown-linux-uclibceabihf
+          key: uclibc-armv7-toolchain-v2
+
+      - name: Build (armv7-unknown-linux-uclibceabihf)
+        run: bash scripts/armv7-unknown-linux-uclibceabihf/build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_linux_rs-armv7-uclibceabihf
+          path: target/armv7-unknown-linux-uclibceabihf/release/xiaozhi_linux_rs
+
+  build-aarch64-gnu:
+    if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'aarch64-unknown-linux-gnu' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y wget make pkg-config libasound2-dev
+
+      - name: Cache toolchain & C libraries
+        uses: actions/cache@v4
+        with:
+          path: third_party/aarch64-unknown-linux-gnu
+          key: gnu-aarch64-toolchain-v2
+
+      - name: Build (aarch64-unknown-linux-gnu)
+        run: bash scripts/aarch64-unknown-linux-gnu/build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_linux_rs-aarch64-gnu
+          path: target/aarch64-unknown-linux-gnu/release/xiaozhi_linux_rs
+
+  build-armv7-gnu:
+    if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'armv7-unknown-linux-gnueabihf' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y wget make pkg-config libasound2-dev
+
+      - name: Cache toolchain & C libraries
+        uses: actions/cache@v4
+        with:
+          path: third_party/armv7-unknown-linux-gnueabihf
+          key: gnu-armv7-toolchain-v2
+
+      - name: Build (armv7-unknown-linux-gnueabihf)
+        run: bash scripts/armv7-unknown-linux-gnueabihf/build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_linux_rs-armv7-gnueabihf
+          path: target/armv7-unknown-linux-gnueabihf/release/xiaozhi_linux_rs
+
+  build-x86_64-gnu:
+    if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'x86_64-unknown-linux-gnu' }}
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    permissions:
+      contents: read
+    steps:
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y curl git ca-certificates build-essential pkg-config
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (x86_64-unknown-linux-gnu)
+        run: bash scripts/x86_64-unknown-linux-gnu/build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_linux_rs-x86_64-gnu
+          path: target/release/xiaozhi_linux_rs
+
+  release:
+    if: ${{ always() && !cancelled() }}
+    needs: [build-armv7-uclibc, build-armv7-gnu, build-aarch64-gnu, build-x86_64-gnu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+
+          if [ -f artifacts/xiaozhi_linux_rs-armv7-uclibceabihf/xiaozhi_linux_rs ]; then
+            cp artifacts/xiaozhi_linux_rs-armv7-uclibceabihf/xiaozhi_linux_rs release/xiaozhi_linux_rs-armv7-uclibceabihf
+            chmod +x release/xiaozhi_linux_rs-armv7-uclibceabihf
+          fi
+          if [ -f artifacts/xiaozhi_linux_rs-aarch64-gnu/xiaozhi_linux_rs ]; then
+            cp artifacts/xiaozhi_linux_rs-aarch64-gnu/xiaozhi_linux_rs release/xiaozhi_linux_rs-aarch64-gnu
+            chmod +x release/xiaozhi_linux_rs-aarch64-gnu
+          fi
+          if [ -f artifacts/xiaozhi_linux_rs-armv7-gnueabihf/xiaozhi_linux_rs ]; then
+            cp artifacts/xiaozhi_linux_rs-armv7-gnueabihf/xiaozhi_linux_rs release/xiaozhi_linux_rs-armv7-gnueabihf
+            chmod +x release/xiaozhi_linux_rs-armv7-gnueabihf
+          fi
+          if [ -f artifacts/xiaozhi_linux_rs-x86_64-gnu/xiaozhi_linux_rs ]; then
+            cp artifacts/xiaozhi_linux_rs-x86_64-gnu/xiaozhi_linux_rs release/xiaozhi_linux_rs-x86_64-gnu
+            chmod +x release/xiaozhi_linux_rs-x86_64-gnu
+          fi
+          ls -lh release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: ${{ github.event.inputs.version }}
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
+          files: release/*

@@ -1,0 +1,190 @@
+[application]
+name = "QZdesk"
+version = "1.0.0"
+
+[board]
+type = "QZdesk"
+name = "嵌智"
+
+# 音频设备配置
+[audio]
+capture_device = "default"
+playback_device = "default"
+# 音频设备兼容性配置
+stream_format = "opus"          # 网络下发流的编码格式 "opus", "mp3", "pcm"
+playback_sample_rate = 48000
+playback_channels = 2
+playback_period_size = 960     # 硬件缓冲区配置
+
+# GUI进程配置
+[gui]
+local_port = 5678
+remote_port = 5679
+local_ip = "0.0.0.0"
+remote_ip = "127.0.0.1"
+buffer_size = 4096
+
+# 网络配置
+[network]
+ws_url = "wss://api.tenclass.net/xiaozhi/v1/"
+ota_url = "https://api.tenclass.net/xiaozhi/ota/"
+ws_token = "test-token"
+device_id = "unknown-device"
+client_id = "unknown-client"
+
+# 功能开关
+[features]
+enable_tts_display = true
+
+# 文字转语音（讯飞在线语音合成 WebAPI）
+# GUI 与 web 的文字聊天先用它把文字合成成语音，再按麦克风同样的格式发给云端；
+# 语音输入不经过这里。
+#
+# 下面这些是**默认值**，运行时可以用同名的 QZDESK_TTS_* 环境变量覆盖，这样
+# 账号密钥不必固化进二进制：
+#   QZDESK_TTS_APP_ID / QZDESK_TTS_API_KEY / QZDESK_TTS_API_SECRET
+#   QZDESK_TTS_VOICE / QZDESK_TTS_SPEED / QZDESK_TTS_VOLUME / QZDESK_TTS_PITCH
+#   QZDESK_TTS_ENABLE=0 可整体关掉
+[tts]
+enabled = true
+app_id = "b34bb460"
+api_key = "410834c1364e3fe5791375e01886b7a9"
+api_secret = "NWVkZTc3ZDNkZjI2MWEyNmMxNDFkNWM1"
+# 发音人（vcn）。账号里已开通的：x4_xiaoyan 讯飞小燕 / x4_yezi 讯飞小露 /
+# aisjiuxu 讯飞许久 / aisjinger 讯飞小婧 / aisbabyxu 讯飞许小宝
+voice = "x4_xiaoyan"
+speed = 50          # 语速 0-100，50 为默认
+volume = 50         # 音量 0-100
+pitch = 50          # 音调 0-100
+sample_rate = 16000 # raw PCM 采样率，保持 16000
+timeout_secs = 15   # 单次合成整体超时
+
+# 智能家居中枢：核心自己当 MQTT 客户端，把「设备控制」从本机扩到局域网设备。
+# 走标准 MQTT 3.1.1（QoS0），zigbee2mqtt 网关开箱即用；非 Zigbee 的设备用下面
+# 的 devices 表手写主题即可。下面是**默认值**，运行时可以用 QZDESK_SMARTHOME_*
+# 覆盖，也可以在网页控制台「智能家居」卡片里改（改动写回 xiaozhi_config.json）：
+#   QZDESK_SMARTHOME_ENABLE / _BROKER / _USER / _PASSWORD / _Z2M_TOPIC
+[smarthome]
+enabled = false                  # 默认关闭：没配 broker 时不必每次开机重连
+broker = ""                      # 例：mqtt://192.168.1.10:1883
+username = ""
+password = ""
+zigbee2mqtt_topic = "zigbee2mqtt" # Z2M 的 base topic；留空则不订阅 Z2M
+
+# 天气卡片：核心直接请求 Open-Meteo（免费、无需 API Key），缓存到本地后同时
+# 提供给设备首页的天气卡片和网页控制台，两边显示的是同一份数据。
+#
+# 下面是**默认值**，运行时可以用环境变量覆盖（换地方不必重新编译）：
+#   WEATHER_LATITUDE / WEATHER_LONGITUDE / WEATHER_CITY
+#   （也接受 QZDESK_WEATHER_* 前缀；WEATHER_ENABLE=0 可整体关掉）
+# 不填经纬度时界面显示「未设置位置」，不填城市名时同样显示它。
+[weather]
+enabled = true
+latitude = 31.2304              # 默认上海
+longitude = 121.4737
+city = "上海"
+refresh_minutes = 10            # 自动刷新间隔，同时也是缓存有效期（分钟）
+timeout_secs = 6                # 单次请求超时，硬上限 8 秒
+proxy = ""                      # 空 = 直连（默认，最稳）。env = 沿用 http_proxy/
+                                # https_proxy 环境变量；也可以直接填代理地址
+
+# 通用设备（非 Z2M）：自己声明状态与指令主题。
+# 订阅 state_topic 拿状态（payload 支持 on/off、1/0、ON/OFF 或 {"state":"ON"}），
+# 向 command_topic 发指令；kind 取 switch 或 light（light 额外支持亮度）。
+# [[smarthome.devices]]
+# id = "desk_lamp"
+# name = "书桌灯"
+# kind = "light"
+# state_topic = "home/desk_lamp/state"
+# command_topic = "home/desk_lamp/set"
+# command_on = "ON"
+# command_off = "OFF"
+
+# Hello消息参数
+[hello_message]
+format = "opus"
+sample_rate = 24000
+channels = 1
+frame_duration = 20
+
+# MCP配置
+[mcp]
+enabled = true
+
+[[mcp.tools]]
+name = "restart_simulator"
+type = "subprocess"
+description = "仅用于 QZdesk SDL 模拟器：重启模拟器的 UI 和本地核心。真实设备上不要调用。"
+executable = "./restart_simulator.sh"
+
+[[mcp.tools]]
+name = "get_system_status"
+description = "获取当前设备的系统状态，包括 CPU 负载、内存使用率、磁盘空间和运行时间。当用户询问系统压力、运行多久、负载情况时调用。"
+type = "subprocess"
+executable = "./system_status.sh"
+mode = "sync"
+timeout_ms = 5000
+[mcp.tools.input_schema]
+type = "object"
+[mcp.tools.input_schema.properties]
+
+[[mcp.tools]]
+name = "robot_move"
+description = "控制 QZdesk 设备运动。direction 可选 forward、backward、left、right、stop。"
+type = "subprocess"
+executable = "./robot_move.sh"
+mode = "sync"
+timeout_ms = 1000
+[mcp.tools.input_schema]
+type = "object"
+[mcp.tools.input_schema.properties.direction]
+type = "string"
+description = "运动方向：forward、backward、left、right 或 stop"
+
+[[mcp.tools]]
+name = "set_timer"
+description = "为设备新建一个定时提醒。当用户说“提醒我”“定个闹钟”“每天几点做什么”时调用。创建后到点会在设备屏幕上弹出提示条。hour 为 0-23，minute 为 0-59，daily 表示是否每天重复，label 是提醒内容。"
+type = "subprocess"
+executable = "python3"
+args = ["./set_timer.py"]
+mode = "sync"
+timeout_ms = 5000
+[mcp.tools.input_schema]
+type = "object"
+required = ["hour", "minute"]
+[mcp.tools.input_schema.properties.hour]
+type = "integer"
+description = "小时，取值 0-23"
+[mcp.tools.input_schema.properties.minute]
+type = "integer"
+description = "分钟，取值 0-59"
+[mcp.tools.input_schema.properties.label]
+type = "string"
+description = "提醒内容，例如 喝水、开会"
+[mcp.tools.input_schema.properties.daily]
+type = "boolean"
+description = "true 表示每天重复，false 表示只提醒一次，默认 true"
+
+[[mcp.tools]]
+name = "pomodoro"
+description = "控制设备上的番茄钟（专注-休息计时循环）。当用户说“开始番茄钟”“专注 25 分钟”“我要开始专注”“休息一下”“暂停番茄钟”“番茄钟还剩多久”时调用。action 取 start/pause/resume/stop/status；focus_minutes 为专注时长（默认 25 分钟），break_minutes 为休息时长（默认 5 分钟），cycles 为轮数（默认 4 轮）。"
+type = "subprocess"
+executable = "python3"
+args = ["./pomodoro.py"]
+mode = "sync"
+timeout_ms = 5000
+[mcp.tools.input_schema]
+type = "object"
+required = ["action"]
+[mcp.tools.input_schema.properties.action]
+type = "string"
+description = "start 开始、pause 暂停、resume 继续、stop 停止、status 查询剩余时间"
+[mcp.tools.input_schema.properties.focus_minutes]
+type = "integer"
+description = "专注时长（分钟），默认 25"
+[mcp.tools.input_schema.properties.break_minutes]
+type = "integer"
+description = "休息时长（分钟），默认 5"
+[mcp.tools.input_schema.properties.cycles]
+type = "integer"
+description = "总共几轮，默认 4"

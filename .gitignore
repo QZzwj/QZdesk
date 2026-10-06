@@ -1,0 +1,20 @@
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+*.log
+__pycache__/
+*.pyc
+
+# ---- 运行时生成：设备 id / client id / 后端地址 / 缓存 ----
+/xiaozhi_config.json
+weather_cache.json
+
+# ---- 构建产物 ----
+build/
+target/
+
+# ---- 第三方源码：LVGL 与它的 lv_conf.h（编译需要，但不入库）----
+third_party/
+
+# ---- 本地预览产物 ----
+tools/preview/

@@ -1,0 +1,22 @@
+# 忽略IDE配置文件
+.vscode/
+.idea/
+
+# 忽略编译结果
+/target
+
+# 忽略编译中间文件
+uclibc_stub/
+third_party/
+
+# 忽略配置文件
+xiaozhi_config.json
+
+# 忽略macOS文件
+.DS_Store
+
+# 参考项目
+xiaozhi-esp32/
+
+# 忽略日志文件
+*.log
