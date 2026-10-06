@@ -45,7 +45,7 @@ SRC_DIR = os.path.join(ROOT, "assets", "mascot")
 OUT_C = os.path.join(ROOT, "app", "mascot_assets.c")
 OUT_H = os.path.join(ROOT, "include", "mascot_assets.h")
 PREVIEW_DIR = os.path.join(HERE, "preview")
-STATES = ["idle", "happy", "thinking", "confused", "speaking", "blink"]
+STATES = ["idle", "happy", "thinking", "confused", "speaking", "love", "blink"]
 
 SUPERSAMPLE = 4      # working resolution multiplier for small sources
 SUPERSAMPLE_MIN_SRC = 800  # sources bigger than this are already crisp enough
@@ -55,8 +55,14 @@ OUT_SIZE = 192       # baked square size (displayed up to 164px)
 # each state gets a small manual correction: zoom multiplies the canvas (bigger
 # canvas = smaller character), dy shifts the canvas centre down in percent.
 FRAMING = {
-    "idle": (1.00, 0.0),
+    # idle 的新原图是**全身**站立（内容框 1626×2006，头带耳朵 1616 宽、约 1010 高）。
+    # 按内容框归一化会让头只有别人的一半大（切表情"忽大忽小"），而按"头占画布 88%"
+    # 收窗又会把耳朵横向切掉 —— 正确的判据是**屏幕上头的实际大小与各胸像一致**：
+    # 五个胸像的头宽平均占画布 79.7%，据此反解出 zoom 0.952（画布 2029px）、
+    # dy -19.5% 让头的中心落在画布 45% 高处，身体仍可见一部分。
+    "idle": (0.952, -19.5),
     "happy": (1.30, 0.0),
+    "love": (1.30, 0.0),   # 与 happy 同一张原图取景（抱心），跟着一起对齐
     "thinking": (1.06, 0.0),
     "confused": (1.06, 0.0),
     "speaking": (1.20, 0.0),

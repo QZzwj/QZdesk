@@ -10,6 +10,7 @@ typedef enum {
     QZ_FACE_THINKING, /* 思考 */
     QZ_FACE_HAPPY,    /* 开心 */
     QZ_FACE_CONFUSED, /* 困惑 */
+    QZ_FACE_LOVE,     /* 抱心（喜欢 / 被夸） */
     QZ_FACE_STATE_COUNT,
 } qz_face_state_t;
 

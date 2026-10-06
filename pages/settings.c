@@ -1081,7 +1081,7 @@ static void build_about_screen(void)
     lv_obj_t *hero = section_card(about_screen, 52, 92, false);
     lv_obj_t *face = qz_face_create(hero, 60);
     lv_obj_align(face, LV_ALIGN_LEFT_MID, 16, 0);
-    qz_face_set_state(face, QZ_FACE_HAPPY);
+    qz_face_set_state(face, QZ_FACE_LOVE);
     lv_obj_t *name = qz_text(hero, "QZdesk", 17, qz_color(QZ_TEXT));
     lv_obj_align(name, LV_ALIGN_LEFT_MID, 88, -14);
     lv_obj_t *caption = qz_text(hero, "AI 桌面语音助手", 11, qz_color(QZ_TEXT_SECONDARY));
