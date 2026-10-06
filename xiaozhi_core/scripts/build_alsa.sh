@@ -15,12 +15,14 @@
 #   $1 - 目标目录（alsa-shared 安装到此目录下）
 #   $2 - 构建目录（源码解压到此目录下）
 #   $3 - 交叉编译前缀（如 aarch64-linux-gnu）
-#   $4 - alsa-lib 版本号（如 1.2.12）
+#   $4 - alsa-lib 版本号（如 1.2.8）
 #   $5 - 并行编译线程数
 #
 # 前置条件:
 #   - CC, AR, RANLIB 等环境变量已设置
 #   - download_helper.sh 已 source（需要 download_file 函数）
+#   - 源码包来源优先级：XIAOZHI_ALSA_SRC 指定的包 → 仓库内
+#     third_party/sources/alsa-lib-<版本>.tar.bz2 → 联网下载
 #
 # 结果:
 #   该函数执行后，会直接设置全局环境变量:
@@ -48,8 +50,19 @@ build_alsa_shared() {
         local alsa_url="https://github.com/Hyrsoft/xiaozhi_linux_rs/releases/download/Source_Mirror/${alsa_tarball}"
 
         if [ ! -d "$alsa_src_dir" ]; then
-            echo "下载 alsa-lib..."
-            download_file "$alsa_url" "$build_dir/${alsa_tarball}"
+            # 优先用仓库里随附的源码包（third_party/sources/）：交叉编译不必联网。
+            # XIAOZHI_ALSA_SRC 可指向自备的包覆盖它；两者都没有时才联网下载。
+            local script_dir local_tarball
+            script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            local_tarball="${XIAOZHI_ALSA_SRC:-$script_dir/../../third_party/sources/${alsa_tarball}}"
+
+            if [ -f "$local_tarball" ]; then
+                echo "使用随仓库的 alsa-lib 源码包: $local_tarball"
+                cp -f "$local_tarball" "$build_dir/${alsa_tarball}"
+            else
+                echo "下载 alsa-lib..."
+                download_file "$alsa_url" "$build_dir/${alsa_tarball}"
+            fi
             echo "解压 alsa-lib..."
             tar -xjf "$build_dir/${alsa_tarball}" -C "$build_dir"
             rm -f "$build_dir/${alsa_tarball}"

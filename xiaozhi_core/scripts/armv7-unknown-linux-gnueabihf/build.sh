@@ -80,7 +80,7 @@ STATIC_INCDIR="$STATIC_SYSROOT/usr/include"
 BUILD_DIR="$TARGET_DIR/build"
 
 # C 依赖库版本
-ALSA_VERSION="1.2.12"
+ALSA_VERSION="1.2.8"  # 与设备 rootfs（Buildroot 同为 1.2.8）及仓库内 third_party/sources 的源码包保持一致
 OPUS_VERSION="1.5.2"
 SPEEXDSP_VERSION="1.2.1"
 

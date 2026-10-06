@@ -23,6 +23,7 @@ TARGET=armv7-unknown-linux-musleabihf
 TOOLCHAIN="${QZDESK_MUSL_TOOLCHAIN:-/home/jn/QZdesk/tools/armv7l-linux-musleabihf-cross}"
 CROSS="$TOOLCHAIN/bin/armv7l-linux-musleabihf-"
 WORK="${QZDESK_CROSS_WORK:-$CORE_DIR/target/cross-deps}"
+VENDOR_DIR="${QZDESK_VENDOR_DIR:-$CORE_DIR/../third_party/sources}"
 ALSA_PREFIX="$WORK/alsa"
 SPEEX_PREFIX="$WORK/speexdsp"
 OPUS_PREFIX="$WORK/opus"
@@ -64,9 +65,12 @@ build_alsa() {
 	fi
 
 	local tarball
-	tarball="$(ls "$SDK_DIR"/sysdrv/source/buildroot/buildroot-*/dl/alsa-lib/alsa-lib-*.tar.* 2>/dev/null | head -1 || true)"
+	# 先用仓库里随附的源码包（third_party/sources），其次 SDK 的 buildroot dl 缓存。
+	tarball="$(ls "${XIAOZHI_ALSA_SRC:-$VENDOR_DIR/alsa-lib-*.tar.*}" 2>/dev/null | head -1 || true)"
+	[ -n "$tarball" ] || \
+		tarball="$(ls "$SDK_DIR"/sysdrv/source/buildroot/buildroot-*/dl/alsa-lib/alsa-lib-*.tar.* 2>/dev/null | head -1 || true)"
 	if [ -z "$tarball" ]; then
-		echo "找不到 alsa-lib 源码包（SDK 的 buildroot dl 目录里应该有）" >&2
+		echo "找不到 alsa-lib 源码包（应在 third_party/sources/ 或 SDK 的 buildroot dl 目录里）" >&2
 		exit 1
 	fi
 
@@ -108,6 +112,12 @@ build_opus() {
 	local src="$WORK/opus-$version"
 	if [ ! -d "$src" ]; then
 		mkdir -p "$WORK"
+		# 仓库里随附了同版本源码包，先拷过来，下面的下载分支就不会走（交叉编译不必联网）；
+		# XIAOZHI_OPUS_SRC 可指向自备的包。
+		local vendored="${XIAOZHI_OPUS_SRC:-$VENDOR_DIR/opus-$version.tar.gz}"
+		if [ ! -f "$tarball" ] && [ -f "$vendored" ]; then
+			cp -f "$vendored" "$tarball"
+		fi
 		if [ ! -f "$tarball" ]; then
 			echo "下载 opus-$version"
 			curl -fsSL -o "$tarball" \
@@ -147,6 +157,12 @@ build_speexdsp() {
 	local src="$WORK/speexdsp-$version"
 	if [ ! -d "$src" ]; then
 		mkdir -p "$WORK"
+		# 仓库里随附了同版本源码包，先拷过来，下面的下载分支就不会走（交叉编译不必联网）；
+		# XIAOZHI_SPEEXDSP_SRC 可指向自备的包。
+		local vendored="${XIAOZHI_SPEEXDSP_SRC:-$VENDOR_DIR/speexdsp-$version.tar.gz}"
+		if [ ! -f "$tarball" ] && [ -f "$vendored" ]; then
+			cp -f "$vendored" "$tarball"
+		fi
 		if [ ! -f "$tarball" ]; then
 			echo "下载 speexdsp-$version"
 			curl -fsSL -o "$tarball" \

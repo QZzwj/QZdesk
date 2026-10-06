@@ -54,7 +54,7 @@ CROSS_PREFIX="x86_64-linux-gnu"
 BUILD_DIR="$TARGET_DIR/build"
 
 # C 依赖库版本
-ALSA_VERSION="1.2.12"
+ALSA_VERSION="1.2.8"  # 与设备 rootfs（Buildroot 同为 1.2.8）及仓库内 third_party/sources 的源码包保持一致
 
 # 并行编译线程数
 NPROC=$(nproc 2>/dev/null || echo 4)

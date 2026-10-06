@@ -122,7 +122,7 @@ Protocols and ports between nodes are listed in the table below. Edge labels (`-
 > LVGL 9.2.3 and the panel's `lv_conf.h` are bundled in `third_party/` (`lvgl/`, `lv_conf.h`, `conf/dev_conf.h`). The three must stay side by side — `lv_conf.h` does `#include "conf/dev_conf.h"`, so do not split them up.
 
 > [!NOTE]
-> The `opus` and `speexdsp` source tarballs ship with the repository under `third_party/sources/`. Cross builds (or forced static linking) compile them locally with **no network access**; point `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` at your own tarballs to override them.
+> Every third-party source tarball the cross build needs ships with the repository under `third_party/sources/` (`opus`, `speexdsp`, `alsa-lib`); `build.rs`, `build_armv7.sh` and `scripts/build_alsa.sh` all prefer them, so **those steps need no network access**. Override with `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` / `XIAOZHI_ALSA_SRC`. The cross toolchain itself is not vendored (~288MB) — the scripts download it only when it is missing locally.
 
 ### Build and run in one command
 

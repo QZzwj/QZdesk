@@ -122,7 +122,7 @@ flowchart TB
 > LVGL 9.2.3 与面板的 `lv_conf.h` 直接内置在 `third_party/`（`lvgl/`、`lv_conf.h`、`conf/dev_conf.h`）。三者必须保持同级——`lv_conf.h` 里有 `#include "conf/dev_conf.h"`，调整时不要拆开。
 
 > [!NOTE]
-> `opus` 与 `speexdsp` 的源码包已随仓库提供在 `third_party/sources/`：交叉编译或强制静态链接时直接用它们本地编译，**无需联网**；也可用 `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` 指向自己的包。
+> 交叉编译需要的第三方源码包都随仓库提供在 `third_party/sources/`（`opus`、`speexdsp`、`alsa-lib`），`build.rs`、`build_armv7.sh` 与 `scripts/build_alsa.sh` 都优先用它，这几步**不再联网**；可用 `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` / `XIAOZHI_ALSA_SRC` 指向自备的包覆盖。交叉工具链本身不入库（约 288MB），脚本只在本地没有时才下载。
 
 ### 一键构建并运行
 
