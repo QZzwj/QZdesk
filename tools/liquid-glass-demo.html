@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>液态玻璃 · 精简复刻（HTML/CSS/原生 JS）</title>
+<style>
+/* ===========================================================================
+   液态玻璃的视觉特征拆解（本页全部自行实现，未取用原站任何代码）：
+     折射   —— 背景克隆层按玻璃中心放大 + SVG feDisplacementMap 边缘弯折
+     色散   —— 玻璃边缘红/青两道细条纹（盒阴影内描边，廉价但像）
+     菲涅尔 —— 锥形渐变圆环贴边（亮-暗-亮随角度变化）
+     高光   —— 跟随指针的径向亮斑 + 一道斜向 sheen
+     模糊   —— SVG 链里的 feGaussianBlur（只作用于玻璃内容）
+     阴影   —— 盒阴影 + 玻璃下方柔光
+     超椭圆 —— JS 生成 |x/a|^n+|y/b|^n=1 的 clip-path（n 可调）
+     形变   —— 弹簧积分驱动位移 + 按速度挤压拉伸（squash & stretch）
+   动画只碰 transform / opacity；滤镜链参数变化时才重排。
+   =========================================================================== */
+:root{
+  --hl:.55;        /* 高光强度 */
+  --tint:.10;      /* 白色染色 */
+  --disp-r:.30;    /* 色散红边 */
+  --disp-b:.28;    /* 色散青边 */
+  --sh:.35;        /* 阴影浓度 */
+  --ease-out:cubic-bezier(.23,1,.32,1);
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden}
+body{
+  font-family:-apple-system,"SF Pro Text","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  background:#0b1020;color:#eef2ff;
+}
+
+/* —— 背景：渐变底 + 漂浮色块。折射要有东西可折，色块越艳效果越明显 —— */
+.bg{position:fixed;inset:0;
+  background:
+    radial-gradient(120vmax 90vmax at 12% -10%, #1b2a6b 0%, transparent 55%),
+    radial-gradient(90vmax 70vmax at 95% 110%, #4d1b6b 0%, transparent 55%),
+    linear-gradient(160deg,#0e1430,#0a0f22 60%,#101a3a);
+}
+.blob{position:absolute;border-radius:50%;filter:blur(2px);opacity:.85;will-change:transform}
+.b1{width:34vmax;height:34vmax;left:-8vmax;top:-10vmax;background:radial-gradient(circle at 35% 35%,#ff7ac3,#7a2bd9 70%);animation:drift1 19s ease-in-out infinite alternate}
+.b2{width:26vmax;height:26vmax;right:-6vmax;top:8vmax;background:radial-gradient(circle at 60% 40%,#4cd6ff,#144ee6 70%);animation:drift2 23s ease-in-out infinite alternate}
+.b3{width:22vmax;height:22vmax;left:22vmax;bottom:-8vmax;background:radial-gradient(circle at 40% 40%,#ffd166,#ff5e5b 75%);animation:drift3 17s ease-in-out infinite alternate}
+.b4{width:14vmax;height:14vmax;right:24vmax;bottom:6vmax;background:radial-gradient(circle at 50% 45%,#8affc1,#0aa06e 75%);animation:drift2 13s ease-in-out infinite alternate-reverse}
+.b5{width:10vmax;height:10vmax;left:46vw;top:30vh;background:radial-gradient(circle at 50% 50%,#fff,#7ab8ff 80%);opacity:.5;animation:drift3 11s ease-in-out infinite alternate}
+@keyframes drift1{to{transform:translate(9vmax,7vmax) scale(1.15)}}
+@keyframes drift2{to{transform:translate(-8vmax,10vmax) scale(.9)}}
+@keyframes drift3{to{transform:translate(6vmax,-9vmax) scale(1.2)}}
+@media (prefers-reduced-motion:reduce){.blob{animation:none}}
+
+/* —— 玻璃本体：克隆折射层 + 染色 + 菲涅尔环 + 高光；形变全走 transform —— */
+.glass{
+  position:fixed;left:0;top:0;width:340px;height:340px;
+  will-change:transform;
+  box-shadow:0 2px 10px rgba(6,12,40,.25), 0 24px 70px rgba(6,12,60,var(--sh));
+  touch-action:none;
+}
+.lens{position:absolute;inset:0;overflow:hidden;
+  /* 色散：靠边的红/青细条纹，强度可调 */
+  box-shadow:
+    inset 0 0 0 1.4px rgba(255,64,128,var(--disp-r)),
+    inset 0 0 0 2.8px rgba(72,190,255,var(--disp-b));
+}
+.bg-clone{position:absolute;left:0;top:0;will-change:transform}
+.tint{position:absolute;inset:0;background:rgba(255,255,255,var(--tint));pointer-events:none}
+.rim{position:absolute;inset:0;padding:2px;pointer-events:none;
+  background:conic-gradient(from 215deg,
+    rgba(255,255,255,.9), rgba(255,255,255,.05) 22%,
+    rgba(140,170,255,.30) 47%, rgba(255,255,255,.05) 72%, rgba(255,255,255,.85));
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;
+}
+.sheen{position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen;
+  background:
+    radial-gradient(240px 180px at var(--mx,35%) var(--my,22%),
+      rgba(255,255,255,var(--hl)), transparent 68%),
+    linear-gradient(112deg, transparent 24%, rgba(255,255,255,.14) 40%, transparent 55%);
+}
+
+/* —— 参数面板 —— */
+.panel{position:fixed;right:14px;top:14px;width:250px;max-height:calc(100vh - 28px);overflow:auto;
+  padding:14px 16px 12px;border-radius:18px;
+  background:rgba(16,22,48,.55);backdrop-filter:blur(14px) saturate(1.4);
+  border:1px solid rgba(255,255,255,.14);box-shadow:0 10px 40px rgba(0,0,10,.4);
+  font-size:12px;z-index:10}
+.panel h1{margin:0 0 2px;font-size:14px;font-weight:650;letter-spacing:.01em}
+.panel .sub{margin:0 0 10px;color:#9fb0d8;font-size:11px}
+.row{display:flex;align-items:center;gap:8px;margin:7px 0}
+.row label{flex:0 0 56px;color:#c6d2f2}
+.row output{flex:0 0 34px;text-align:right;color:#7fb4ff;font-variant-numeric:tabular-nums}
+.row input[type=range]{flex:1;accent-color:#5a8bff;height:18px}
+.group{margin:10px 0 4px;color:#8fa3cf;letter-spacing:.08em;font-size:10px;text-transform:uppercase}
+.btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+button{flex:1;padding:7px 8px;border:0;border-radius:10px;cursor:pointer;
+  background:rgba(90,139,255,.18);color:#dfe8ff;font-size:12px;font-weight:560;
+  transition:background .15s ease,transform .1s ease}
+button:hover{background:rgba(90,139,255,.32)}
+button:active{transform:scale(.96)}
+button.on{background:#5a8bff;color:#fff}
+.hud{position:fixed;left:14px;bottom:14px;font-size:11px;color:#8fa3cf;z-index:10;
+  background:rgba(16,22,48,.55);backdrop-filter:blur(10px);
+  padding:6px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.1)}
+.hud b{color:#7fb4ff;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<!-- 背景本体 -->
+<div class="bg" id="bg"></div>
+
+<!-- 液态玻璃 -->
+<div class="glass" id="glass">
+  <div class="lens" id="lens"><div class="bg-clone" id="bgClone"></div></div>
+  <div class="tint"></div>
+  <div class="rim"></div>
+  <div class="sheen" id="sheen"></div>
+</div>
+
+<!-- 折射滤镜：位移贴图（JS 生成）→ 边缘弯折 → 高斯模糊 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="lensFilter" x="-8%" y="-8%" width="116%" height="116%" color-interpolation-filters="sRGB">
+    <feImage id="dispImage" result="map" preserveAspectRatio="none"/>
+    <feDisplacementMap id="dispNode" in="SourceGraphic" in2="map" scale="0" xChannelSelector="R" yChannelSelector="G"/>
+    <feGaussianBlur id="blurNode" stdDeviation="0"/>
+  </filter>
+</svg>
+
+<aside class="panel">
+  <h1>液态玻璃控制台</h1>
+  <p class="sub">纯 HTML + CSS + 原生 JS，无框架无依赖</p>
+
+  <div class="group">形状</div>
+  <div class="row"><label>尺寸</label><input id="pSize" type="range" min="160" max="480" value="340"><output id="oSize">340</output></div>
+  <div class="row"><label>圆角</label><input id="pRadius" type="range" min="0" max="50" value="24"><output id="oRadius">24%</output></div>
+  <div class="row"><label>超椭圆 n</label><input id="pSquircle" type="range" min="20" max="70" value="42"><output id="oSquircle">4.2</output></div>
+
+  <div class="group">光学</div>
+  <div class="row"><label>折射</label><input id="pRefract" type="range" min="0" max="100" value="55"><output id="oRefract">55</output></div>
+  <div class="row"><label>色散</label><input id="pChroma" type="range" min="0" max="100" value="55"><output id="oChroma">55</output></div>
+  <div class="row"><label>模糊</label><input id="pBlur" type="range" min="0" max="24" value="7"><output id="oBlur">7px</output></div>
+  <div class="row"><label>高光</label><input id="pHi" type="range" min="0" max="100" value="55"><output id="oHi">55</output></div>
+  <div class="row"><label>染色</label><input id="pTint" type="range" min="0" max="40" value="10"><output id="oTint">10</output></div>
+
+  <div class="group">材质 / 动画</div>
+  <div class="row"><label>阴影</label><input id="pShadow" type="range" min="0" max="100" value="45"><output id="oShadow">45</output></div>
+  <div class="row"><label>弹簧</label><input id="pStiff" type="range" min="20" max="200" value="70"><output id="oStiff">70</output></div>
+
+  <div class="group">质量档（对应低端 SoC 取舍）</div>
+  <div class="btns">
+    <button id="qFull" class="on">高</button>
+    <button id="qMid">中</button>
+    <button id="qLow">低</button>
+  </div>
+  <div class="btns">
+    <button id="poke">捏一下</button>
+    <button id="pause">暂停漂移</button>
+  </div>
+</aside>
+
+<div class="hud">FPS <b id="fps">--</b> · 帧耗时 <b id="ms">--</b>ms · <span id="qtag">高（克隆+折射+模糊）</span></div>
+
+<script>
+'use strict';
+/* ===========================================================================
+ * 参数与状态
+ * =========================================================================== */
+const $ = s => document.querySelector(s);
+const params = {
+  size: 340, radiusPct: 24, squircleN: 4.2,
+  refraction: .55, chroma: .55, blur: 7, highlight: .55, tint: .10, shadow: .45,
+  stiffness: 70, quality: 'full', paused: false,
+};
+
+const glass = $('#glass'), lens = $('#lens'), bgClone = $('#bgClone'),
+      sheen = $('#sheen'), bg = $('#bg');
+const W = () => window.innerWidth, H = () => window.innerHeight;
+
+/* 背景色块：同一份参数喂给本体与克隆，两边动画走同一时间轴，折射才对得上 */
+function buildBlobs(host){
+  const defs = [
+    ['b1', 'radial-gradient(circle at 35% 35%,#ff7ac3,#7a2bd9 70%)'],
+    ['b2', 'radial-gradient(circle at 60% 40%,#4cd6ff,#144ee6 70%)'],
+    ['b3', 'radial-gradient(circle at 40% 40%,#ffd166,#ff5e5b 75%)'],
+    ['b4', 'radial-gradient(circle at 50% 45%,#8affc1,#0aa06e 75%)'],
+    ['b5', 'radial-gradient(circle at 50% 50%,#fff,#7ab8ff 80%)'],
+  ];
+  for (const [cls, bg_] of defs){
+    const d = document.createElement('div');
+    d.className = 'blob ' + cls;
+    d.style.background = bg_;
+    host.appendChild(d);
+  }
+}
+buildBlobs(bg);
+buildBlobs(bgClone);
+
+/* ===========================================================================
+ * 超椭圆路径：圆角 r + 指数 n 的圆角矩形（n=2 是圆角，n 越大越方）
+ * 角上用参数化超椭圆 quarter：x = r·sin^(2/n)θ, y = r·cos^(2/n)θ
+ * 只在参数变化时重算，动画帧里绝不重建。
+ * =========================================================================== */
+let clipPathCache = '';
+function rebuildShape(){
+  const w = params.size, h = params.size;
+  const r = Math.min(w, h) * params.radiusPct / 100;
+  const n = Math.max(1.2, params.squircleN);
+  const e = 2 / n;
+  const SEG = 10;
+  const corner = (cx, cy, sx, sy, a0) => {
+    let d = '';
+    for (let i = 0; i <= SEG; i++){
+      const th = a0 + (Math.PI / 2) * (i / SEG);
+      const u = Math.pow(Math.abs(Math.cos(th)), e) * sx;
+      const v = Math.pow(Math.abs(Math.sin(th)), e) * sy;
+      d += (i ? 'L' : 'M') + (cx + u * r).toFixed(1) + ' ' + (cy + v * r).toFixed(1);
+    }
+    return d;
+  };
+  // 四个角：TL(0,0) TR(w,0) BR(w,h) BL(0,h)；每角 90° 扫过
+  let d = `M ${r} 0 L ${w - r} 0 `;
+  d += corner(w - r, r, 1, -1, -Math.PI / 2).replace('M', 'L');   // TR
+  d += ` L ${w} ${h - r} `;
+  d += corner(w - r, h - r, -1, 1, 0).replace('M', 'L');          // BR
+  d += ` L ${r} ${h} `;
+  d += corner(r, h - r, -1, -1, Math.PI / 2).replace('M', 'L');   // BL
+  d += ` L 0 ${r} `;
+  d += corner(r, r, 1, 1, Math.PI).replace('M', 'L');             // TL
+  d += ' Z';
+  clipPathCache = d;
+  const clip = `path('${d.replace(/"/g, '&quot;')}')`;
+  glass.style.clipPath = clip;
+  glass.style.webkitClipPath = clip;
+  // 不支持 clip-path 的浏览器退回圆角
+  glass.style.borderRadius = r + 'px';
+  lens.style.borderRadius = r + 'px';
+}
+
+/* 位移贴图：越靠边位移越大（r² 曲线），中心不动 —— 凸透镜的边缘弯折 */
+const mapCanvas = document.createElement('canvas');
+function rebuildDisplacementMap(){
+  const size = Math.min(360, params.size);
+  mapCanvas.width = size; mapCanvas.height = size;
+  const ctx = mapCanvas.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const half = size / 2, rad = half;
+  for (let y = 0; y < size; y++){
+    for (let x = 0; x < size; x++){
+      const dx = (x - half) / rad, dy = (y - half) / rad;
+      const rr = Math.min(1, Math.sqrt(dx * dx + dy * dy));
+      const f = rr * rr * .5;                    // 中心 0 → 边缘 0.5
+      const i = (y * size + x) * 4;
+      img.data[i]     = 255 * (.5 + Math.max(-.5, Math.min(.5, dx * f)));
+      img.data[i + 1] = 255 * (.5 + Math.max(-.5, Math.min(.5, dy * f)));
+      img.data[i + 2] = 128;
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  $('#dispImage').setAttribute('href', mapCanvas.toDataURL());
+  $('#dispImage').setAttribute('width', params.size);
+  $('#dispImage').setAttribute('height', params.size);
+}
+
+function applyFilterChain(){
+  const full = params.quality === 'full';
+  lens.style.filter = full ? 'url(#lensFilter)' : (params.blur > 0 ? `blur(${params.blur}px)` : 'none');
+  $('#dispNode').setAttribute('scale', (params.refraction * 90).toFixed(1));
+  $('#blurNode').setAttribute('stdDeviation', params.blur.toFixed(1));
+  $('#dispImage').style.display = full && params.refraction > 0 ? '' : 'none';
+  bgClone.style.display = params.quality === 'low' ? 'none' : '';
+}
+
+/* ===========================================================================
+ * 弹簧物理：位移 + 按速度的挤压拉伸（液体感的核心），只写 transform
+ * =========================================================================== */
+const spring = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 };
+const poke = { s: 0, v: 0 };                    // 「捏一下」的脉冲
+let baseX = 0, baseY = 0;
+const pointer = { x: -1e4, y: -1e4, down: false };
+
+function placeGlass(){
+  baseX = Math.min(W() - params.size - 290, Math.max(20, W() * .5 - params.size / 2 - 120));
+  baseY = H() * .5 - params.size / 2;
+}
+placeGlass();
+spring.x = baseX; spring.y = baseY; spring.tx = baseX; spring.ty = baseY;
+
+function stepPhysics(dt){
+  const w = params.size;
+  // 目标点 = 基准位 + 缓慢游走 + 指针排斥
+  const t = performance.now() / 1000;
+  let tx = baseX + Math.sin(t * .5) * 26 + Math.sin(t * .23) * 14;
+  let ty = baseY + Math.cos(t * .41) * 22 + Math.sin(t * .17) * 10;
+  const cx = spring.x + w / 2, cy = spring.y + w / 2;
+  const pdx = cx - pointer.x, pdy = cy - pointer.y;
+  const pd = Math.hypot(pdx, pdy);
+  if (pd < 260 && pd > 1){                       // 指针靠近：像液体一样被推开
+    const push = (260 - pd) / 260 * 70;
+    tx += pdx / pd * push; ty += pdy / pd * push;
+  }
+  if (pointer.down){ tx = pointer.x - w / 2; ty = pointer.y - w / 2; }  // 按住拖拽
+  if (params.paused){ tx = spring.tx; ty = spring.ty; }
+  spring.tx = tx; spring.ty = ty;
+
+  const k = params.stiffness;                    // a = -ω²(x-t) - 2ζωv，欠阻尼
+  const om = 2 * Math.PI / (.9 - k / 400), z = .78;
+  spring.vx += (-om * om * (spring.x - spring.tx) - 2 * z * om * spring.vx) * dt;
+  spring.vy += (-om * om * (spring.y - spring.ty) - 2 * z * om * spring.vy) * dt;
+  spring.x += spring.vx * dt; spring.y += spring.vy * dt;
+
+  // 捏一下：速度脉冲过冲后回弹
+  poke.v += (-160 * poke.s - 12 * poke.v) * dt;
+  poke.s += poke.v * dt;
+}
+
+function render(){
+  const w = params.size;
+  const spd = Math.hypot(spring.vx, spring.vy);
+  const sq = Math.min(.10, spd * .0016) + poke.s * .12;   // 速度越快挤得越扁
+  const ang = Math.atan2(spring.vy, spring.vx) * 180 / Math.PI;
+  glass.style.width = glass.style.height = w + 'px';
+  glass.style.transform =
+    `translate(${spring.x.toFixed(1)}px, ${spring.y.toFixed(1)}px) ` +
+    `rotate(${(ang * Math.min(.04, spd * .0002)).toFixed(2)}deg) ` +
+    `scale(${(1 + sq).toFixed(4)}, ${(1 - sq).toFixed(4)})`;
+
+  /* 折射同步：克隆层 = 视口大小的背景副本。
+   * transform-origin 取玻璃中心（视口系），translate 取 -玻璃左上角，
+   * scale(k>1) —— 内容便以玻璃中心为不动点放大，中心对齐、边缘外扩。 */
+  if (params.quality !== 'low'){
+    const cx = spring.x + w / 2, cy = spring.y + w / 2;
+    const k = 1 + params.refraction * .18;
+    bgClone.style.width = W() + 'px';
+    bgClone.style.height = H() + 'px';
+    bgClone.style.transformOrigin = `${cx.toFixed(1)}px ${cy.toFixed(1)}px`;
+    bgClone.style.transform = `translate(${(-spring.x).toFixed(1)}px, ${(-spring.y).toFixed(1)}px) scale(${k.toFixed(4)})`;
+  }
+}
+
+/* ===========================================================================
+ * 主循环：固定子步长积分（不同刷新率手感一致），FPS 计量，掉帧自动降档提示
+ * =========================================================================== */
+let last = performance.now(), fpsEma = 60, slowFrames = 0, autoDropped = false;
+function frame(now){
+  let dt = (now - last) / 1000; last = now;
+  if (dt > .05) dt = .05;
+  const HZ = 240, h = 1 / HZ;                    // 固定子步长
+  let acc = dt;
+  while (acc > h){ stepPhysics(h); acc -= h; }
+
+  render();
+
+  const inst = 1 / Math.max(dt, 1e-4);
+  fpsEma += (inst - fpsEma) * .08;
+  $('#fps').textContent = fpsEma.toFixed(0);
+  $('#ms').textContent = (1000 / Math.max(fpsEma, 1)).toFixed(1);
+  if (fpsEma < 42){ if (++slowFrames > 150 && !autoDropped && params.quality === 'full'){
+    setQuality('mid'); autoDropped = true;
+  } } else slowFrames = 0;
+
+  requestAnimationFrame(frame);
+}
+
+/* ===========================================================================
+ * 面板绑定
+ * =========================================================================== */
+function bind(id, out, fmt, fn){
+  const el = $(id), o = $(out);
+  el.addEventListener('input', () => { const v = +el.value; o.textContent = fmt(v); fn(v); });
+}
+function refreshStatic(){                         // 只在参数变化时做的重活
+  rebuildShape();
+  if (params.quality === 'full' && params.refraction > 0) rebuildDisplacementMap();
+  applyFilterChain();
+  document.documentElement.style.setProperty('--hl', params.highlight.toFixed(2));
+  document.documentElement.style.setProperty('--tint', params.tint.toFixed(2));
+  document.documentElement.style.setProperty('--disp-r', (params.chroma * .55).toFixed(2));
+  document.documentElement.style.setProperty('--disp-b', (params.chroma * .5).toFixed(2));
+  document.documentElement.style.setProperty('--sh', params.shadow.toFixed(2));
+}
+
+bind('#pSize', '#oSize', v => v, v => { params.size = v; placeGlass(); refreshStatic(); });
+bind('#pRadius', '#oRadius', v => v + '%', v => { params.radiusPct = v; refreshStatic(); });
+bind('#pSquircle', '#oSquircle', v => (v / 10).toFixed(1), v => { params.squircleN = v / 10; refreshStatic(); });
+bind('#pRefract', '#oRefract', v => v, v => { params.refraction = v / 100; refreshStatic(); });
+bind('#pChroma', '#oChroma', v => v, v => { params.chroma = v / 100; refreshStatic(); });
+bind('#pBlur', '#oBlur', v => v + 'px', v => { params.blur = v; applyFilterChain(); });
+bind('#pHi', '#oHi', v => v, v => { params.highlight = v / 100; refreshStatic(); });
+bind('#pTint', '#oTint', v => v, v => { params.tint = v / 100; refreshStatic(); });
+bind('#pShadow', '#oShadow', v => v, v => { params.shadow = v / 100; refreshStatic(); });
+bind('#pStiff', '#oStiff', v => v, v => { params.stiffness = v; });
+
+const QTAG = { full: '高（克隆+折射+模糊）', mid: '中（仅克隆放大+CSS模糊）', low: '低（纯样式，无克隆）' };
+function setQuality(q){
+  params.quality = q;
+  for (const id of ['qFull', 'qMid', 'qLow']) $('#' + id).classList.remove('on');
+  $('#q' + q[0].toUpperCase() + q.slice(1)).classList.add('on');
+  $('#qtag').textContent = QTAG[q];
+  refreshStatic();
+}
+$('#qFull').onclick = () => setQuality('full');
+$('#qMid').onclick = () => setQuality('mid');
+$('#qLow').onclick = () => setQuality('low');
+$('#poke').onclick = () => { poke.v = -26; };
+$('#pause').onclick = e => { params.paused = !params.paused; e.target.textContent = params.paused ? '继续漂移' : '暂停漂移'; };
+
+/* 指针：高光跟随 + 靠近排斥 + 按住拖拽 */
+addEventListener('pointermove', e => {
+  pointer.x = e.clientX; pointer.y = e.clientY;
+  sheen.style.setProperty('--mx', (e.clientX - spring.x) / params.size * 100 + '%');
+  sheen.style.setProperty('--my', (e.clientY - spring.y) / params.size * 100 + '%');
+}, { passive: true });
+addEventListener('pointerdown', e => { pointer.down = !e.target.closest('.panel'); });
+addEventListener('pointerup', () => { pointer.down = false; });
+addEventListener('resize', () => { placeGlass(); refreshStatic(); });
+
+refreshStatic();
+if (matchMedia('(prefers-reduced-motion: reduce)').matches) params.paused = true;
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
