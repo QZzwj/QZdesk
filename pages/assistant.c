@@ -6,7 +6,7 @@
 #include <string.h>
 
 #define KEYBOARD_H 140
-#define CHAT_AREA_H (QZ_SCREEN_H - QZ_TOOLBAR_H)
+#define CHAT_AREA_H (QZ_DESIGN_H - QZ_TOOLBAR_H)
 #define COMPOSER_H 48
 #define CHAT_LIST_H (CHAT_AREA_H - COMPOSER_H)
 
@@ -480,7 +480,7 @@ static lv_obj_t *mic_glyph(lv_obj_t *parent, int32_t size, lv_color_t color)
 static void build_toolbar(void)
 {
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_SCREEN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
@@ -526,7 +526,7 @@ static void build_chat_view(void)
      * flat grey. build_toolbar() runs first and is moved to the foreground in
      * qz_assistant_create() so the bar stays on top of it. */
     chat_view = lv_obj_create(screen);
-    lv_obj_set_size(chat_view, lv_pct(100), QZ_SCREEN_H);
+    lv_obj_set_size(chat_view, lv_pct(100), QZ_DESIGN_H);
     lv_obj_align(chat_view, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_opa(chat_view, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(chat_view, 0, 0);
@@ -534,7 +534,7 @@ static void build_chat_view(void)
     lv_obj_clear_flag(chat_view, LV_OBJ_FLAG_SCROLLABLE);
 
     chat_list = lv_obj_create(chat_view);
-    lv_obj_set_size(chat_list, lv_pct(100), QZ_SCREEN_H);
+    lv_obj_set_size(chat_list, lv_pct(100), QZ_DESIGN_H);
     lv_obj_align(chat_list, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_opa(chat_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(chat_list, 0, 0);
@@ -560,7 +560,7 @@ static void build_chat_view(void)
     /* iOS 26 composer: one floating glass capsule holding the field and the
      * two round controls. */
     lv_obj_t *bar = lv_obj_create(composer);
-    lv_obj_set_size(bar, QZ_SCREEN_W - 16, COMPOSER_H - 6);
+    lv_obj_set_size(bar, QZ_DESIGN_W - 16, COMPOSER_H - 6);
     lv_obj_align(bar, LV_ALIGN_CENTER, 0, -3);
     lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, 0);
     qz_style_glass(bar);

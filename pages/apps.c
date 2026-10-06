@@ -7,12 +7,12 @@
 /* Two columns of compact rows: five entries fit without shrinking the page,
  * and the shape matches the settings list so the whole shell reads as one
  * system. */
-#define ROW_W ((QZ_SCREEN_W - 3 * QZ_GUTTER) / 2)
+#define ROW_W ((QZ_DESIGN_W - 3 * QZ_GUTTER) / 2)
 #define ROW_H 52
 #define ROW_GAP 6
 #define ROW_TOP 98
 #define COL_LEFT QZ_GUTTER
-#define COL_RIGHT (QZ_SCREEN_W - QZ_GUTTER - ROW_W)
+#define COL_RIGHT (QZ_DESIGN_W - QZ_GUTTER - ROW_W)
 
 static lv_obj_t *apps_screen;
 static lv_obj_t *desktop_screen;
@@ -76,7 +76,7 @@ lv_obj_t *qz_apps_create(void)
     qz_style_screen(apps_screen);
 
     lv_obj_t *toolbar = lv_obj_create(apps_screen);
-    lv_obj_set_size(toolbar, QZ_SCREEN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 

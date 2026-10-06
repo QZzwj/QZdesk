@@ -25,9 +25,10 @@ static const char *qz_env_or(const char *name, const char *fallback)
     const char *value = getenv(name);
     return (value && value[0] != '\0') ? value : fallback;
 }
-/* QZdesk runs on a 480x320 landscape RGB panel; the simulator mirrors it. */
-#define SIMULATOR_WIDTH 480
-#define SIMULATOR_HEIGHT 320
+/* QZdesk runs on a 480x320 landscape RGB panel by default; the simulator mirrors
+ * whatever panel size the build was configured for (see include/scale.h). */
+#define SIMULATOR_WIDTH QZ_SCREEN_W
+#define SIMULATOR_HEIGHT QZ_SCREEN_H
 
 int main(void)
 {

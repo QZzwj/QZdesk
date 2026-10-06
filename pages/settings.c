@@ -8,7 +8,7 @@
 #include <string.h>
 #include <time.h>
 
-#define CONTENT_W (QZ_SCREEN_W - 2 * QZ_GUTTER)
+#define CONTENT_W (QZ_DESIGN_W - 2 * QZ_GUTTER)
 #define CARD_PAD 12
 #define MODAL_KEYBOARD_H 140
 
@@ -67,7 +67,7 @@ static void go_back(lv_event_t *event)
 static lv_obj_t *page_toolbar(lv_obj_t *screen, const char *title, lv_obj_t *back_target)
 {
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_SCREEN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
@@ -282,7 +282,7 @@ static lv_obj_t *open_modal(lv_obj_t *screen, int32_t panel_height)
     lv_obj_add_event_cb(modal_overlay, modal_dismissed, LV_EVENT_CLICKED, modal_overlay);
 
     lv_obj_t *panel = lv_obj_create(modal_overlay);
-    lv_obj_set_size(panel, QZ_SCREEN_W - 40, panel_height);
+    lv_obj_set_size(panel, QZ_DESIGN_W - 40, panel_height);
     lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 16);
     lv_obj_set_style_radius(panel, QZ_RADIUS_CARD, 0);
     /* A sheet is a deeper material than the cards: slightly more opaque, with a

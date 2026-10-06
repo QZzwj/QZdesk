@@ -11,6 +11,8 @@ weather_cache.json
 
 # ---- 构建产物 ----
 build/
+# 多面板可以各留一个构建目录（build-320x240 之类），见 CMakeLists 的 QZDESK_PANEL_*
+build-*/
 target/
 
 # ---- 本地预览产物 ----

@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define CARD_W (QZ_SCREEN_W - 2 * QZ_GUTTER) /* 452 */
+#define CARD_W (QZ_DESIGN_W - 2 * QZ_GUTTER) /* 452 */
 #define HERO_Y (QZ_TOOLBAR_H + 8)            /* 52 */
 #define HERO_H 146
 #define GRID_Y (HERO_Y + HERO_H + 8)         /* 206 */
@@ -86,7 +86,7 @@ static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int width, int height
 static void build_toolbar(void)
 {
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_SCREEN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 

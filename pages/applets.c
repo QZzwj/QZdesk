@@ -11,7 +11,7 @@
 #include <time.h>
 #include <sys/sysinfo.h>
 
-#define CONTENT_W (QZ_SCREEN_W - 2 * QZ_GUTTER)
+#define CONTENT_W (QZ_DESIGN_W - 2 * QZ_GUTTER)
 #define CARD_PAD 12
 
 /* ------------------------------------------------------------------------- *
@@ -30,7 +30,7 @@ static void go_back(lv_event_t *event)
 static lv_obj_t *make_toolbar(lv_obj_t *screen, const char *title)
 {
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_SCREEN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
@@ -389,7 +389,7 @@ static void open_add_modal(lv_event_t *event)
     lv_obj_add_event_cb(add_overlay, add_modal_dismissed, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *panel = lv_obj_create(add_overlay);
-    lv_obj_set_size(panel, QZ_SCREEN_W - 40, 236);
+    lv_obj_set_size(panel, QZ_DESIGN_W - 40, 236);
     lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 16);
     lv_obj_set_style_radius(panel, QZ_RADIUS_CARD, 0);
     qz_obj_set_bg_color(panel, QZ_CARD, 0);
@@ -931,7 +931,7 @@ static void build_control_screen(void)
     /* 这一页会随局域网设备数量变高（本机开关 + 任意多台设备），所以内容放在
      * 一个可滚动的列容器里，而不是像别的页面那样按坐标摆死。 */
     lv_obj_t *page = lv_obj_create(screen);
-    lv_obj_set_size(page, QZ_SCREEN_W, QZ_SCREEN_H - QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(page, QZ_DESIGN_W, QZ_DESIGN_H - QZ_TOOLBAR_H - 4);
     lv_obj_align(page, LV_ALIGN_TOP_LEFT, 0, QZ_TOOLBAR_H);
     lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(page, 0, 0);

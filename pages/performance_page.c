@@ -22,7 +22,7 @@
 #include <string.h>
 #include <time.h>
 
-#define CARD_W (QZ_SCREEN_W - 2 * QZ_GUTTER) /* 452 */
+#define CARD_W (QZ_DESIGN_W - 2 * QZ_GUTTER) /* 452 */
 #define CONTENT_TOP (QZ_TOOLBAR_H + 8) /* 52 */
 #define CORE_COLUMNS 5
 #define MAX_CORE_ROWS 2
@@ -588,7 +588,7 @@ lv_obj_t *qz_performance_create(lv_obj_t *apps_screen)
 
     /* 顶部：返回 + 标题 + 刷新状态与最近更新时间 */
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_SCREEN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
@@ -604,7 +604,7 @@ lv_obj_t *qz_performance_create(lv_obj_t *apps_screen)
 
     /* 内容：固定位置的一条条带，一屏装完（可滚动只是兜底：字体不同也不会被切掉） */
     lv_obj_t *content = lv_obj_create(screen);
-    lv_obj_set_size(content, QZ_SCREEN_W, QZ_SCREEN_H - CONTENT_TOP - 4);
+    lv_obj_set_size(content, QZ_DESIGN_W, QZ_DESIGN_H - CONTENT_TOP - 4);
     lv_obj_align(content, LV_ALIGN_TOP_LEFT, 0, CONTENT_TOP);
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);

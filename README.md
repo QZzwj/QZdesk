@@ -80,6 +80,7 @@ xiaozhi_linux_rs（Rust 语音核心）
 | `QZDESK_BUILD_DIR=...` | 指定构建目录（默认 `build`） |
 | `QZDESK_JOBS=N` | 并行编译任务数 |
 | `QZDESK_REPLACE_PORT_8080=0` | 不自动关闭占用 8080 的旧进程 |
+| `QZDESK_PANEL=320x240` | 按另一种面板尺寸构建并启动（默认 `480x320`） |
 
 ### 真机（RV1106）构建镜像
 
@@ -227,7 +228,9 @@ cd <Rockchip SDK>
 
 - 480×320、16 位色深，`lv_conf.h` 的 `LV_MEM_SIZE` 为 2MB；
 - 大尺寸对象不要做缩放/旋转动画（LVGL 会申请整块 ARGB 图层，嵌入式堆上容易分配失败）；
-- 面板尺寸在 SDK 设备树里设置，改屏时需保证 `QZ_SCREEN_W/H` 与面板一致。
+- 面板尺寸在 SDK 设备树里设置；界面按 **480×320 的设计稿**布局，换同比例的小屏只要
+  `-DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240`（模拟器上是 `QZDESK_PANEL=320x240 ./run.sh`），
+  坐标与字号由 `include/scale.h` 等比缩放，**不要改 theme.h**。
 
 ## 排查
 

@@ -71,8 +71,17 @@ stop_previous_qzdesk() {
 release_skill_port
 stop_previous_qzdesk
 
+# 面板尺寸可选：界面按 480×320 的设计稿布局，换成同比例的小屏只是换个系数
+# （见 include/scale.h）。  例：QZDESK_PANEL=320x240 ./run.sh
+panel_args=()
+if [[ -n "${QZDESK_PANEL:-}" ]]; then
+    panel_args=(-DQZDESK_PANEL_W="${QZDESK_PANEL%x*}" -DQZDESK_PANEL_H="${QZDESK_PANEL#*x}")
+    printf '面板尺寸：%s\n' "$QZDESK_PANEL"
+fi
+
 cmake -S "$script_dir" -B "$build_dir" \
     -DQZDESK_SIMULATOR=ON \
+    "${panel_args[@]}" \
     -DQZDESK_BUILD_CORE="${QZDESK_BUILD_CORE:-ON}"
 cmake --build "$build_dir" --target qzdesk_screen -j"${QZDESK_JOBS:-2}"
 

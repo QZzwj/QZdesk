@@ -255,14 +255,26 @@ rootfs 时跳过），否则 `wpa_cli` 无法连接。无线网卡、配置文�
 界面在 PC 上用 LVGL SDL 模拟器跑（`480x320` 窗口，鼠标模拟触摸）。一键脚本会自动配置、编译 QZdesk 和 Rust 核心，并启动界面：
 
 ```sh
-./run.sh
+./run.sh                      # 480×320（默认）
+QZDESK_PANEL=320x240 ./run.sh # 同比例的小屏
 ```
 
 真机镜像（界面与核心一起打进 `update.img`）由 Rockchip SDK 的 `./build_qzdesk.sh` 出，见仓库根 README。
 
 面板时序在 SDK 的设备树里设置（例如 `SDK/sysdrv/source/kernel/arch/arm/boot/dts/` 下的
-`*-86panel-ipc.dtsi`，其中 `hactive/vactive` 目前是 720×720）。换用 480×320 横屏面板时
-需要同步修改该处 panel 节点，界面侧只需保证 `theme.h` 的 `QZ_SCREEN_W/H` 与之一致。
+`*-86panel-ipc.dtsi`，其中 `hactive/vactive` 目前是 720×720）。换屏时同步改该处 panel 节点，
+界面侧不用改代码，只要告诉它面板多大：
+
+```sh
+cmake -S . -B build-320x240 -DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240 -DQZDESK_SIMULATOR=ON
+QZDESK_PANEL=320x240 ./run.sh          # 模拟器上直接看 320×240
+```
+
+布局一律按 **480×320 的设计稿**写，`include/scale.h` 在 LVGL 调用边界上按
+`min(宽比, 高比)` 等比缩放坐标与字号（页面里没有一处面板尺寸，所以不会出现
+「面板尺寸 - 设计常量」的混合算式）。320×240 是 4:3、比设计稿的 3:2 略高，因此它会
+等比缩到 320×213、底部留约 27px —— 不裁切也不拉伸；字号有 9px 下限
+（`-DQZ_MIN_FONT_PX` 可调），免得缩到读不清。
 
 LVGL 9.2.3 的源码与配置随仓库提供，放在 `third_party/`（`lvgl/`、`lv_conf.h`、`conf/dev_conf.h`）。
 三者必须保持同级：`lv_conf.h` 里有 `#include "conf/dev_conf.h"`。

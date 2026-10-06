@@ -23,7 +23,7 @@
 #define WEATHER_H 86
 #define SIDE_H 62
 #define SIDE_GAP 10
-#define SIDE_X (QZ_SCREEN_W - QZ_GUTTER - SIDE_W)
+#define SIDE_X (QZ_DESIGN_W - QZ_GUTTER - SIDE_W)
 #define SIDE_Y2 (HERO_Y + WEATHER_H + SIDE_GAP)
 #define SIDE_Y3 (SIDE_Y2 + SIDE_H + SIDE_GAP)
 

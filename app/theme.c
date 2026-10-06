@@ -445,7 +445,8 @@ void qz_font_init(void)
     }
     fclose(file);
     custom_font_size = (size_t)size;
-    font_body = lv_tiny_ttf_create_data_ex(custom_font_data, (size_t)size, 16,
+    /* 正文字号也按面板缩放（见 include/scale.h）：设计稿 16px，320 面板上 11px。 */
+    font_body = lv_tiny_ttf_create_data_ex(custom_font_data, (size_t)size, qz_scale_font(16),
                                            LV_FONT_KERNING_NONE, 0);
     if (!font_body) {
         free(custom_font_data);
@@ -453,14 +454,15 @@ void qz_font_init(void)
         fprintf(stderr, "QZdesk: unable to parse font %s, using fallback\n", path);
         return;
     }
-    register_font(16, font_body);
-    /* Warm the sizes the shell always needs so the first frames stay cheap. */
-    fetch_font(12);
-    fetch_font(15);
-    fetch_font(17);
-    fetch_font(22);
-    fetch_font(26);
-    fetch_font(34);
+    register_font(qz_scale_font(16), font_body);
+    /* Warm the sizes the shell always needs so the first frames stay cheap.
+     * 预热的是**缩放后**的字号：调用方拿设计稿尺寸进来，最终问的就是这些。 */
+    fetch_font(qz_scale_font(12));
+    fetch_font(qz_scale_font(15));
+    fetch_font(qz_scale_font(17));
+    fetch_font(qz_scale_font(22));
+    fetch_font(qz_scale_font(26));
+    fetch_font(qz_scale_font(34));
 }
 
 const lv_font_t *qz_font(void)
@@ -468,13 +470,16 @@ const lv_font_t *qz_font(void)
     return font_body ? font_body : &lv_font_simsun_16_cjk;
 }
 
+/* 传进来的是设计稿字号，先按面板缩放再取字体：这样页面里所有字号都跟着屏幕走，
+ * 一处都不用改（ttf 字体按需生成，任意字号都行；内置蒙塞拉特取最接近的字号）。 */
 const lv_font_t *qz_font_size(int32_t px)
 {
-    lv_font_t *font = fetch_font(px);
-    return font ? font : montserrat_for(px);
+    int32_t size = qz_scale_font(px);
+    lv_font_t *font = fetch_font(size);
+    return font ? font : montserrat_for(size);
 }
 
-const lv_font_t *qz_symbol_font(int32_t px) { return montserrat_for(px); }
+const lv_font_t *qz_symbol_font(int32_t px) { return montserrat_for(qz_scale_font(px)); }
 
 /* qz_color() and the tracked setters are defined with the palette above. */
 

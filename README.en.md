@@ -80,6 +80,7 @@ Requirements: CMake ≥ 3.12.4, a C/C++ and a Rust toolchain (the core uses edit
 | `QZDESK_BUILD_DIR=...` | Build directory (default `build`) |
 | `QZDESK_JOBS=N` | Number of parallel build jobs |
 | `QZDESK_REPLACE_PORT_8080=0` | Do not kill the process holding port 8080 |
+| `QZDESK_PANEL=320x240` | Build and run for a different panel size (default `480x320`) |
 
 ### Building the device image (RV1106)
 
@@ -227,7 +228,10 @@ The UI follows Apple's light-mode HIG. All design tokens live in `include/theme.
 
 - 480×320 at 16-bit colour depth; `LV_MEM_SIZE` in `lv_conf.h` is 2MB;
 - Do not animate scale or rotation on large objects (LVGL allocates a full ARGB layer for them, which easily fails on the embedded heap);
-- Panel size is set in the SDK device tree; when changing panels, keep `QZ_SCREEN_W/H` in sync with it.
+- Panel size is set in the SDK device tree, while the UI is laid out for a **480×320 design**; to
+  target a smaller panel of the same kind, pass `-DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240`
+  (`QZDESK_PANEL=320x240 ./run.sh` in the simulator) and let `include/scale.h` scale coordinates
+  and fonts — **do not edit theme.h**.
 
 ## Troubleshooting
 

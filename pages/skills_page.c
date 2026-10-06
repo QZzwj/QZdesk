@@ -10,7 +10,7 @@
  * a skill between 主技能 / 备用 / 关闭. Editing and adding skills stays in the
  * web console (a text editor does not fit here), which the footer points at. */
 
-#define CONTENT_W (QZ_SCREEN_W - 2 * QZ_GUTTER)
+#define CONTENT_W (QZ_DESIGN_W - 2 * QZ_GUTTER)
 #define CARD_PAD 12
 #define ROW_H 52
 #define PANEL_PAD 12
@@ -122,7 +122,7 @@ static void open_sheet(lv_event_t *event)
     lv_obj_add_event_cb(sheet_overlay, sheet_scrim_clicked, LV_EVENT_CLICKED, NULL);
 
     panel = lv_obj_create(sheet_overlay);
-    lv_obj_set_size(panel, QZ_SCREEN_W - 40, 268);
+    lv_obj_set_size(panel, QZ_DESIGN_W - 40, 268);
     lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 14);
     lv_obj_set_style_radius(panel, QZ_RADIUS_CARD, 0);
     qz_style_plate(panel);
@@ -319,7 +319,7 @@ lv_obj_t *qz_skill_page_create(lv_obj_t *apps_screen)
     qz_style_screen(skill_screen);
 
     lv_obj_t *toolbar = lv_obj_create(skill_screen);
-    lv_obj_set_size(toolbar, QZ_SCREEN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
