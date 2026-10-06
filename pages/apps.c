@@ -4,13 +4,13 @@
 #include "theme.h"
 #include <stdio.h>
 
-/* Two columns of compact rows: five entries fit without shrinking the page,
+/* Two columns of compact rows: six entries fit without shrinking the page,
  * and the shape matches the settings list so the whole shell reads as one
- * system. */
+ * system. 行高从 52 压到 46、上移 2px：给第四行的「运动相机」腾位。 */
 #define ROW_W ((QZ_DESIGN_W - 3 * QZ_GUTTER) / 2)
-#define ROW_H 52
+#define ROW_H 46
 #define ROW_GAP 6
-#define ROW_TOP 98
+#define ROW_TOP 96
 #define COL_LEFT QZ_GUTTER
 #define COL_RIGHT (QZ_DESIGN_W - QZ_GUTTER - ROW_W)
 
@@ -96,6 +96,7 @@ lv_obj_t *qz_apps_create(void)
     const int row1 = ROW_TOP;
     const int row2 = ROW_TOP + ROW_H + ROW_GAP;
     const int row3 = row2 + ROW_H + ROW_GAP;
+    const int row4 = row3 + ROW_H + ROW_GAP;
 
     /* Tiles alternate between the accent and the neutral fill — the same
      * value-alternation the reference uses for its panels. */
@@ -116,6 +117,9 @@ lv_obj_t *qz_apps_create(void)
     app_row(apps_screen, COL_LEFT, row3, LV_SYMBOL_GPS, "设备控制", "声音 · 背光",
             QZ_ACCENT, QZ_TEXT_ON_ACCENT, open_applet,
             (void *)(intptr_t)QZ_APPLET_CONTROL);
+    app_row(apps_screen, COL_LEFT, row4, LV_SYMBOL_VIDEO, "运动相机", "取景 · 快门存图",
+            QZ_ACCENT, QZ_TEXT_ON_ACCENT, open_applet,
+            (void *)(intptr_t)QZ_APPLET_CAMERA);
     return apps_screen;
 }
 

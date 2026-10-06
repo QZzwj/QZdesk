@@ -72,6 +72,18 @@ int main(void)
     qz_assistant_set_desktop(desktop);
     qz_settings_set_desktop(desktop);
     lv_screen_load(desktop);
+    /* 免触摸调试口：QZDESK_OPEN=camera|pomodoro|apps… 启动后直接打开对应页，
+     * 无头截图 / 自动化验证用。取 applet 枚举小写名，桌面/助手页也认。 */
+    {
+        const char *open = getenv("QZDESK_OPEN");
+        if (open && *open) {
+            if (strcmp(open, "camera") == 0) {
+                lv_screen_load(qz_applets_screen(QZ_APPLET_CAMERA));
+            } else if (strcmp(open, "apps") == 0) {
+                lv_screen_load(apps);
+            }
+        }
+    }
     while (!qzdesk_core_should_stop() && !qzdesk_core_restart_requested()) {
         lv_timer_handler();
         usleep(5000);

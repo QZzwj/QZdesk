@@ -91,7 +91,19 @@ static void seq(lv_obj_t *obj, uint32_t delay, uint32_t dur, int32_t from, int32
 /* ------------------------------------------------------------------------- *
  * 编排（数值照抄 Echo-Mate，运行时经 u() 等比缩放）
  * ------------------------------------------------------------------------- */
-/** 把所有对象摆回基准位，并隐藏装饰。 */
+/** Echo-Mate 设计值 -> 我们的尺寸（它们的基准是 210 宽的眼睛面板）。 */
+static int32_t uw(qz_face_t *face, int32_t v)
+{
+    return face->size * v / 210;
+}
+
+/**
+ * 把所有对象摆回基准位，并隐藏装饰。
+ *
+ * 一律用 lv_obj_align(CENTER)（和创建时一致）：面板是居中摆放的，若在这里直接
+ * lv_obj_set_y(面板, -25) 会把"居中坐标"写成原始设计值，整个脸跳到容器左上角，
+ * 右眼超出被裁 —— 就是"显示不全"的来源。编排动画的起点全部取当前实际坐标。
+ */
 static void reinit(qz_face_t *face)
 {
     int32_t s = face->size;
@@ -107,24 +119,20 @@ static void reinit(qz_face_t *face)
 
     lv_obj_set_width(face->eyes_panel, s * EYE_PANEL_W / 210);
     lv_obj_set_height(face->eyes_panel, s * EYE_PANEL_H / 210);
-    lv_obj_set_x(face->eyes_panel, 0);
-    lv_obj_set_y(face->eyes_panel, s * EYE_PANEL_Y / 210);
+    lv_obj_align(face->eyes_panel, LV_ALIGN_CENTER, 0, s * EYE_PANEL_Y / 210);
     lv_obj_set_width(face->ver_panel, s * EYE_PANEL_W / 210);
     lv_obj_set_height(face->ver_panel, s * EYE_PANEL_H / 210);
-    lv_obj_set_x(face->ver_panel, 0);
-    lv_obj_set_y(face->ver_panel, 0);
+    lv_obj_center(face->ver_panel);
     for (int i = 0; i < 2; i++) {
         int32_t side = (i == 0) ? -1 : 1;
         lv_obj_set_width(face->eye[i], s * EYE_SIZE / 210);
         lv_obj_set_height(face->eye[i], s * EYE_SIZE / 210);
-        lv_obj_set_x(face->eye[i], side * s * EYE_DX / 210);
-        lv_obj_set_y(face->eye[i], 0);
+        lv_obj_align(face->eye[i], LV_ALIGN_CENTER, side * s * EYE_DX / 210, 0);
     }
     lv_obj_set_width(face->mouth, s * MOUTH_SIZE / 210);
     lv_obj_set_height(face->mouth, s * MOUTH_SIZE / 210);
-    lv_obj_set_x(face->mouth, 0);
-    lv_obj_set_y(face->mouth, s * MOUTH_Y / 210);
-    lv_obj_set_y(face->mouth_panel, s * MOUTH_PANEL_Y / 210);
+    lv_obj_align(face->mouth, LV_ALIGN_CENTER, 0, s * MOUTH_Y / 210);
+    lv_obj_align(face->mouth_panel, LV_ALIGN_CENTER, 0, s * MOUTH_PANEL_Y / 210);
     lv_obj_set_style_bg_opa(face->mouth, LV_OPA_TRANSP, 0);
     lv_obj_set_style_opa(face->question_img, LV_OPA_TRANSP, 0);
     lv_obj_set_style_opa(face->think_img, LV_OPA_TRANSP, 0);
@@ -150,22 +158,29 @@ static void image_fade_out(qz_face_t *face, lv_obj_t *img, uint32_t delay)
 static void idle1(qz_face_t *face)
 {
     lv_obj_t *panel = face->eyes_panel;
-    int32_t s = face->size;
-    int32_t y0 = s * EYE_PANEL_Y / 210;
-    int32_t h0 = s * EYE_PANEL_H / 210;
-    int32_t blink_h = s * BLINK_H / 210;
+    int32_t y0, x0, h0;
+    int32_t blink_h = uw(face, BLINK_H);
 
     reinit(face);
-    seq(panel, 0, 500, y0, y0 - s * 20 / 210, lv_anim_path_ease_in_out, anim_set_y);
-    seq(panel, 0, 500, 0, -s * 20 / 210, lv_anim_path_ease_in_out, anim_set_x);
-    seq(panel, 1000, BLINK_MS, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
-    seq(panel, 1500, 500, -s * 20 / 210, s * 20 / 210, lv_anim_path_ease_in_out, anim_set_x);
-    seq(panel, 2000, BLINK_MS, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
-    seq(panel, 3000, 500, s * 20 / 210, s * 40 / 210, lv_anim_path_ease_in_out, anim_set_x);
-    seq(panel, 3000, 500, y0 - s * 20 / 210, y0 + s * 20 / 210, lv_anim_path_ease_in_out, anim_set_y);
-    seq(panel, 4000, BLINK_MS, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
-    seq(panel, 5000, 500, s * 40 / 210, 0, lv_anim_path_ease_in_out, anim_set_x);
-    seq(panel, 5000, 500, y0 + s * 20 / 210, y0, lv_anim_path_ease_in_out, anim_set_y);
+    y0 = lv_obj_get_y(panel);      /* reinit 之后的真实位置，编排从这里出发 */
+    x0 = lv_obj_get_x(panel);
+    h0 = lv_obj_get_height(panel);
+    seq(panel, 0, 500, y0, y0 - uw(face, 20), lv_anim_path_ease_in_out, anim_set_y);
+    seq(panel, 0, 500, x0, x0 - uw(face, 20), lv_anim_path_ease_in_out, anim_set_x);
+    seq(panel, 1000, uw(face, BLINK_MS), h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 1000 + uw(face, BLINK_MS), uw(face, BLINK_MS), blink_h, h0,
+        lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 1500, 500, x0 - uw(face, 20), x0 + uw(face, 20), lv_anim_path_ease_in_out, anim_set_x);
+    seq(panel, 2000, uw(face, BLINK_MS), h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 2000 + uw(face, BLINK_MS), uw(face, BLINK_MS), blink_h, h0,
+        lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 3000, 500, x0 + uw(face, 20), x0 + uw(face, 40), lv_anim_path_ease_in_out, anim_set_x);
+    seq(panel, 3000, 500, y0 - uw(face, 20), y0 + uw(face, 20), lv_anim_path_ease_in_out, anim_set_y);
+    seq(panel, 4000, uw(face, BLINK_MS), h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 4000 + uw(face, BLINK_MS), uw(face, BLINK_MS), blink_h, h0,
+        lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 5000, 500, x0 + uw(face, 40), x0, lv_anim_path_ease_in_out, anim_set_x);
+    seq(panel, 5000, 500, y0 + uw(face, 20), y0, lv_anim_path_ease_in_out, anim_set_y);
     face->replay_at = lv_tick_get() + 5600;
 }
 
@@ -174,16 +189,17 @@ static void idle2(qz_face_t *face)
 {
     lv_obj_t *panel = face->eyes_panel;
     lv_obj_t *ver = face->ver_panel;
-    int32_t s = face->size;
-    int32_t y0 = s * EYE_PANEL_Y / 210;
+    int32_t vy0, y0;
 
     reinit(face);
-    seq(ver, 0, 500, 0, -s * 20 / 210, lv_anim_path_ease_out, anim_set_y);
-    seq(ver, 2500, 500, -s * 20 / 210, 0, lv_anim_path_ease_out, anim_set_y);
-    seq(panel, 0, 500, y0, y0 + s * 20 / 210, lv_anim_path_ease_out, anim_set_y);
-    seq(panel, 2500, 500, y0 + s * 20 / 210, y0, lv_anim_path_ease_out, anim_set_y);
+    vy0 = lv_obj_get_y(ver);
+    y0 = lv_obj_get_y(panel);
+    seq(ver, 0, 500, vy0, vy0 - uw(face, 20), lv_anim_path_ease_out, anim_set_y);
+    seq(ver, 2500, 500, vy0 - uw(face, 20), vy0, lv_anim_path_ease_out, anim_set_y);
+    seq(panel, 0, 500, y0, y0 + uw(face, 20), lv_anim_path_ease_out, anim_set_y);
+    seq(panel, 2500, 500, y0 + uw(face, 20), y0, lv_anim_path_ease_out, anim_set_y);
 
-    image_spin_in(face, face->think_img, s * 750 / 210);
+    image_spin_in(face, face->think_img, uw(face, 750));
     image_fade_out(face, face->think_img, 3000);
     face->replay_at = lv_tick_get() + 3600;
 }
@@ -191,19 +207,23 @@ static void idle2(qz_face_t *face)
 /** 聆听/惊讶：眼睛收窄后上下脉冲两次，问号旋转进出，4s。 */
 static void listening(qz_face_t *face)
 {
-    int32_t s = face->size;
-    int32_t w0 = s * EYE_SIZE / 210;
-    int32_t h0 = s * EYE_SIZE / 210;
-    int32_t w_squash = s * (EYE_SIZE - 30) / 210;
+    int32_t w0, h0;
+    int32_t w_squash = uw(face, EYE_SIZE - 30);
+    int32_t blink_h = uw(face, BLINK_H);
+    int32_t blink_ms = uw(face, BLINK_MS);
 
     reinit(face);
+    w0 = lv_obj_get_width(face->eye[0]);
+    h0 = lv_obj_get_height(face->eye[0]);
     for (int i = 0; i < 2; i++) {
         seq(face->eye[i], 0, 100, w0, w_squash, lv_anim_path_ease_out, anim_set_width);
-        seq(face->eye[i], 1000, 100, w0, w_squash, lv_anim_path_ease_out, anim_set_width);
-        seq(face->eye[i], 1000, 100, h0, s * BLINK_H / 210, lv_anim_path_ease_out, anim_set_height);
-        seq(face->eye[i], 2000, 100, w0, w_squash, lv_anim_path_ease_out, anim_set_width);
-        seq(face->eye[i], 2000, 100, h0, s * BLINK_H / 210, lv_anim_path_ease_out, anim_set_height);
-        seq(face->eye[i], 3000, 100, w0, w0, lv_anim_path_ease_out, anim_set_width);
+        seq(face->eye[i], 1000, 100, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+        seq(face->eye[i], 1000 + blink_ms, blink_ms, blink_h, h0, lv_anim_path_ease_out,
+            anim_set_height);
+        seq(face->eye[i], 2000, 100, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+        seq(face->eye[i], 2000 + blink_ms, blink_ms, blink_h, h0, lv_anim_path_ease_out,
+            anim_set_height);
+        seq(face->eye[i], 3000, 100, w_squash, w0, lv_anim_path_ease_out, anim_set_width);
     }
     image_spin_in(face, face->question_img, 0);
     image_fade_out(face, face->question_img, 3500);
@@ -213,99 +233,116 @@ static void listening(qz_face_t *face)
 /** 思考：手图旋转进来，问号退场，眼睛脉冲，3.5s。 */
 static void thinking(qz_face_t *face)
 {
-    int32_t s = face->size;
-    int32_t w0 = s * EYE_SIZE / 210;
-    int32_t h0 = s * EYE_SIZE / 210;
-    int32_t w_squash = s * (EYE_SIZE - 30) / 210;
+    int32_t w0, h0;
+    int32_t w_squash = uw(face, EYE_SIZE - 30);
+    int32_t blink_h = uw(face, BLINK_H);
+    int32_t blink_ms = uw(face, BLINK_MS);
 
     reinit(face);
+    w0 = lv_obj_get_width(face->eye[0]);
+    h0 = lv_obj_get_height(face->eye[0]);
     seq(face->hand_img, 0, 500, 0, 255, lv_anim_path_linear, anim_opa);
-    seq(face->hand_img, s * 750 / 210, 500, -250, -150, lv_anim_path_ease_in_out,
+    seq(face->hand_img, uw(face, 750), 500, -250, -150, lv_anim_path_ease_in_out,
         anim_image_angle);
     image_fade_out(face, face->question_img, 1500);
     image_fade_out(face, face->hand_img, 1500);
     for (int i = 0; i < 2; i++) {
         seq(face->eye[i], 0, 100, w0, w_squash, lv_anim_path_ease_out, anim_set_width);
-        seq(face->eye[i], 1000, 100, w0, w_squash, lv_anim_path_ease_out, anim_set_width);
-        seq(face->eye[i], 1000, 100, h0, s * BLINK_H / 210, lv_anim_path_ease_out, anim_set_height);
-        seq(face->eye[i], 2000, 100, w0, w_squash, lv_anim_path_ease_out, anim_set_width);
-        seq(face->eye[i], 2000, 100, h0, s * BLINK_H / 210, lv_anim_path_ease_out, anim_set_height);
+        seq(face->eye[i], 1000, 100, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+        seq(face->eye[i], 1000 + blink_ms, blink_ms, blink_h, h0, lv_anim_path_ease_out,
+            anim_set_height);
+        seq(face->eye[i], 2000, 100, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+        seq(face->eye[i], 2000 + blink_ms, blink_ms, blink_h, h0, lv_anim_path_ease_out,
+            anim_set_height);
     }
     face->replay_at = lv_tick_get() + 3600;
 }
 
-/** 说话：嘴出现并上下动两轮（嘴板反向移动），中途整条眼板眨一次，2.5s。 */
+/** 说话：嘴出现并一开一合两轮（嘴板反向移动），中途整条眼板眨一次，2.6s。 */
 static void speaking(qz_face_t *face)
 {
     lv_obj_t *mouth = face->mouth;
     lv_obj_t *mouth_panel = face->mouth_panel;
     lv_obj_t *panel = face->eyes_panel;
-    int32_t s = face->size;
-    int32_t my0 = s * MOUTH_Y / 210;
-    int32_t py0 = s * MOUTH_PANEL_Y / 210;
-    int32_t h0 = s * EYE_PANEL_H / 210;
-    int32_t blink_h = s * BLINK_H / 210;
+    int32_t my0, py0, h0;
+    int32_t blink_h = uw(face, BLINK_H);
 
     reinit(face);
     lv_obj_set_style_bg_opa(mouth, LV_OPA_COVER, 0);
-    seq(mouth, 0, 150, my0, my0 - s * 10 / 210, lv_anim_path_ease_out, anim_set_y);
-    seq(mouth_panel, 0, 150, py0, py0 + s * 10 / 210, lv_anim_path_ease_out, anim_set_y);
+    my0 = lv_obj_get_y(mouth);
+    py0 = lv_obj_get_y(mouth_panel);
+    h0 = lv_obj_get_height(panel);
+    /* 一开一合：嘴上抬、嘴板下迎，再各自回去 */
+    seq(mouth, 0, 150, my0, my0 - uw(face, 10), lv_anim_path_ease_out, anim_set_y);
+    seq(mouth, 150, 150, my0 - uw(face, 10), my0, lv_anim_path_ease_out, anim_set_y);
+    seq(mouth_panel, 0, 150, py0, py0 + uw(face, 10), lv_anim_path_ease_out, anim_set_y);
+    seq(mouth_panel, 150, 150, py0 + uw(face, 10), py0, lv_anim_path_ease_out, anim_set_y);
     seq(panel, 500, 200, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
-    seq(mouth, 1500, 150, my0, my0 - s * 10 / 210, lv_anim_path_ease_out, anim_set_y);
-    seq(mouth_panel, 1500, 150, py0, py0 + s * 10 / 210, lv_anim_path_ease_out, anim_set_y);
+    seq(panel, 700, 200, blink_h, h0, lv_anim_path_ease_in_out, anim_set_height);
+    seq(mouth, 1500, 150, my0, my0 - uw(face, 10), lv_anim_path_ease_out, anim_set_y);
+    seq(mouth, 1650, 150, my0 - uw(face, 10), my0, lv_anim_path_ease_out, anim_set_y);
+    seq(mouth_panel, 1500, 150, py0, py0 + uw(face, 10), lv_anim_path_ease_out, anim_set_y);
+    seq(mouth_panel, 1650, 150, py0 + uw(face, 10), py0, lv_anim_path_ease_out, anim_set_y);
     seq(panel, 2000, 200, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
+    seq(panel, 2200, 200, blink_h, h0, lv_anim_path_ease_in_out, anim_set_height);
     face->replay_at = lv_tick_get() + 2600;
 }
 
-/** 开心：蹦一下带两次眨眼，2.6s（我们的附加状态，词汇与 Echo-Mate 一致）。 */
+/** 开心：蹦一下带两次眨眼，2.7s（我们的附加状态，词汇与 Echo-Mate 一致）。 */
 static void happy(qz_face_t *face)
 {
     lv_obj_t *panel = face->eyes_panel;
-    int32_t s = face->size;
-    int32_t y0 = s * EYE_PANEL_Y / 210;
-    int32_t h0 = s * EYE_PANEL_H / 210;
-    int32_t blink_h = s * BLINK_H / 210;
+    int32_t y0, h0;
+    int32_t blink_h = uw(face, BLINK_H);
+    int32_t blink_ms = uw(face, BLINK_MS);
 
     reinit(face);
-    seq(panel, 0, 300, y0, y0 - s * 26 / 210, lv_anim_path_ease_out, anim_set_y);
-    seq(panel, 400, BLINK_MS, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
-    seq(panel, 700, 300, y0 - s * 26 / 210, y0, lv_anim_path_ease_in_out, anim_set_y);
-    seq(panel, 1200, BLINK_MS, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
-    seq(panel, 1500, 300, y0, y0 - s * 14 / 210, lv_anim_path_ease_in_out, anim_set_y);
-    seq(panel, 2100, 300, y0 - s * 14 / 210, y0, lv_anim_path_ease_in_out, anim_set_y);
+    y0 = lv_obj_get_y(panel);
+    h0 = lv_obj_get_height(panel);
+    seq(panel, 0, 300, y0, y0 - uw(face, 26), lv_anim_path_ease_out, anim_set_y);
+    seq(panel, 300, 300, y0 - uw(face, 26), y0, lv_anim_path_ease_in_out, anim_set_y);
+    seq(panel, 400, blink_ms, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 400 + blink_ms, blink_ms, blink_h, h0, lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 1200, blink_ms, h0, blink_h, lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 1200 + blink_ms, blink_ms, blink_h, h0, lv_anim_path_ease_out, anim_set_height);
+    seq(panel, 1500, 300, y0, y0 - uw(face, 14), lv_anim_path_ease_in_out, anim_set_y);
+    seq(panel, 1800, 300, y0 - uw(face, 14), y0, lv_anim_path_ease_in_out, anim_set_y);
     face->replay_at = lv_tick_get() + 2700;
 }
 
-/** 困倦：慢慢眨三次 + 整条眼板往下沉，3.6s。 */
+/** 困倦：整条眼板往下沉 + 三次慢眨，3.7s。 */
 static void sleepy(qz_face_t *face)
 {
     lv_obj_t *panel = face->eyes_panel;
-    int32_t s = face->size;
-    int32_t y0 = s * EYE_PANEL_Y / 210;
-    int32_t h0 = s * EYE_PANEL_H / 210;
-    int32_t blink_h = s * BLINK_H / 210;
+    int32_t y0, h0;
+    int32_t blink_h = uw(face, BLINK_H);
 
     reinit(face);
-    seq(panel, 0, 300, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
-    seq(panel, 800, 500, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
-    seq(panel, 0, 800, y0, y0 + s * 10 / 210, lv_anim_path_ease_out, anim_set_y);
-    seq(panel, 1500, 500, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
-    seq(panel, 2300, 500, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
+    y0 = lv_obj_get_y(panel);
+    h0 = lv_obj_get_height(panel);
+    seq(panel, 0, 800, y0, y0 + uw(face, 10), lv_anim_path_ease_out, anim_set_y);
+    seq(panel, 100, 500, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
+    seq(panel, 600, 500, blink_h, h0, lv_anim_path_ease_in_out, anim_set_height);
+    seq(panel, 1400, 500, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
+    seq(panel, 1900, 500, blink_h, h0, lv_anim_path_ease_in_out, anim_set_height);
+    seq(panel, 2200, 500, h0, blink_h, lv_anim_path_ease_in_out, anim_set_height);
+    seq(panel, 2700, 500, blink_h, h0, lv_anim_path_ease_in_out, anim_set_height);
     face->replay_at = lv_tick_get() + 3700;
 }
 
-/** 单眼眨：右眼压扁再弹回，1.2s。 */
+/** 单眼眨：右眼压扁再弹回，1.3s。 */
 static void wink(qz_face_t *face)
 {
     lv_obj_t *right = face->eye[1];
-    int32_t s = face->size;
-    int32_t h0 = s * EYE_SIZE / 210;
+    int32_t x0, h0;
 
     reinit(face);
-    seq(right, 0, 150, h0, s * BLINK_H / 210, lv_anim_path_ease_out, anim_set_height);
-    seq(right, 400, 250, s * BLINK_H / 210, h0, lv_anim_path_ease_out, anim_set_height);
-    seq(face->eyes_panel, 0, 200, 0, s * 10 / 210, lv_anim_path_ease_out, anim_set_x);
-    seq(face->eyes_panel, 600, 200, s * 10 / 210, 0, lv_anim_path_ease_out, anim_set_x);
+    h0 = lv_obj_get_height(right);
+    x0 = lv_obj_get_x(face->eyes_panel);
+    seq(right, 0, 150, h0, uw(face, BLINK_H), lv_anim_path_ease_out, anim_set_height);
+    seq(right, 400, 250, uw(face, BLINK_H), h0, lv_anim_path_ease_out, anim_set_height);
+    seq(face->eyes_panel, 0, 200, x0, x0 + uw(face, 10), lv_anim_path_ease_out, anim_set_x);
+    seq(face->eyes_panel, 600, 200, x0 + uw(face, 10), x0, lv_anim_path_ease_out, anim_set_x);
     face->replay_at = lv_tick_get() + 1300;
 }
 
@@ -501,14 +538,16 @@ const char *qz_face_state_text(qz_face_state_t state)
 void qz_face_trigger_blink(lv_obj_t *root)
 {
     qz_face_t *face;
+    int32_t h0;
 
     if (!root) return;
     face = (qz_face_t *)lv_obj_get_user_data(root);
     if (!face) return;
-    seq(face->eyes_panel, 0, 100, face->size * EYE_PANEL_H / 210,
-        face->size * BLINK_H / 210, lv_anim_path_ease_in_out, anim_set_height);
-    seq(face->eyes_panel, 150, 150, face->size * BLINK_H / 210,
-        face->size * EYE_PANEL_H / 210, lv_anim_path_ease_in_out, anim_set_height);
+    h0 = lv_obj_get_height(face->eyes_panel);   /* 从当前高度出发，别打断正在播的编排 */
+    seq(face->eyes_panel, 0, 100, h0, uw(face, BLINK_H), lv_anim_path_ease_in_out,
+        anim_set_height);
+    seq(face->eyes_panel, 150, 150, uw(face, BLINK_H), h0, lv_anim_path_ease_in_out,
+        anim_set_height);
 }
 
 void qz_face_set_state(lv_obj_t *root, qz_face_state_t state)

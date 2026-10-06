@@ -45,6 +45,7 @@ target_compile_definitions(lvgl PUBLIC
 
 add_executable(qzdesk_screen
     app/main.c
+    app/camera_preview.c
     app/scale.c
     app/theme.c
     app/ai_face.c

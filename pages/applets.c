@@ -4,6 +4,7 @@
 #include "qzdesk_core.h"
 #include "smarthome.h"
 #include "face_camera.h"
+#include "camera_preview.h"
 #include "web_client.h"
 #include <stdio.h>
 #include <stdint.h>
@@ -1222,6 +1223,213 @@ static void build_face_screen(void)
 }
 
 /* ------------------------------------------------------------------------- *
+ * 运动相机（形态参考 Echo-Mate 的相机页）
+ *
+ * 全屏取景 + 极简 overlay，长运动相机的样子而不是应用卡片：
+ *   - 顶部一行：后端状态 · 时钟 · 电量；
+ *   - 底部一行：照片计数 · 快门（把当前帧存成 BMP）· 返回按钮；
+ *   - 左/右滑返回（Echo-Mate 同款手势），不用为它腾一条工具栏。
+ *
+ * 与存在检测共用同一颗摄像头、不能同时开：进入本页先停存在检测，退出时
+ * 恢复（cam_presence_was_running 记着账）。帧数据由 app/camera_preview.c
+ * 在工作线程里转成面板尺寸的 RGB565，这里只负责在定时器里换源。
+ * ------------------------------------------------------------------------- */
+static lv_obj_t *cam_view;
+static lv_obj_t *cam_hint;          /**< 还没出第一帧时居中的状态说明 */
+static lv_obj_t *cam_state_label;
+static lv_obj_t *cam_clock_label;
+static lv_obj_t *cam_battery_label;
+static lv_obj_t *cam_photo_label;
+static lv_obj_t *cam_path_label;
+static lv_obj_t *cam_flash;         /**< 快门白闪 */
+static lv_timer_t *cam_frame_timer;
+static lv_image_dsc_t cam_dsc;      /**< header 定面板尺寸；data 随帧切换 */
+static uint32_t cam_last_id;
+static int cam_flash_ticks;
+static int cam_slow_ticks;          /**< 低频工作的计数器（时钟/状态 1s 一次） */
+static bool cam_presence_was_running;
+
+#define CAM_TIMER_PERIOD_MS 66      /**< ≈15fps，取景比这更密没有意义 */
+
+/** 运动相机的 OSD 底片：半透明黑圆角条，白字压在任何画面上都可读 ——
+ * 白色 OSD 直接落在彩条的白色那道上是看不见的。 */
+static lv_obj_t *cam_osd(lv_obj_t *parent, const char *text, int32_t size)
+{
+    lv_obj_t *label = qz_text(parent, text, size, qz_color(QZ_TEXT));
+    lv_obj_set_style_bg_color(label, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(label, (lv_opa_t)96, 0);
+    lv_obj_set_style_radius(label, 6, 0);
+    lv_obj_set_style_pad_hor(label, 6, 0);
+    lv_obj_set_style_pad_ver(label, 2, 0);
+    return label;
+}
+
+static void cam_refresh_state(void)
+{
+    bool running = qz_cam_preview_running();
+    lv_label_set_text(cam_state_label,
+                      running ? qz_cam_preview_backend() : qz_cam_preview_status());
+    {
+        int battery = qz_battery_level();
+        char text[12];
+        if (battery >= 0) snprintf(text, sizeof(text), "%d%%", battery);
+        else snprintf(text, sizeof(text), "--");
+        lv_label_set_text(cam_battery_label, text);
+    }
+    {
+        char clock[8];
+        time_t now = time(NULL);
+        struct tm local;
+        localtime_r(&now, &local);
+        strftime(clock, sizeof(clock), "%H:%M", &local);
+        lv_label_set_text(cam_clock_label, clock);
+    }
+    lv_obj_set_style_text_color(cam_state_label,
+                                qz_color(running ? QZ_TEXT : QZ_TEXT_SECONDARY), 0);
+}
+
+static void cam_shutter(lv_event_t *event)
+{
+    (void)event;
+    char path[224];
+
+    if (qz_cam_preview_snapshot(path, sizeof(path))) {
+        char photos[24];
+        snprintf(photos, sizeof(photos), "照片 %d", qz_cam_preview_photos());
+        lv_label_set_text(cam_photo_label, photos);
+        lv_label_set_text(cam_path_label, path);
+        cam_flash_ticks = 5;                       /* 快门白闪 ≈ 0.3s */
+        lv_obj_set_style_bg_opa(cam_flash, (lv_opa_t)200, 0);
+    } else {
+        lv_label_set_text(cam_path_label, qz_cam_preview_status());
+    }
+}
+
+static void cam_gesture(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_GESTURE) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+    if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+        qz_screen_load(apps_screen_ref, LV_SCR_LOAD_ANIM_MOVE_RIGHT, QZ_DUR_SCREEN);
+    }
+}
+
+/** 取景页主循环：换帧 + 快门闪 + 低频的时钟/状态刷新。 */
+static void cam_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (lv_screen_active() != screens[QZ_APPLET_CAMERA]) return;
+
+    const uint8_t *frame = qz_cam_preview_frame(&cam_last_id);
+    if (frame) {
+        cam_dsc.data = frame;
+        lv_image_set_src(cam_view, &cam_dsc);      /* 换源触发重绘 */
+        lv_obj_add_flag(cam_hint, LV_OBJ_FLAG_HIDDEN);
+        if (cam_slow_ticks == 0) cam_refresh_state();  /* 出帧后把状态行换成后端名 */
+    }
+
+    if (cam_flash_ticks > 0 && --cam_flash_ticks == 0) {
+        lv_obj_set_style_bg_opa(cam_flash, (lv_opa_t)0, 0);
+    }
+
+    if (++cam_slow_ticks >= 15) {                  /* ≈1s */
+        cam_slow_ticks = 0;
+        cam_refresh_state();
+    }
+}
+
+static void cam_screen_event(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+
+    if (code == LV_EVENT_SCREEN_LOADED) {
+        /* 同一颗摄像头：先停存在检测，退出时再恢复（记在 cam_presence_was_running） */
+        cam_presence_was_running = qz_face_camera_running();
+        if (cam_presence_was_running) qz_face_camera_stop();
+        if (!qz_cam_preview_running()) qz_cam_preview_start();
+        cam_slow_ticks = 0;
+        cam_refresh_state();
+    } else if (code == LV_EVENT_SCREEN_UNLOADED) {
+        if (qz_cam_preview_running()) qz_cam_preview_stop();
+        if (cam_presence_was_running) {
+            qz_face_camera_start(face_presence_event, NULL);
+            cam_presence_was_running = false;
+        }
+    }
+}
+
+static void build_camera_screen(void)
+{
+    lv_obj_t *screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);   /* 运动相机永远黑底 */
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    screens[QZ_APPLET_CAMERA] = screen;
+
+    /* 取景层：全屏 image，内容是面板尺寸的 RGB565 缓冲 */
+    cam_view = lv_image_create(screen);
+    lv_obj_set_size(cam_view, QZ_DESIGN_W, QZ_DESIGN_H);
+    lv_obj_align(cam_view, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_clear_flag(cam_view, LV_OBJ_FLAG_CLICKABLE);
+    memset(&cam_dsc, 0, sizeof(cam_dsc));
+    cam_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    cam_dsc.header.w = (uint32_t)qz_panel_w;
+    cam_dsc.header.h = (uint32_t)qz_panel_h;
+    cam_dsc.data_size = (size_t)qz_panel_w * qz_panel_h * 2;
+    cam_dsc.data = NULL;
+
+    /* 快门白闪层：平时全透明，拍下的一瞬提亮再淡掉 */
+    cam_flash = lv_obj_create(screen);
+    lv_obj_set_size(cam_flash, QZ_DESIGN_W, QZ_DESIGN_H);
+    lv_obj_align(cam_flash, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(cam_flash, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(cam_flash, (lv_opa_t)0, 0);
+    lv_obj_set_style_border_width(cam_flash, 0, 0);
+    lv_obj_set_style_radius(cam_flash, 0, 0);
+    lv_obj_clear_flag(cam_flash, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(cam_flash, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* 顶部一行：状态 · 时钟 · 电量（OSD 压在画面上） */
+    cam_state_label = cam_osd(screen, "取景未启动", 10);
+    lv_obj_align(cam_state_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 8);
+    cam_clock_label = cam_osd(screen, "--:--", 12);
+    lv_obj_align(cam_clock_label, LV_ALIGN_TOP_MID, 0, 7);
+    cam_battery_label = cam_osd(screen, "--", 10);
+    lv_obj_align(cam_battery_label, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 8);
+
+    /* 底部一行：照片计数 · 快门 · 返回 */
+    cam_photo_label = cam_osd(screen, "照片 0", 11);
+    lv_obj_align(cam_photo_label, LV_ALIGN_BOTTOM_LEFT, QZ_GUTTER, -22);
+    cam_path_label = cam_osd(screen, "", 8);
+    lv_obj_align(cam_path_label, LV_ALIGN_BOTTOM_LEFT, QZ_GUTTER, -8);
+    lv_obj_set_style_text_color(cam_path_label, qz_color(QZ_TEXT_SECONDARY), 0);
+
+    lv_obj_t *shutter = lv_obj_create(screen);
+    lv_obj_set_size(shutter, 56, 56);
+    lv_obj_align(shutter, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_set_style_radius(shutter, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(shutter, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(shutter, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(shutter, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_width(shutter, 3, 0);
+    lv_obj_set_style_border_opa(shutter, (lv_opa_t)120, 0);
+    lv_obj_add_event_cb(shutter, cam_shutter, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *back = qz_icon_button(screen, LV_SYMBOL_LEFT, 30);
+    lv_obj_align(back, LV_ALIGN_BOTTOM_RIGHT, -QZ_GUTTER, -14);
+    lv_obj_add_event_cb(back, go_back, LV_EVENT_CLICKED, NULL);
+
+    /* 还没出帧（起摄像头慢 / 根本没有）时给一行居中说明 */
+    cam_hint = qz_text(screen, "正在打开取景…", 12, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(cam_hint, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_add_event_cb(screen, cam_screen_event, LV_EVENT_SCREEN_LOADED, NULL);
+    lv_obj_add_event_cb(screen, cam_screen_event, LV_EVENT_SCREEN_UNLOADED, NULL);
+    lv_obj_add_event_cb(screen, cam_gesture, LV_EVENT_GESTURE, NULL);
+
+    cam_frame_timer = lv_timer_create(cam_tick, CAM_TIMER_PERIOD_MS, NULL);
+}
+
+/* ------------------------------------------------------------------------- *
  * Public API
  * ------------------------------------------------------------------------- */
 
@@ -1247,6 +1455,7 @@ void qz_applets_init(lv_obj_t *apps_screen)
     build_pomodoro_screen();
     build_control_screen();
     build_face_screen();
+    build_camera_screen();
     /* 「有人靠近自动亮屏 + 打招呼」是常驻行为，不要求用户先打开这一页：有可用
      * 来源就自动开起来；没有（模拟器没指摄像头、板子没接）时静默略过，页面里
      * 会写明原因。 */
