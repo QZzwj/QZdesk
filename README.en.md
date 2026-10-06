@@ -126,10 +126,10 @@ Protocols and ports between nodes are listed in the table below. Edge labels (`-
 
 ### Run on a PC (simulator)
 
-`run.sh` is a **development script for the PC** and only drives the simulator: it builds for the host, so its output is a plain x86 binary that the real device cannot use (see the next section for the device).
+`run.sh` only drives the **simulator**: it builds for the host, so its output is a plain x86 binary that the real device cannot use (see the next section for the device).
 
 ```bash
-./run.sh --simulator      # 480×320 window, mouse acts as touch
+./run.sh --simulator      # 480×320 window, mouse acts as touch (no argument means the same)
 ```
 
 `run.sh` frees TCP 8080 from any previous service, configures and builds `qzdesk_screen` plus the Rust core, and starts them under a small supervisor loop.

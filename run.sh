@@ -3,26 +3,30 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 build_dir=${QZDESK_BUILD_DIR:-"$script_dir/build"}
-simulator=OFF
 
 # Skills are loaded from the persistent QZdesk Skill directory by default.
 # A read-only source tree can still be supplied explicitly with
 # QZDESK_SKILL_SOURCE_DIR when it is intentionally needed.
 
-if [[ "${1:-}" == "--simulator" ]]; then
-    simulator=ON
-    # The SDL simulator has no ALSA capture/playback devices. Keep the core
-    # network and GUI paths active without starting failing ALSA threads.
-    export QZDESK_AUDIO_DISABLED=1
-elif [[ "${1:-}" != "" ]]; then
-    printf '用法: %s [--simulator]\n' "$0" >&2
-    exit 2
-fi
+# 这份脚本只跑 LVGL SDL 模拟器：它按宿主机（x86）编译，产物在真机（RV1106）上用不了。
+# 真机镜像是 Rockchip SDK 的 ./build_qzdesk.sh 交叉编译出来的，见 README。
+# 不带参数等同于 --simulator；其余参数一律拒绝，免得再有人以为编出了真机版本。
+case "${1:-}" in
+    "" | --simulator) ;;
+    *)
+        printf '用法: %s [--simulator]（不带参数等同模拟器）\n' "$0" >&2
+        exit 2
+        ;;
+esac
+
+# The SDL simulator has no ALSA capture/playback devices. Keep the core
+# network and GUI paths active without starting failing ALSA threads.
+export QZDESK_AUDIO_DISABLED=1
 
 # The simulator can reuse a previously built core. Set QZDESK_BUILD_CORE=ON
 # when testing Rust changes; this avoids competing Cargo cache locks during
 # normal UI-only simulator runs.
-if [[ "$simulator" == ON && -z "${QZDESK_BUILD_CORE:-}" &&
+if [[ -z "${QZDESK_BUILD_CORE:-}" &&
       -x "$script_dir/xiaozhi_core/target/release/xiaozhi-linux-rs" ]]; then
     export QZDESK_BUILD_CORE=OFF
     # 关掉核心编译后，CMake 那一步的 copy 也不会跑，$build_dir 里的 core 就会
@@ -84,25 +88,21 @@ release_skill_port
 stop_previous_qzdesk
 
 cmake -S "$script_dir" -B "$build_dir" \
-    -DQZDESK_SIMULATOR="$simulator" \
+    -DQZDESK_SIMULATOR=ON \
     -DQZDESK_BUILD_CORE="${QZDESK_BUILD_CORE:-ON}"
 cmake --build "$build_dir" --target qzdesk_screen -j"${QZDESK_JOBS:-2}"
 
 release_skill_port
 stop_previous_qzdesk
 
-if [[ "$simulator" == ON ]]; then
-    # Keep the simulator under a small supervisor so the MCP "restart device"
-    # action can restart the UI/core pair without rebooting the host.
-    restart_flag="$build_dir/.qzdesk-restart"
-    while :; do
-        rm -f "$restart_flag"
-        QZDESK_SIMULATOR_RESTART_FLAG="$restart_flag" "$build_dir/qzdesk_screen"
-        if [[ ! -f "$restart_flag" ]]; then
-            exit 0
-        fi
-        printf '模拟器收到重启请求，正在重新启动 UI 和核心...\n'
-    done
-fi
-
-exec "$build_dir/qzdesk_screen"
+# Keep the simulator under a small supervisor so the MCP "restart device"
+# action can restart the UI/core pair without rebooting the host.
+restart_flag="$build_dir/.qzdesk-restart"
+while :; do
+    rm -f "$restart_flag"
+    QZDESK_SIMULATOR_RESTART_FLAG="$restart_flag" "$build_dir/qzdesk_screen"
+    if [[ ! -f "$restart_flag" ]]; then
+        exit 0
+    fi
+    printf '模拟器收到重启请求，正在重新启动 UI 和核心...\n'
+done
