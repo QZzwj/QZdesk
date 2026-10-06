@@ -38,8 +38,8 @@ static const struct {
     [QZ_FILL_PRESSED]   = { 0xE9E9EF, 0x3A3A3C }, /* pressed / switch-off track */
     [QZ_SEPARATOR]      = { 0xC6C6C8, 0x38383A }, /* hairline */
     [QZ_TEXT]           = { 0x000000, 0xFFFFFF },
-    [QZ_TEXT_SECONDARY] = { 0x6E6E73, 0xEBEBF5 }, /* 60% label on dark reads as #919195 */
-    [QZ_TEXT_TERTIARY]  = { 0x8E8E93, 0x8E8E93 }, /* same neutral grey in both themes */
+    [QZ_TEXT_SECONDARY] = { 0x6E6E73, 0xFFFFFF }, /* 深色下按要求不再压灰：直接用白 */
+    [QZ_TEXT_TERTIARY]  = { 0x8E8E93, 0xFFFFFF }, /* 同上：深色下三级文字也是白 */
     [QZ_SHADOW]         = { 0x1C1C1E, 0x000000 },
     [QZ_FACE_BUBBLE]    = { 0xE4EFFF, 0x2C2C2E }, /* AI thinking pips */
     [QZ_KNOB]           = { 0xFFFFFF, 0xFFFFFF }, /* slider / switch knob stays white */
