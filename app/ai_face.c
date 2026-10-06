@@ -10,9 +10,13 @@
  * (breathing, bobbing, swaying) — no scaled/rotated layers are used anywhere,
  * which keeps the embedded heap happy.
  *
- * Idling also blinks: a separate timer swaps in the closed-eye frame for a
- * fraction of a second every few seconds. 静帧看久了像贴纸，眨眼是最便宜的一
- * 点"活着"的信号 —— 参考视频里的角色正是这么眨的（见 mascot_assets.c 的 blink）。
+ * Idling also blinks: a timer hides the character's eyes behind two small dark
+ * capsules for a fraction of a second every few seconds. 静帧看久了像贴纸，眨眼
+ * 是最便宜的一点"活着"的信号。眼皮是矢量覆盖层而不是第二张位图：换帧会让轮廓
+ * 抖一下（见 QZ_FACE_EYE_* 那一节）。
+ *
+ * mascot_assets.c 里烘焙着一张闭眼帧（qz_mascot_blink，来自 assets/mascot/
+ * blink.png），目前没有代码引用它 —— 现在的眨眼走矢量眼皮那条路。
  */
 #include "ai_face.h"
 #include "mascot_assets.h"
@@ -25,6 +29,22 @@
 #define QZ_BLINK_MIN_MS 3000
 #define QZ_BLINK_MAX_MS 6200
 #define QZ_BLINK_RETRY_MS 900
+
+/* ------------------------------------------------------------------------- *
+ * 形象相关：换宠物形象时，这一节 + 重新烘焙素材就是全部要动的地方
+ *
+ * 眼球位置取自当前形象（小狗），所以换形象后要按新形象的眼睛重新量这四个
+ * 百分比和眼皮颜色 —— 否则眨眼的两条深色胶囊会盖在脸颊上、颜色也不对。
+ * 都是画布百分比，与烘焙尺寸无关（192px 或以后改尺寸都不受影响）。
+ *
+ * 量法：在表情原图（正方形、主体居中）上量两眼外缘总宽、眼睛所在行与画布中
+ * 心的偏移，除以画布边长即可。
+ * ------------------------------------------------------------------------- */
+#define QZ_FACE_EYE_SPAN_PCT 42    /* 两眼外缘的总宽（画布宽的百分比） */
+#define QZ_FACE_EYE_W_PCT 9        /* 单只眼睛的宽 */
+#define QZ_FACE_EYE_H_PCT 3        /* 单只眼睛的高：闭眼时眼皮的厚度 */
+#define QZ_FACE_EYE_ROW_PCT (-6)   /* 眼睛那行相对画布中心的高度偏移，正数向下 */
+#define QZ_FACE_EYE_COLOR 0x75442f /* 眼皮颜色：取形象眼/眉的深色（小狗是棕） */
 
 typedef struct {
     lv_obj_t *root;
@@ -190,10 +210,12 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t size)
     lv_obj_clear_flag(face->image, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Keep the artwork fixed during a blink. The reference UI animates separate
-     * eye objects; swapping a second full mascot frame shifts the silhouette. */
+     * eye objects; swapping a second full mascot frame shifts the silhouette.
+     * 尺寸与位置都来自 QZ_FACE_EYE_*（换形象时改那里）。 */
     face->blink_eyes = lv_obj_create(face->root);
-    lv_obj_set_size(face->blink_eyes, size * 42 / 100, size * 9 / 100);
-    lv_obj_align(face->blink_eyes, LV_ALIGN_CENTER, 0, -size * 6 / 100);
+    lv_obj_set_size(face->blink_eyes, size * QZ_FACE_EYE_SPAN_PCT / 100,
+                    size * QZ_FACE_EYE_H_PCT / 100);
+    lv_obj_align(face->blink_eyes, LV_ALIGN_CENTER, 0, size * QZ_FACE_EYE_ROW_PCT / 100);
     lv_obj_set_style_bg_opa(face->blink_eyes, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(face->blink_eyes, 0, 0);
     lv_obj_set_style_pad_all(face->blink_eyes, 0, 0);
@@ -202,13 +224,13 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t size)
     lv_obj_add_flag(face->blink_eyes, LV_OBJ_FLAG_HIDDEN);
 
     for (int i = 0; i < 2; i++) {
-        int32_t eye_w = size * 9 / 100;
-        int32_t eye_h = size * 3 / 100;
+        int32_t eye_w = size * QZ_FACE_EYE_W_PCT / 100;
+        int32_t eye_h = size * QZ_FACE_EYE_H_PCT / 100;
         lv_obj_t *eye = lv_obj_create(face->blink_eyes);
         lv_obj_set_size(eye, eye_w, eye_h);
         lv_obj_align(eye, i == 0 ? LV_ALIGN_LEFT_MID : LV_ALIGN_RIGHT_MID, 0, 0);
         lv_obj_set_style_radius(eye, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(eye, lv_color_hex(0x75442f), 0);
+        lv_obj_set_style_bg_color(eye, lv_color_hex(QZ_FACE_EYE_COLOR), 0);
         lv_obj_set_style_bg_opa(eye, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(eye, 0, 0);
         lv_obj_clear_flag(eye, LV_OBJ_FLAG_CLICKABLE);

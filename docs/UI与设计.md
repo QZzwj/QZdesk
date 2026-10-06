@@ -70,14 +70,30 @@ QZdesk-Demo/
 替换形象或新增表情：
 
 ```sh
-# 用同名文件替换 assets/mascot/*.png（建议 1:1、纯色或已抠好的背景），然后：
+# 用同名文件替换 assets/mascot/*.png（建议正方形、主体居中、纯色或已抠好的背景），然后：
 python3 QZdesk-Demo/tools/mk_mascot_assets.py          # 加 --preview 可输出效果预览
 ```
 
+换形象时**必须核对**三件事：
+
+1. **眼睛的位置与颜色**。眨眼不是换帧，而是在位图上盖两条深色"眼皮"胶囊，位置与颜色
+   取自当前形象 —— 都在 `app/ai_face.c` 顶部的 `QZ_FACE_EYE_SPAN_PCT / _W_PCT / _H_PCT /
+   _ROW_PCT / _COLOR`（画布百分比，与烘焙尺寸无关）。新形象眼距不同就会盖到脸颊上，
+   照新形象重量一遍即可。
+2. **逐张构图**。脚本按内容外框归一化后再套 `FRAMING[state]` 的 `(zoom, dy)`；各张原图
+   取景不同时必须微调，否则切表情会"忽大忽小"（用 `--preview` 的三种底色核对）。
+3. **状态数**。新增一个表情要同时改四处：`mk_mascot_assets.py` 的 `STATES`、
+   `ai_face.h` 的 `qz_face_state_t`、`ai_face.c` 的 `state_image()` 与 `qz_face_state_text()`。
+
 `ai_face.c` 通过 `lv_image` + `LV_IMAGE_ALIGN_CENTER` 显示，按 `size / QZ_MASCOT_SIZE`
 做等比缩放，所以 60px（关于卡片）、88px（主页大卡片）、164px（全屏表情）共用同一份资源；
-图像缩放走内联采样（`lv_image_set_antialias`），不会申请图层缓冲。当前原图没有
-"闭眼"帧，所以位图形象不做眨眼，改用呼吸、漂浮、摇摆等位移动效维持"活着"的感觉。
+图像缩放走内联采样（`lv_image_set_antialias`），不会申请图层缓冲。切换表情是淡入 + 上移，
+另外有呼吸、漂浮、摇摆等位移动效维持"活着"的感觉（都不申请图层）。
+
+体积：`RGB565A8` 每张 192² 约 110KB，五张约 550KB（`app/mascot_assets.c` 那 4MB 是
+十六进制展开的文本，编进固件的是 110KB/张）。`assets/mascot/blink.png` 是早期的闭眼帧
+（烘焙为 `qz_mascot_blink`），但现在眨眼走矢量眼皮、没有代码引用它 —— 换形象时不必做；
+想省 110KB 也可以删掉，同时从脚本的 `STATES` 里去掉。
 
 ### 材质与层次
 
