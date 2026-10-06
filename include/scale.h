@@ -7,9 +7,9 @@
  * 面板缩放：一份布局，两种屏
  *
  * 页面全部按 **480×320 的设计稿**写绝对坐标（这是它们本来的写法），这里把这些
- * 像素值在进入 LVGL 的边界上按面板比例统一缩放。于是换屏只是换个编译选项：
- *
- *     cmake -DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240 …
+ * 像素值在进入 LVGL 的边界上缩放到**实际面板**。面板尺寸是运行时取到的（真机读
+ * `/dev/fb0`，模拟器读 `QZDESK_PANEL=320x240`），所以同一份二进制在任意比例的屏上
+ * 都自动铺满，不必为每块屏重编：
  *
  * 为什么不在每个页面里改坐标：620 处字面量，漏一处就是一个错位的界面；而且
  * 《QZ_SCREEN_W - 2 * QZ_GUTTER》这类"面板尺寸 - 设计常量"的混合算式会算错。
@@ -38,12 +38,54 @@
 
 #define QZ_SCALE_MIN(a, b) ((a) < (b) ? (a) : (b))
 
-/* 面板 / 设计稿的比例 = NUM / DEN（整数分数，避免浮点）：横向、纵向各一个。 */
+/* 面板 / 设计稿的比例 = NUM / DEN（整数分数，避免浮点）：横向、纵向各一个。
+ * DEN 是编译期常量，NUM 里含面板尺寸，所以是运行时的 —— 见下面的面板尺寸说明。 */
 #define QZ_SCALE_DEN ((QZ_DESIGN_W) * (QZ_DESIGN_H))
-#define QZ_SCALE_XNUM ((QZ_SCREEN_W) * (QZ_DESIGN_H))
-#define QZ_SCALE_YNUM ((QZ_SCREEN_H) * (QZ_DESIGN_W))
+
+/* ------------------------------------------------------------------------- *
+ * 面板尺寸是**运行时**的
+ *
+ * 真机取 `/dev/fb0` 报的尺寸：LVGL 的 fbdev 驱动读同一个 ioctl 来设显示分辨率，
+ * 所以缩放比例与实际显示分辨率必然一致；设备树换了面板不必重编。模拟器取
+ * `QZDESK_PANEL=320x240`（不设则用编译期 QZ_SCREEN_W/H）—— 同一份二进制换任何
+ * 比例的屏都不用重编，界面也保证铺满实际屏幕。
+ *
+ * main() 一进来就调 qz_scale_init_from_system()，字体与样式都在这之后按最终
+ * 尺寸生成。
+ * ------------------------------------------------------------------------- */
+extern int32_t qz_panel_w;
+extern int32_t qz_panel_h;
+
+/** 设置面板尺寸（非正数忽略，保持原值）。 */
+void qz_scale_init(int32_t panel_w, int32_t panel_h);
+
+/** 探测实际面板尺寸并初始化：真机读 QZDESK_FB（默认 /dev/fb0），模拟器读 QZDESK_PANEL。 */
+void qz_scale_init_from_system(void);
+
+/** 面板在任一方向比设计稿小（字号要设下限，见 QZ_MIN_FONT_PX）。 */
+static inline int qz_scale_downscaled(void)
+{
+    return qz_panel_w < QZ_DESIGN_W || qz_panel_h < QZ_DESIGN_H;
+}
+
+/** 横向比例分子 = 面板宽 × 设计高；纵向 = 面板高 × 设计宽。 */
+static inline int64_t qz_scale_xnum(void)
+{
+    return (int64_t)qz_panel_w * QZ_DESIGN_H;
+}
+
+static inline int64_t qz_scale_ynum(void)
+{
+    return (int64_t)qz_panel_h * QZ_DESIGN_W;
+}
+
 /* 单值量（字号、圆角、线宽、图片 zoom）用较小的那个比例。 */
-#define QZ_SCALE_NUM QZ_SCALE_MIN(QZ_SCALE_XNUM, QZ_SCALE_YNUM)
+static inline int64_t qz_scale_minnum(void)
+{
+    int64_t xnum = qz_scale_xnum();
+    int64_t ynum = qz_scale_ynum();
+    return xnum < ynum ? xnum : ynum;
+}
 
 /** 字号下限：等比缩到 7px 的中文已经糊了，宁可略微不"等比"也要能读。 */
 #ifndef QZ_MIN_FONT_PX
@@ -72,19 +114,19 @@ static inline lv_coord_t qz_scale_ratio(int32_t value, int64_t num)
 /** 横向：x 坐标、宽度、左右内边距、列间距。 */
 static inline lv_coord_t qz_scale_x(int32_t value)
 {
-    return qz_scale_ratio(value, QZ_SCALE_XNUM);
+    return qz_scale_ratio(value, qz_scale_xnum());
 }
 
 /** 纵向：y 坐标、高度、上下内边距、行间距。 */
 static inline lv_coord_t qz_scale_y(int32_t value)
 {
-    return qz_scale_ratio(value, QZ_SCALE_YNUM);
+    return qz_scale_ratio(value, qz_scale_ynum());
 }
 
 /** 单值量（字号、圆角、线宽、图片 zoom）：取较小的那个比例。 */
 static inline lv_coord_t qz_scale_px(int32_t value)
 {
-    return qz_scale_ratio(value, QZ_SCALE_NUM);
+    return qz_scale_ratio(value, qz_scale_minnum());
 }
 
 /**
@@ -96,19 +138,18 @@ static inline lv_coord_t qz_scale_px(int32_t value)
  */
 static inline uint32_t qz_scale_zoom(uint32_t zoom)
 {
-    return (uint32_t)(((uint64_t)zoom * QZ_SCALE_NUM + QZ_SCALE_DEN / 2) / QZ_SCALE_DEN);
+    return (uint32_t)(((uint64_t)zoom * qz_scale_minnum() + QZ_SCALE_DEN / 2) / QZ_SCALE_DEN);
 }
 
 /** 字号缩放，带上限（见 QZ_MIN_FONT_PX）。 */
 static inline int32_t qz_scale_font(int32_t px)
 {
-#if QZ_SCALE_NUM < QZ_SCALE_DEN
-    /* 只有真的在缩小才设下限：默认 480×320 下面字号必须逐像素与以前一致。 */
-    lv_coord_t scaled = qz_scale_px(px);
-    return scaled < QZ_MIN_FONT_PX ? QZ_MIN_FONT_PX : (int32_t)scaled;
-#else
+    if (qz_scale_downscaled()) {
+        /* 只有真的在缩小才设下限：面板不小于设计稿时字号必须逐像素与设计一致。 */
+        lv_coord_t scaled = qz_scale_px(px);
+        return scaled < QZ_MIN_FONT_PX ? QZ_MIN_FONT_PX : (int32_t)scaled;
+    }
     return px;
-#endif
 }
 
 /**

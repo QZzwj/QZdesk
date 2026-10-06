@@ -19,13 +19,11 @@ endif()
 option(QZDESK_BUILD_CORE "Build the bundled QZdesk Rust core with Cargo" ON)
 set(QZDESK_CARGO_TARGET "" CACHE STRING "Optional Rust target triple for QZdesk core")
 
-# 面板尺寸。界面按 480×320 的设计稿布局（见 include/scale.h），这里给出实际面板；
-# 换同比例的小屏只要换这两个值：
-#     cmake -DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240 …
-# 缩放系数取 min(宽比, 高比)，等比缩放、不拉伸：320×240 是 4:3，比设计稿的 3:2
-# 略"高"一点，所以那 27px 会留在底部（不裁切、不变形）。
-set(QZDESK_PANEL_W 480 CACHE STRING "Panel width in pixels")
-set(QZDESK_PANEL_H 320 CACHE STRING "Panel height in pixels")
+# 面板尺寸的**默认值**（编译期兜底）。界面按 480×320 的设计稿布局（见 include/scale.h），
+# 实际尺寸是运行时取的：真机读 /dev/fb0，模拟器读 QZDESK_PANEL=320x240，所以这两个值
+# 只在两者都取不到时起作用（也就等于设计稿本身）。横竖各按各自比例缩放、整屏铺满。
+set(QZDESK_PANEL_W 480 CACHE STRING "Panel width in pixels (compile-time fallback)")
+set(QZDESK_PANEL_H 320 CACHE STRING "Panel height in pixels (compile-time fallback)")
 
 # LVGL and its configuration are vendored inside the project under third_party/.
 # They have to stay side by side: lv_conf.h does `#include "conf/dev_conf.h"`,
@@ -47,6 +45,7 @@ target_compile_definitions(lvgl PUBLIC
 
 add_executable(qzdesk_screen
     app/main.c
+    app/scale.c
     app/theme.c
     app/ai_face.c
     app/face_camera.c

@@ -25,20 +25,18 @@ static const char *qz_env_or(const char *name, const char *fallback)
     const char *value = getenv(name);
     return (value && value[0] != '\0') ? value : fallback;
 }
-/* QZdesk runs on a 480x320 landscape RGB panel by default; the simulator mirrors
- * whatever panel size the build was configured for (see include/scale.h). */
-#define SIMULATOR_WIDTH QZ_SCREEN_W
-#define SIMULATOR_HEIGHT QZ_SCREEN_H
-
 int main(void)
 {
     char server[96] = "未配置";
+    /* 面板尺寸先定下来：真机读 /dev/fb0、模拟器读 QZDESK_PANEL（不设则用编译期
+     * 尺寸）。下面的字体、样式与全部布局都按它缩放，所以必须放在最前面。 */
+    qz_scale_init_from_system();
     qz_load_config(server, sizeof(server));
     lv_init();
     qz_font_init();
     qz_style_init();
 #if LV_USE_SIMULATOR
-    lv_sdl_window_create(SIMULATOR_WIDTH, SIMULATOR_HEIGHT);
+    lv_sdl_window_create(qz_panel_w, qz_panel_h);
     lv_sdl_mouse_create();
     /* The UI is touch driven, so the OS pointer only occludes it (and on a
      * desktop without a cursor theme it shows up as a solid block). */

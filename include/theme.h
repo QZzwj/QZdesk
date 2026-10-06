@@ -8,9 +8,8 @@
 /* ------------------------------------------------------------------------- *
  * Canvas / layout
  *
- * 面板尺寸可以在编译期换成另一块屏（见 include/scale.h）：
- *
- *     cmake -DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240 …
+ * 面板尺寸在运行时按实际屏幕取（见 include/scale.h）：真机是 /dev/fb0 报的尺寸，
+ * 模拟器是 QZDESK_PANEL=320x240（不设则用编译期 QZ_SCREEN_W/H）。
  *
  * 页面里写的坐标与尺寸一律是 480×320 设计稿的像素（QZ_DESIGN_W/H），由 scale.h
  * 统一缩放到当前面板。所以除这里与 scale.h 之外，**不要再用 QZ_SCREEN_W/H 参与

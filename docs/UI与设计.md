@@ -262,12 +262,12 @@ QZDESK_PANEL=320x240 ./run.sh # 同比例的小屏
 真机镜像（界面与核心一起打进 `update.img`）由 Rockchip SDK 的 `./build_qzdesk.sh` 出，见仓库根 README。
 
 面板时序在 SDK 的设备树里设置（例如 `SDK/sysdrv/source/kernel/arch/arm/boot/dts/` 下的
-`*-86panel-ipc.dtsi`，其中 `hactive/vactive` 目前是 720×720）。换屏时同步改该处 panel 节点，
-界面侧不用改代码，只要告诉它面板多大：
+`*-86panel-ipc.dtsi`，其中 `hactive/vactive` 目前是 720×720）。换屏只改那一处 panel
+节点：界面在启动时从 `/dev/fb0` 读实际尺寸（`include/scale.h` 的
+`qz_scale_init_from_system()`），自动缩放到新面板，**一行代码都不用改、也不用重编**。
 
 ```sh
-cmake -S . -B build-320x240 -DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240 -DQZDESK_SIMULATOR=ON
-QZDESK_PANEL=320x240 ./run.sh          # 模拟器上直接看 320×240
+QZDESK_PANEL=320x240 ./run.sh          # 模拟器上直接看 320×240，同一份二进制
 ```
 
 布局一律按 **480×320 的设计稿**写，`include/scale.h` 在 LVGL 调用边界上把这些

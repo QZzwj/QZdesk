@@ -717,14 +717,12 @@ lv_obj_t *qz_icon_image(lv_obj_t *parent, qz_icon_t icon, int32_t px, lv_color_t
     /* A8 蒙版 + 全量重着色：颜色就是主题色，浅色/深色共用一份资源 */
     lv_obj_set_style_image_recolor(image, color, 0);
     lv_obj_set_style_image_recolor_opa(image, LV_OPA_COVER, 0);
-#if QZ_SCALE_NUM < QZ_SCALE_DEN
     /* 面板比设计稿小：素材最小一档只有 14px，仍会比周围的字与留白大出一截，
      * 于是按设计尺寸反算一个 zoom（`lv_image_set_scale` 会被 scale.h 再缩到
-     * 面板），把它压到想要的大小。480 基准下这段不参与编译，行为与以前一致。 */
-    if (px > 0 && (int32_t)glyph->header.w > want) {
+     * 面板），把它压到想要的大小。面板不小于设计稿时不走这里，行为与设计一致。 */
+    if (qz_scale_downscaled() && px > 0 && (int32_t)glyph->header.w > want) {
         lv_image_set_scale(image, (uint32_t)(256 * px / glyph->header.w));
     }
-#endif
     lv_obj_clear_flag(image, LV_OBJ_FLAG_CLICKABLE);
     return image;
 }
