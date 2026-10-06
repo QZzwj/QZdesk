@@ -11,6 +11,10 @@ typedef enum {
     QZ_FACE_HAPPY,    /* 开心 */
     QZ_FACE_CONFUSED, /* 困惑 */
     QZ_FACE_LOVE,     /* 抱心（喜欢 / 被夸） */
+    QZ_FACE_SURPRISED,/* 惊讶（方波抖动 + 呼吸放大） */
+    QZ_FACE_SLEEPY,   /* 困倦（眼皮半闭 + zzz） */
+    QZ_FACE_WINK,     /* 单眼眨 + 星光 */
+    QZ_FACE_EXCITED,  /* 兴奋（快弹跳 + 满星光） */
     QZ_FACE_STATE_COUNT,
 } qz_face_state_t;
 
