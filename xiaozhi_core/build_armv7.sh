@@ -64,9 +64,14 @@ build_alsa() {
 		return 0
 	fi
 
-	local tarball
+	local tarball=""
 	# 先用仓库里随附的源码包（third_party/sources），其次 SDK 的 buildroot dl 缓存。
-	tarball="$(ls "${XIAOZHI_ALSA_SRC:-$VENDOR_DIR/alsa-lib-*.tar.*}" 2>/dev/null | head -1 || true)"
+	if [ -n "${XIAOZHI_ALSA_SRC:-}" ]; then
+		[ -f "$XIAOZHI_ALSA_SRC" ] && tarball="$XIAOZHI_ALSA_SRC"
+	else
+		# 注意：这里的通配符必须留在引号外，否则 shell 不展开
+		tarball="$(ls "$VENDOR_DIR"/alsa-lib-*.tar.* 2>/dev/null | head -1 || true)"
+	fi
 	[ -n "$tarball" ] || \
 		tarball="$(ls "$SDK_DIR"/sysdrv/source/buildroot/buildroot-*/dl/alsa-lib/alsa-lib-*.tar.* 2>/dev/null | head -1 || true)"
 	if [ -z "$tarball" ]; then
