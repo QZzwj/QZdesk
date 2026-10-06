@@ -13,16 +13,24 @@
 #include <time.h>
 
 /* Home composition: one tall AI card on the left, weather/settings/apps stacked
- * on the right. Both columns end on the same line above the page indicator.
- * The weather card leads the right column (top of the home screen, clear of the
- * status bar) and the two entry cards shrink to compact rows underneath it. */
+ * on the right. Both columns run all the way to the bottom gutter — the device
+ * address moved up into the status bar and the page indicator is gone, so the
+ * cards take over that space. The weather card leads the right column (top of
+ * the home screen, clear of the status bar) and the two entry cards fill the
+ * rest.
+ *
+ * 高度都从设计稿推出来，不写死：两列必须正好收尾在 QZ_BOTTOM 这条线上。 */
 #define HERO_Y 36
 #define HERO_W 260
-#define HERO_H 230
+/* 底部只留一个 gutter 的留白，卡片一直长到底。 */
+#define QZ_BOTTOM QZ_GUTTER
+#define HERO_H (QZ_DESIGN_H - HERO_Y - QZ_BOTTOM)
 #define SIDE_W 176
+/* 天气卡高度保持固定：它的文字列是顶部对齐的（见 weather_card.c），变高只会多出
+ * 一块空白、还把左侧图标挤到中间。剩余空间均分给两张入口卡。 */
 #define WEATHER_H 86
-#define SIDE_H 62
 #define SIDE_GAP 10
+#define SIDE_H ((QZ_DESIGN_H - QZ_BOTTOM - HERO_Y - WEATHER_H - 2 * SIDE_GAP) / 2)
 #define SIDE_X (QZ_DESIGN_W - QZ_GUTTER - SIDE_W)
 #define SIDE_Y2 (HERO_Y + WEATHER_H + SIDE_GAP)
 #define SIDE_Y3 (SIDE_Y2 + SIDE_H + SIDE_GAP)
@@ -219,41 +227,6 @@ static void hero_card(lv_obj_t *parent)
     qz_animate_entrance(card, 0);
 }
 
-/** Centred device address in the strip above the home indicator. */
-static void device_address(lv_obj_t *parent)
-{
-    lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_size(row, LV_SIZE_CONTENT, 14);
-    lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, -28);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_style_pad_column(row, 5, 0);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
-
-    /* The address only: the small symbol glyph in this row is drawn a few
-     * pixels too high (a stray sliver of the wifi glyph shows up above the last
-     * digit), and the status bar already carries the wireless state. */
-    char address[32];
-    qz_device_ip(address, sizeof(address));
-    address_label = qz_text(row, address, 11, qz_color(QZ_TEXT_TERTIARY));
-}
-
-static void home_indicator(lv_obj_t *parent)
-{
-    lv_obj_t *bar = lv_obj_create(parent);
-    lv_obj_set_size(bar, 84, 3);
-    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -8);
-    lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, 0);
-    qz_obj_set_bg_color(bar, QZ_TEXT, 0);
-    lv_obj_set_style_bg_opa(bar, (lv_opa_t)80, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-}
-
 /* ------------------------------------------------------------------------- *
  * Screen
  * ------------------------------------------------------------------------- */
@@ -289,6 +262,13 @@ lv_obj_t *qz_desktop_create(const char *server)
     wifi_icon = qz_icon_image(status, QZ_ICON_WIFI, 16, qz_color(QZ_TEXT));
     lv_obj_align(wifi_icon, LV_ALIGN_RIGHT_MID, -QZ_GUTTER - 70, 0);
 
+    /* 设备地址：原来单独占底部一行（连那条指示条一起删掉了），现在放在状态栏
+     * 中间 —— 左边是时间、右边是无线与电量，中间正好空着。 */
+    char address[32];
+    qz_device_ip(address, sizeof(address));
+    address_label = qz_text(status, address, 11, qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_align(address_label, LV_ALIGN_CENTER, 0, 0);
+
     /* Hero card */
     hero_card(desktop_screen);
 
@@ -309,9 +289,6 @@ lv_obj_t *qz_desktop_create(const char *server)
     qz_animate_entrance(weather, 70);
     qz_animate_entrance(settings, 110);
     qz_animate_entrance(apps, 150);
-
-    device_address(desktop_screen);
-    home_indicator(desktop_screen);
 
     update_status();
     lv_timer_create(status_timer, 1000, NULL);

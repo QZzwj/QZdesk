@@ -107,7 +107,7 @@ On start, the core performs an OTA activation check against the cloud. For the f
 
 | Page | Contents |
 | --- | --- |
-| Home | Status bar (time / Wi-Fi / battery) + AI assistant card + settings and apps cards |
+| Home | Status bar (time / device address / Wi-Fi / battery) + AI assistant card + weather, settings and apps cards |
 | AI chat | Chat view ⇄ full-screen face, two modes; the chat view is bubbles plus an input bar, and the face switches between 5 expressions with the core state |
 | Apps | Skills / system status / timers / pomodoro / presence detection / device control |
 | Skills | Shows whether each skill is primary, secondary or off |
