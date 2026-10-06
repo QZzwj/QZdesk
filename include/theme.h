@@ -8,7 +8,7 @@
 /* ------------------------------------------------------------------------- *
  * Canvas / layout
  *
- * 面板尺寸可以在编译期换成同比例的小屏（见 include/scale.h）：
+ * 面板尺寸可以在编译期换成另一块屏（见 include/scale.h）：
  *
  *     cmake -DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240 …
  *

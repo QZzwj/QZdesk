@@ -231,7 +231,8 @@ The UI follows Apple's light-mode HIG. All design tokens live in `include/theme.
 - Panel size is set in the SDK device tree, while the UI is laid out for a **480×320 design**; to
   target a smaller panel of the same kind, pass `-DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240`
   (`QZDESK_PANEL=320x240 ./run.sh` in the simulator) and let `include/scale.h` scale coordinates
-  and fonts — **do not edit theme.h**.
+  and fonts horizontally and vertically by their own ratios (the screen is filled, no letterbox) —
+  **do not edit theme.h**.
 
 ## Troubleshooting
 

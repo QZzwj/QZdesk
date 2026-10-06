@@ -230,7 +230,7 @@ cd <Rockchip SDK>
 - 大尺寸对象不要做缩放/旋转动画（LVGL 会申请整块 ARGB 图层，嵌入式堆上容易分配失败）；
 - 面板尺寸在 SDK 设备树里设置；界面按 **480×320 的设计稿**布局，换同比例的小屏只要
   `-DQZDESK_PANEL_W=320 -DQZDESK_PANEL_H=240`（模拟器上是 `QZDESK_PANEL=320x240 ./run.sh`），
-  坐标与字号由 `include/scale.h` 等比缩放，**不要改 theme.h**。
+  坐标与字号由 `include/scale.h` 横竖各按各自比例缩放（整屏铺满、不留白），**不要改 theme.h**。
 
 ## 排查
 
