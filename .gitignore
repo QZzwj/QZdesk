@@ -13,8 +13,5 @@ weather_cache.json
 build/
 target/
 
-# ---- 第三方源码：LVGL 与它的 lv_conf.h（编译需要，但不入库）----
-third_party/
-
 # ---- 本地预览产物 ----
 tools/preview/

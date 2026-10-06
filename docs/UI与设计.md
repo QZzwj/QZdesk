@@ -283,8 +283,8 @@ cmake --build /tmp/qzdesk-sim-build -j2
 `*-86panel-ipc.dtsi`，其中 `hactive/vactive` 目前是 720×720）。换用 480×320 横屏面板时
 需要同步修改该处 panel 节点，界面侧只需保证 `theme.h` 的 `QZ_SCREEN_W/H` 与之一致。
 
-LVGL 9.2.3 的源码与配置放在 `third_party/`（`lvgl/`、`lv_conf.h`、`conf/dev_conf.h`），该目录不入库，
-克隆后需自行补齐。三者必须保持同级：`lv_conf.h` 里有 `#include "conf/dev_conf.h"`。
+LVGL 9.2.3 的源码与配置随仓库提供，放在 `third_party/`（`lvgl/`、`lv_conf.h`、`conf/dev_conf.h`）。
+三者必须保持同级：`lv_conf.h` 里有 `#include "conf/dev_conf.h"`。
 
 ## QZdesk AI Core
 

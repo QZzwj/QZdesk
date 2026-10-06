@@ -111,14 +111,14 @@ Protocols and ports between nodes are listed in the table below. Edge labels (`-
 | --- | --- |
 | CMake | ≥ 3.12.4 |
 | C / C++ toolchain | Targeting ARMv7 (RV1106) or the host |
-| **LVGL sources** | **9.2.3**, including the panel's `lv_conf.h`; the expected location is set by `LVGL_DIR` / `LVGL_CONF_DIR` in `CMakeLists.txt` |
+| LVGL | **9.2.3**, shipped with the repository under `third_party/` — nothing to prepare |
 | Rust + Cargo | The core uses edition 2024 |
 | SDL2 | Simulator only |
 | ALSA development libraries | Core audio (the `alsa` crate) |
 | Python 3 | Two MCP tool scripts (`set_timer.py`, `pomodoro.py`) |
 
-> [!IMPORTANT]
-> This repository does **not** ship the LVGL sources. Before building, place LVGL 9.2.3 and your panel's `lv_conf.h` where `LVGL_DIR` / `LVGL_CONF_DIR` in `CMakeLists.txt` expect them, otherwise the CMake configure step fails.
+> [!NOTE]
+> LVGL 9.2.3 and the panel's `lv_conf.h` are bundled in `third_party/` (`lvgl/`, `lv_conf.h`, `conf/dev_conf.h`). The three must stay side by side — `lv_conf.h` does `#include "conf/dev_conf.h"`, so do not split them up.
 
 > [!NOTE]
 > The core build downloads `opus` and `speexdsp` sources from GitHub Releases and compiles them locally, so **the first build requires network access**.

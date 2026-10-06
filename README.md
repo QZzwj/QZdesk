@@ -111,14 +111,14 @@ flowchart TB
 | --- | --- |
 | CMake | ≥ 3.12.4 |
 | C / C++ 工具链 | 目标为 ARMv7（RV1106）或本机 |
-| **LVGL 源码** | **9.2.3**，含面板用的 `lv_conf.h`；期望位置由 `CMakeLists.txt` 的 `LVGL_DIR` / `LVGL_CONF_DIR` 指定 |
+| LVGL | **9.2.3**，已随仓库提供（`third_party/`），无需单独准备 |
 | Rust + Cargo | 核心使用 edition 2024 |
 | SDL2 | 仅模拟器需要 |
 | ALSA 开发库 | 核心音频（`alsa` crate） |
 | Python 3 | 两个 MCP 工具脚本（`set_timer.py`、`pomodoro.py`） |
 
-> [!IMPORTANT]
-> 本仓库**不包含 LVGL 源码**。构建前请先按 `CMakeLists.txt` 里 `LVGL_DIR` / `LVGL_CONF_DIR` 指向的位置准备好 LVGL 9.2.3 与面板的 `lv_conf.h`，否则 CMake 配置阶段就会失败。
+> [!NOTE]
+> LVGL 9.2.3 与面板的 `lv_conf.h` 直接内置在 `third_party/`（`lvgl/`、`lv_conf.h`、`conf/dev_conf.h`）。三者必须保持同级——`lv_conf.h` 里有 `#include "conf/dev_conf.h"`，调整时不要拆开。
 
 > [!NOTE]
 > 核心构建会从 GitHub Releases 下载 `opus` 与 `speexdsp` 源码并本地编译，因此**首次构建需要网络**。
