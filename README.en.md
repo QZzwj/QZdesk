@@ -12,47 +12,27 @@
 
 ---
 
-## Table of Contents
-
-- [Introduction](#introduction)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Getting Started](#getting-started)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [HTTP API Reference](#http-api-reference)
-- [MCP Tools](#mcp-tools)
-- [Project Layout](#project-layout)
-- [UI & Design](#ui--design)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-
 ## Introduction
 
-QZdesk is an AI desktop terminal that runs on an embedded Linux board. It consists of two processes:
+QZdesk is an AI desktop terminal running on an embedded Linux board. It consists of two processes that talk over local UDP (the UI spawns the core):
 
-- **`qzdesk_screen`** (C + LVGL) — a 480×320 landscape UI that owns the touch panel, fbdev, Wi-Fi, backlight and volume;
-- **`xiaozhi_linux_rs`** (Rust) — the voice core that talks to the XiaoZhi cloud for real-time speech, and additionally provides an MCP gateway, local skills, smart-home control, weather, performance monitoring and a web console.
+- **`qzdesk_screen`** (C + LVGL) — the 480×320 landscape UI that owns the touch panel, fbdev, Wi-Fi, backlight and volume;
+- **`xiaozhi_linux_rs`** (Rust) — the voice core: real-time speech through the XiaoZhi cloud, plus an MCP gateway, local skills, smart-home control, weather, performance monitoring and a web console.
 
-The two processes talk over local UDP, and the UI is responsible for spawning the core. A skill is a directory containing `SKILL.md`, imported from the web console; once imported it changes the assistant's persona, tone and output format — no code change or reflash required.
-
-In one line: **a complete, trimmable embedded solution for "a desktop assistant that talks", with swappable personas and local device control.**
+A skill is a directory with a `SKILL.md`, imported from the web console; once imported it changes the assistant's persona, tone and output format with **no code change and no reflash** — a complete, trimmable solution for "a desktop assistant that talks", with swappable personas and local device control.
 
 ## Features
 
 | Capability | Description |
 | --- | --- |
-| Real-time voice chat | The core connects to the XiaoZhi cloud over WebSocket; Opus encode/decode and ALSA capture/playback happen locally, with push-to-talk and interruption |
-| Local skills | Import `SKILL.md` (or a ZIP containing it) from the web console; a primary skill changes the persona directly, secondary skills are retrieved on demand, and imports take effect immediately |
+| Real-time voice chat | WebSocket to the XiaoZhi cloud; Opus encode/decode and ALSA capture/playback locally, with push-to-talk and interruption |
+| Local skills | Import a `SKILL.md` (or a ZIP containing it): a primary skill changes the persona directly, secondary skills are retrieved on demand, and imports take effect immediately |
 | MCP gateway | Exposes 12 tools to the cloud: 4 configurable external tools + 6 skill tools + 2 smart-home tools, over subprocess / HTTP / TCP |
-| Smart home | The core embeds an MQTT client and talks to zigbee2mqtt or hand-written topics directly; controllable from both the web console and voice |
-| Text chat | The GUI input box and the web console share one code path; text is synthesized locally and sent upstream in exactly the same frames as the microphone |
+| Smart home | A built-in MQTT client talks to zigbee2mqtt or hand-written topics directly; controllable from both the web console and voice |
+| Text chat | The GUI input box and the web console share one path: text is synthesized locally and sent upstream in exactly the same frames as the microphone |
 | Web console | A single-page console served by the device (default `:8080`): skills, live chat, weather, performance, smart home |
-| Weather card | The core calls Open-Meteo directly (no API key); one snapshot feeds both the device home screen and the web page |
-| Performance monitor | Samples `/proc` and `statvfs` every 2 seconds; the device page and the web page read the same data |
-| Desktop simulator | The same code runs on a PC through the LVGL SDL simulator (480×320 window) for board-free development |
-| Real hardware interfaces | Wi-Fi via `wpa_cli`, backlight via sysfs, volume via `amixer`, timezone via POSIX `TZ` — all overridable through environment variables |
+| Device data | Weather comes straight from Open-Meteo (no API key) and performance samples `/proc` and `statvfs` every 2 seconds; the device UI and the web page read the same snapshot |
+| Board-free development | The same code runs on a PC through the LVGL SDL simulator (480×320 window); Wi-Fi / backlight / volume / timezone use the real interfaces and can all be overridden by environment variables |
 
 ## Architecture
 
@@ -68,33 +48,6 @@ xiaozhi_linux_rs (Rust voice core)
       └─ HTTPS ───────→ Open-Meteo (weather snapshot)
 ```
 
-<details>
-<summary>Expand: Mermaid version of the architecture diagram (renders as a graphic on GitHub)</summary>
-
-```mermaid
-flowchart TB
-    UI["qzdesk_screen<br/>LVGL 480×320 UI"]
-    WEB["Browser console"]
-    CORE["xiaozhi_linux_rs<br/>Rust voice core"]
-    CLOUD["XiaoZhi cloud<br/>ASR · LLM · TTS"]
-    TOOLS["MCP tools<br/>system status / timer / pomodoro / robot"]
-    IOT["LAN devices<br/>zigbee2mqtt"]
-    WX["Open-Meteo<br/>weather snapshot"]
-
-    UI <--> CORE
-    WEB <--> CORE
-    CORE <--> CLOUD
-    CORE --> TOOLS
-    CORE <--> IOT
-    CORE --> WX
-```
-
-<!-- Experimental: if rendering fails, preview on GitHub -->
-
-Protocols and ports between nodes are listed in the table below. Edge labels (`-->|label|`) and `subgraph` are deliberately avoided: Mermaid draws the former as detached boxes and clips the latter.
-
-</details>
-
 | Channel | Port / protocol | Notes |
 | --- | --- | --- |
 | UI ↔ core | UDP `5678` (core) / `5679` (UI) | Chat history, state, volume & backlight, weather snapshot, performance data |
@@ -105,50 +58,32 @@ Protocols and ports between nodes are listed in the table below. Edge labels (`-
 
 ## Getting Started
 
-### Prerequisites
-
-| Dependency | Version / notes |
-| --- | --- |
-| CMake | ≥ 3.12.4 |
-| C / C++ toolchain | Targeting ARMv7 (RV1106) or the host |
-| LVGL | **9.2.3**, shipped with the repository under `third_party/` — nothing to prepare |
-| Rust + Cargo | The core uses edition 2024 |
-| SDL2 | Simulator only |
-| ALSA development libraries | Core audio (the `alsa` crate) |
-| opus / speexdsp | Native builds use the system packages (`libopus-dev`, `libspeexdsp-dev`); cross builds use the sources under `third_party/sources/` |
-| Python 3 | Two MCP tool scripts (`set_timer.py`, `pomodoro.py`) |
+Requirements: CMake ≥ 3.12.4, a C/C++ and a Rust toolchain (the core uses edition 2024), SDL2 (simulator only), ALSA development libraries with opus/speexdsp, and Python 3 (two MCP tool scripts). LVGL **9.2.3** ships with the repository under `third_party/` — nothing to prepare.
 
 > [!NOTE]
-> LVGL 9.2.3 and the panel's `lv_conf.h` are bundled in `third_party/` (`lvgl/`, `lv_conf.h`, `conf/dev_conf.h`). The three must stay side by side — `lv_conf.h` does `#include "conf/dev_conf.h"`, so do not split them up.
-
-> [!NOTE]
-> Every third-party source tarball the cross build needs ships with the repository under `third_party/sources/` (`opus`, `speexdsp`, `alsa-lib`); `build.rs`, `build_armv7.sh` and `scripts/build_alsa.sh` all prefer them, so **those steps need no network access**. Override with `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` / `XIAOZHI_ALSA_SRC`. The cross toolchain itself is not vendored (~288MB) — the scripts download it only when it is missing locally.
+> In `third_party/`, `lvgl/`, `lv_conf.h` and `conf/dev_conf.h` must stay side by side (`lv_conf.h` does `#include "conf/dev_conf.h"`). The opus / speexdsp / alsa-lib sources the cross build needs ship there too, under `third_party/sources/`, and `build.rs` plus `build_armv7.sh` prefer them, so **those steps need no network access** (override with `XIAOZHI_OPUS_SRC` / `XIAOZHI_SPEEXDSP_SRC` / `XIAOZHI_ALSA_SRC`). The cross toolchain itself is not vendored (~288MB); the scripts only download it when it is missing locally.
 
 ### Run on a PC (simulator)
-
-`run.sh` only drives the **simulator**: it builds for the host, so its output is a plain x86 binary that the real device cannot use (see the next section for the device).
 
 ```bash
 ./run.sh      # 480×320 window, mouse acts as touch
 ```
 
-`run.sh` frees TCP 8080 from any previous service, configures and builds `qzdesk_screen` plus the Rust core, and starts them under a small supervisor loop.
-
-Useful switches:
+`run.sh` only drives the simulator and builds for the host (its output is an x86 binary, useless on the device). It frees TCP 8080 from any previous service, configures and builds `qzdesk_screen` plus the Rust core, then starts them under a small supervisor loop. Useful switches:
 
 | Environment variable | Effect |
 | --- | --- |
-| `QZDESK_BUILD_CORE=ON` | Force a core rebuild in simulator mode (otherwise `target/release` is reused) |
+| `QZDESK_BUILD_CORE=ON` | Force a core rebuild (otherwise `target/release` is reused) |
 | `QZDESK_BUILD_DIR=...` | Build directory (default `build`) |
 | `QZDESK_JOBS=N` | Number of parallel build jobs |
 | `QZDESK_REPLACE_PORT_8080=0` | Do not kill the process holding port 8080 |
 
-### Building for the device (RV1106)
+### Building the device image (RV1106)
 
-The device is an ARMv7 / RV1106 Linux board: **nothing is compiled on it, and host (x86) binaries are useless on it**. Both the UI and the core come out of the Rockchip SDK.
+The device is an ARMv7 / RV1106 board: **nothing is compiled on it and host binaries are useless on it**. Both the UI and the core come out of the Rockchip SDK (a separate repository, not shipped here — board configuration, panel timings and the partition layout live in it):
 
 ```bash
-cd <Rockchip SDK>       # not shipped with this repository — see the note below
+cd <Rockchip SDK>
 ./build_qzdesk.sh       # builds the UI + cross-compiles the core, then packs output/image/update.img
 ```
 
@@ -157,9 +92,6 @@ The board configuration has to be picked once beforehand (the script reminds you
 - UI `qzdesk_screen`: built by the SDK's cross toolchain through this repository's `CMakeLists.txt` (the SDK's `project/app/qzdesk/src` points at this repository);
 - Core `xiaozhi_linux_rs`: built by `xiaozhi_core/build_armv7.sh`, statically linked against musl, so the target rootfs needs no extra shared libraries;
 - Output lands in the SDK's `project/app/out/bin/` and is packed into `output/image/update.img` for flashing; on boot `S99qzdesk` starts the UI, which then starts the core.
-
-> [!NOTE]
-> The Rockchip SDK is a separate repository and is **not shipped here**. This repository holds only the application side (UI + core); board configuration (panel timings, partition layout, defconfig) lives in the SDK.
 
 ## Usage
 
@@ -171,31 +103,28 @@ On start, the core performs an OTA activation check against the cloud. For the f
 
 | Page | Contents |
 | --- | --- |
-| Home | Status bar (time / Wi-Fi / battery) + large assistant card + settings and apps cards |
-| AI assistant | Chat view ⇄ full-screen mascot view; the chat view has bubbles and an input bar, the mascot view switches between 5 expressions driven by core state |
-| Apps | Skills / system status / timer / pomodoro / device control |
-| Skills | Lists every skill with its primary / secondary / off state |
+| Home | Status bar (time / Wi-Fi / battery) + AI assistant card + settings and apps cards |
+| AI chat | Chat view ⇄ full-screen face, two modes; the chat view is bubbles plus an input bar, and the face switches between 5 expressions with the core state |
+| Apps | Skills / system status / timers / pomodoro / device control |
+| Skills | Shows whether each skill is primary, secondary or off |
 | Settings | WLAN scan and connect, sound, backlight, time and timezone, about |
 
-### Working with skills
+### Using skills
 
-A skill is a directory containing `SKILL.md` that defines the assistant's persona, tone and output format.
+A skill is a directory containing `SKILL.md`, and it defines the assistant's persona, tone and output format:
 
 1. Open `http://<device-ip>:8080` in a browser;
-2. Paste the `SKILL.md` content, or upload a ZIP that contains `SKILL.md`;
-3. A newly imported skill **becomes the primary skill by default** and takes effect on the next turn; you can switch it to "secondary" or "off" in the list;
-4. On the device you can also switch primary / secondary / off from the **Skills** page.
-
-The three roles behave differently:
+2. Paste the `SKILL.md` content, or upload a ZIP containing it;
+3. A newly imported skill **becomes the primary skill**, effective from the next turn; switch it to secondary or off later on the device's **Skills** page or in the web list.
 
 | Role | Behaviour |
 | --- | --- |
-| Primary | Its body goes straight into the model context and changes persona and format from the first sentence |
-| Secondary | Costs no context; retrieved via `skill_search` / `skill_read` only when relevant |
+| Primary | Its body goes straight into the model context and shapes persona and format from the first sentence |
+| Secondary | Costs no context; retrieved by `skill_search` / `skill_read` only when relevant |
 | Off | Takes no part in the conversation |
 
 > [!NOTE]
-> The primary skill body is delivered through the tool descriptions in MCP `tools/list`, not through `initialize.instructions` — the latter is ignored by some cloud gateways, whereas tool descriptions always reach the model context. It is sent once per session, and the core rebuilds the session when skills change.
+> The primary skill body travels in the tool descriptions of MCP `tools/list` (sent once per session), not in `initialize.instructions` — the latter is ignored by some cloud gateways, whereas tool descriptions always reach the model context. The core rebuilds the session when skills change.
 
 ### Web console
 
@@ -203,14 +132,7 @@ Default address `http://<device-ip>:8080`; change the port with `QZDESK_SKILL_WE
 
 ## Configuration
 
-Configuration lives in two layers:
-
-| File | When | Contents |
-| --- | --- | --- |
-| `xiaozhi_core/config.toml` | Compile time: embedded into the binary by `build.rs` | Defaults (application info, audio, network, TTS, MCP, smart home, weather) |
-| `xiaozhi_config.json` | Runtime: generated on first start | Writable configuration; restart to apply |
-
-Frequently used environment variables (they take precedence over the config files):
+Configuration lives in two layers: `xiaozhi_core/config.toml` holds compile-time defaults (embedded into the binary by `build.rs`), `xiaozhi_config.json` is the runtime configuration (generated on first start; restart to apply). Frequently used environment variables (they take precedence over the config files):
 
 | Environment variable | Effect |
 | --- | --- |
@@ -232,7 +154,7 @@ Frequently used environment variables (they take precedence over the config file
 
 ## HTTP API Reference
 
-Every capability of the web console is served by these JSON endpoints (`xiaozhi_core/src/skill_web.rs`); the device-side skills page uses the same API.
+Every capability of the web console is served by these JSON endpoints (`xiaozhi_core/src/skill_web.rs`); the device-side skills page uses the same API:
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -284,7 +206,7 @@ Transports, execution modes (`sync` / `background`) and timeouts for external to
 │   ├── src/                  # Audio, network, controller, MCP gateway, skills, weather, smart home…
 │   ├── web/                  # Web console (single HTML file)
 │   ├── docs/                 # MCP / OTA / audio device / GUI adaptation notes
-│   └── scripts/              # Includes the RV1106 uClibc cross-compilation script
+│   └── scripts/              # Cross-compilation scripts for other targets
 ├── run.sh                    # PC simulator: one-command build + run (the device goes through the SDK)
 ├── CMakeLists.txt
 └── LICENSE                   # MIT
@@ -292,18 +214,13 @@ Transports, execution modes (`sync` / `background`) and timeouts for external to
 
 ## UI & Design
 
-The UI follows Apple's light-mode HIG. All design tokens live in `include/theme.h`, and animation curves and durations are collected there too. The full story — palette, material opacity, mascot bitmap baking, memory and rendering trade-offs, performance tuning — is in [`docs/UI与设计.md`](./docs/UI与设计.md) (Chinese).
-
-A few constraints worth knowing up front:
+The UI follows Apple's light-mode HIG. All design tokens live in `include/theme.h`, and animation curves and durations are collected there too; the full story — palette, material opacity, mascot bitmap baking, memory and rendering trade-offs, performance tuning — is in [`docs/UI与设计.md`](./docs/UI与设计.md) (Chinese). A few constraints worth knowing up front:
 
 - 480×320 at 16-bit colour depth; `LV_MEM_SIZE` in `lv_conf.h` is 2MB;
 - Do not animate scale or rotation on large objects (LVGL allocates a full ARGB layer for them, which easily fails on the embedded heap);
 - Panel size is set in the SDK device tree; when changing panels, keep `QZ_SCREEN_W/H` in sync with it.
 
 ## Troubleshooting
-
-> [!TIP]
-> When a skill seems not to apply, have the assistant call `skill_status` or `skill_list` and trust the real return value rather than the UI impression.
 
 | Symptom | What to check |
 | --- | --- |
@@ -313,6 +230,9 @@ A few constraints worth knowing up front:
 | Core will not start | `QZDESK_CORE_AUTOSTART`, `QZDESK_CORE_BIN`, and `xiaozhi_config.json` next to the core |
 | No sound in the simulator | The simulator sets `QZDESK_AUDIO_DISABLED=1` by default (no ALSA devices) — expected |
 
+> [!TIP]
+> When a skill seems not to apply, have the assistant call `skill_status` or `skill_list` and trust the real return value rather than the UI impression.
+
 ## Contributing
 
 - Make sure `cargo test` passes (core side) and that the UI still starts in the simulator;
@@ -321,6 +241,4 @@ A few constraints worth knowing up front:
 
 ## License
 
-This project is released under the **MIT** license; see [`LICENSE`](./LICENSE).
-
-The bundled voice core in `xiaozhi_core/` is MIT as well (Copyright © 2025 Hyrsoft); see [`xiaozhi_core/LICENSE`](./xiaozhi_core/LICENSE).
+This project and the bundled voice core in `xiaozhi_core/` are released under the **MIT** license; see [`LICENSE`](./LICENSE) and [`xiaozhi_core/LICENSE`](./xiaozhi_core/LICENSE) (Copyright © 2025 Hyrsoft).
