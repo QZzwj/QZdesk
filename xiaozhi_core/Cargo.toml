@@ -27,6 +27,9 @@ uuid = { version = "1.18.1", features = ["v4"] }
 async-trait = "0.1.89"
 sha2 = "0.10"
 base64 = "0.22"
+# 只为一件事：提醒要按"设备本地钟点"判断，而 std 没有本地时间。
+# libc 本来就在依赖树里（alsa / tokio），不新增编译产物。
+libc = "0.2"
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

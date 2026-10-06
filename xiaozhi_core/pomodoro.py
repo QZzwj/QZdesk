@@ -21,10 +21,23 @@ import sys
 import tempfile
 import time
 
-QZDESK_DATA_DIR = os.path.join(os.path.expanduser("~"), ".local", "share", "qzdesk")
+def default_dir():
+    """与核心（src/user_data.rs）同一套规则：设备上优先 /userdata/qzdesk。
+
+    番茄钟的状态机现在在核心（`/api/pomodoro`），这个脚本只是备用入口；目录
+    对齐了，脚本读写的才是同一个文件。
+    """
+    device = "/userdata/qzdesk"
+    try:
+        os.makedirs(device, exist_ok=True)
+        return device
+    except OSError:
+        return os.path.join(os.path.expanduser("~"), ".local", "share", "qzdesk")
+
+
 POMODORO_DIR = os.environ.get(
     "QZDESK_POMODORO_DIR",
-    os.environ.get("DESKBOT_POMODORO_DIR", QZDESK_DATA_DIR),
+    os.environ.get("DESKBOT_POMODORO_DIR", default_dir()),
 )
 STATE_FILE = os.path.join(POMODORO_DIR, "pomodoro.json")
 CMD_FILE = os.path.join(POMODORO_DIR, "pomodoro_cmd.json")

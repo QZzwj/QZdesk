@@ -234,6 +234,8 @@ body.scrolled::after{opacity:1}
   height:calc(100dvh - 116px);min-height:0;
 }
 .editor-card{grid-column:1;grid-row:2;align-self:start}
+.timers-card{grid-column:1;grid-row:3;align-self:start}
+.logs-card{grid-column:1;grid-row:4;align-self:start}
 
 /* ===========================================================================
    卡片：结构层，材质更实（不做 backdrop-filter，见文件头）
@@ -409,6 +411,36 @@ body.scrolled::after{opacity:1}
 .tag.none{color:var(--fg-2);background:rgba(15,23,42,.07);box-shadow:0 0 0 1px rgba(15,23,42,.10)}
 
 .skills{list-style:none;margin:12px 18px 18px;padding:0;display:flex;flex-direction:column;gap:11px}
+
+/* 提醒与番茄钟：提醒行沿用 Skill 卡的行式样，时间用等宽数字对齐 */
+.timer{
+  display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:16px;
+  background:#fff;
+  box-shadow:var(--ring),0 1px 2px rgba(16,24,40,.05),0 8px 20px -14px rgba(16,24,40,.28);
+}
+.timer-clock{font-size:17px;font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums}
+.timer-label{flex:1;min-width:0;font-size:13px;color:var(--fg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.timer-empty{margin:6px 4px;font-size:13px;color:var(--fg-3)}
+.timer-form{display:flex;align-items:center;gap:8px;margin:8px 18px 0;flex-wrap:wrap}
+.timer-form input[type=number]{
+  width:66px;padding:7px 9px;border-radius:10px;border:1px solid var(--line);
+  background:var(--glass-solid);color:var(--fg);font-size:13px;font-variant-numeric:tabular-nums;
+}
+.timer-daily{display:flex;align-items:center;gap:5px;font-size:13px;color:var(--fg-2)}
+.pomodoro{
+  display:flex;align-items:center;gap:10px;margin:14px 18px 0;padding-top:14px;
+  border-top:1px solid var(--line);flex-wrap:wrap;
+}
+.pomo-clock{font-size:21px;font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums}
+.pomo-count{font-size:12px;color:var(--fg-3)}
+.pomo-actions{display:flex;gap:6px;margin-left:auto}
+
+/* 核心日志：等宽、可滚动，永远停在最新一行 */
+.logs{
+  margin:10px 18px 18px;padding:12px 14px;max-height:280px;overflow:auto;
+  border-radius:14px;background:var(--glass-well);color:var(--fg-2);
+  font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;
+}
 .skill{
   position:relative;
   padding:14px 15px;border-radius:16px;
@@ -722,7 +754,7 @@ textarea{resize:vertical;line-height:1.6}
 @media (max-width:900px){
   .wrap{grid-template-columns:1fr;padding-top:16px}
   .wrap>.col{display:flex;grid-column:auto}
-  .skills-card,.chat-card,.editor-card{grid-column:auto;grid-row:auto}
+  .skills-card,.chat-card,.editor-card,.timers-card,.logs-card{grid-column:auto;grid-row:auto}
   .chat-card{position:static;min-height:0}
   .sidebar{order:2}
   .col{order:1}
@@ -967,6 +999,47 @@ textarea{resize:vertical;line-height:1.6}
           <span id="limitsTip">ZIP 上限 64 MiB，解压后上限 32 MB、512 个文件；保存或切换使用方式后会话会自动重建，无需重启设备。</span>
         </div>
       </details>
+    </section>
+
+    <section class="card timers-card" aria-labelledby="timersTitle">
+      <div class="card-head">
+        <div>
+          <p class="eyebrow">DEVICE / TIMERS</p>
+          <h2 id="timersTitle">提醒与番茄钟</h2>
+        </div>
+        <button class="btn ghost sm" id="timersRefresh" type="button">刷新</button>
+      </div>
+      <p class="chat-note">提醒与番茄钟都存在设备核心上：语音、设备屏幕和这个页面读写同一份，到点会写进下面的对话记录。</p>
+      <form class="timer-form" id="timerForm">
+        <input id="timerHour" type="number" min="0" max="23" step="1" value="7" aria-label="小时">
+        <span>:</span>
+        <input id="timerMinute" type="number" min="0" max="59" step="5" value="30" aria-label="分钟">
+        <label class="timer-daily"><input id="timerDaily" type="checkbox" checked>每天</label>
+        <button class="btn sm" type="submit">加提醒</button>
+      </form>
+      <ul class="skills" id="timers"></ul>
+      <div class="pomodoro">
+        <span class="tag none" id="pomoPhase">未开始</span>
+        <span class="pomo-clock" id="pomoClock">00:00</span>
+        <span class="pomo-count" id="pomoCount">已完成 0/4 轮</span>
+        <span class="pomo-actions">
+          <button class="btn ghost sm" id="pomoToggle" type="button">开始</button>
+          <button class="btn ghost sm" id="pomoStop" type="button">结束</button>
+        </span>
+      </div>
+      <p class="msg" id="timersMsg" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="card logs-card" aria-labelledby="logsTitle">
+      <div class="card-head">
+        <div>
+          <p class="eyebrow">DEVICE / LOGS</p>
+          <h2 id="logsTitle">核心日志</h2>
+        </div>
+        <button class="btn ghost sm" id="logsRefresh" type="button">刷新</button>
+      </div>
+      <p class="chat-note">核心最近几百行日志（与设备上的 <code>/var/log/qzdesk.log</code> 同一份内容）。技能有没有下发、MCP 握手、提醒到点，都能在这里看到。</p>
+      <pre class="logs" id="logs">正在读取…</pre>
     </section>
   </div>
 
@@ -1997,6 +2070,186 @@ setPerformanceState('实时', false);
 loadPerformanceHistory();
 loadPerformance();
 startPerformance();
+
+/* ---------------- 提醒与番茄钟 ----------------
+   两者都存在核心上：语音、设备屏幕与这个页面读写的是同一份。页面只做两件事，
+   渲染状态、把按钮动作发给核心。 */
+const TIMER_REFRESH_MS = 20000;
+
+function renderTimers(timers) {
+  const list = $('#timers');
+  list.innerHTML = '';
+  if (!timers.length) {
+    const empty = document.createElement('li');
+    empty.className = 'timer-empty';
+    empty.textContent = '还没有提醒。用语音说“提醒我七点半喝水”，或在上面加一条。';
+    list.appendChild(empty);
+    return;
+  }
+  timers.forEach(function (item) {
+    const li = document.createElement('li');
+    li.className = 'timer';
+    const clock = document.createElement('span');
+    clock.className = 'timer-clock';
+    clock.textContent = String(item.hour).padStart(2, '0') + ':' + String(item.minute).padStart(2, '0');
+    const label = document.createElement('span');
+    label.className = 'timer-label';
+    label.textContent = item.label || '提醒';
+    li.appendChild(clock);
+    li.appendChild(label);
+    if (item.daily) {
+      const tag = document.createElement('span');
+      tag.className = 'tag none';
+      tag.textContent = '每天';
+      li.appendChild(tag);
+    }
+    const remove = document.createElement('button');
+    remove.className = 'btn ghost sm';
+    remove.type = 'button';
+    remove.textContent = '删除';
+    remove.addEventListener('click', function () { removeTimer(item.id); });
+    li.appendChild(remove);
+    list.appendChild(li);
+  });
+}
+
+async function loadTimers() {
+  try {
+    const data = await fetchJson('/api/timers');
+    renderTimers(Array.isArray(data.timers) ? data.timers : []);
+  } catch (error) {
+    setMsg('timersMsg', error.message, false);
+  }
+}
+
+async function removeTimer(id) {
+  try {
+    await fetchJson('/api/timers/' + id, { method: 'DELETE' });
+    setMsg('timersMsg', '已删除', true);
+    loadTimers();
+  } catch (error) {
+    setMsg('timersMsg', error.message, false);
+  }
+}
+
+function renderPomodoro(state) {
+  const active = !!(state && state.active);
+  const paused = !!(state && state.paused);
+  const remaining = (state && state.remaining_seconds) || 0;
+  $('#pomoPhase').textContent = !active ? '未开始' : (paused ? '已暂停'
+    : (state.phase === 'break' ? '休息中' : '专注中'));
+  $('#pomoClock').textContent =
+    String(Math.floor(remaining / 60)).padStart(2, '0') + ':' + String(remaining % 60).padStart(2, '0');
+  $('#pomoCount').textContent = '已完成 ' + ((state && state.completed_cycles) || 0) + '/' +
+    ((state && state.total_cycles) || 4) + ' 轮';
+  $('#pomoToggle').textContent = !active ? '开始' : (paused ? '继续' : '暂停');
+}
+
+async function loadPomodoro() {
+  try {
+    const data = await fetchJson('/api/pomodoro');
+    renderPomodoro(data.state);
+  } catch (error) {
+    setMsg('timersMsg', error.message, false);
+  }
+}
+
+async function pomodoroAction(action) {
+  try {
+    const data = await fetchJson('/api/pomodoro', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action }),
+    });
+    renderPomodoro(data.state);
+    setMsg('timersMsg', data.message || '', true);
+  } catch (error) {
+    setMsg('timersMsg', error.message, false);
+  }
+}
+
+function refreshTimers() { loadTimers(); loadPomodoro(); }
+let timersTimer = null;
+function startTimers() { if (!timersTimer) timersTimer = setInterval(refreshTimers, TIMER_REFRESH_MS); }
+function stopTimers() { if (timersTimer) { clearInterval(timersTimer); timersTimer = null; } }
+
+$('#timersRefresh').addEventListener('click', refreshTimers);
+$('#pomoToggle').addEventListener('click', function () {
+  const label = $('#pomoToggle').textContent;
+  pomodoroAction(label === '开始' ? 'start' : (label === '继续' ? 'resume' : 'pause'));
+});
+$('#pomoStop').addEventListener('click', function () { pomodoroAction('stop'); });
+$('#timerForm').addEventListener('submit', async function (event) {
+  event.preventDefault();
+  const hour = parseInt($('#timerHour').value, 10);
+  const minute = parseInt($('#timerMinute').value, 10);
+  if (!(hour >= 0 && hour <= 23) || !(minute >= 0 && minute <= 59)) {
+    setMsg('timersMsg', '时间要填 0-23 时、0-59 分', false);
+    return;
+  }
+  try {
+    await fetchJson('/api/timers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hour: hour,
+        minute: minute,
+        daily: $('#timerDaily').checked,
+        label: '提醒',
+      }),
+    });
+    setMsg('timersMsg', '已加提醒，到点会写进对话记录', true);
+    loadTimers();
+  } catch (error) {
+    setMsg('timersMsg', error.message, false);
+  }
+});
+
+/* ---------------- 核心日志 ---------------- */
+const LOG_REFRESH_MS = 5000;
+const LOG_LIMIT = 200;
+
+async function loadLogs() {
+  const box = $('#logs');
+  try {
+    const data = await fetchJson('/api/logs?limit=' + LOG_LIMIT);
+    const lines = Array.isArray(data.lines) ? data.lines : [];
+    /* 只在用户本来就贴着底部时自动跟到底：翻着历史看的时候别把滚动位置抢走 */
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+    box.textContent = lines.length ? lines.join('\n') : '（还没有日志）';
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch (error) {
+    box.textContent = error.message;
+  }
+}
+
+let logsTimer = null;
+function startLogs() { if (!logsTimer) logsTimer = setInterval(loadLogs, LOG_REFRESH_MS); }
+function stopLogs() { if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } }
+
+$('#logsRefresh').addEventListener('click', loadLogs);
+
+/* 切到后台就停掉这两条轮询，切回来再续上 */
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) {
+    stopTimers();
+    stopLogs();
+  } else {
+    refreshTimers();
+    loadLogs();
+    startTimers();
+    startLogs();
+  }
+});
+window.addEventListener('pagehide', function () {
+  stopTimers();
+  stopLogs();
+});
+
+refreshTimers();
+loadLogs();
+startTimers();
+startLogs();
 </script>
 </body>
 </html>

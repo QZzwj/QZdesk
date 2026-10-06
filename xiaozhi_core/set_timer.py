@@ -21,10 +21,23 @@ import sys
 import tempfile
 from datetime import date
 
-QZDESK_DATA_DIR = os.path.join(os.path.expanduser("~"), ".local", "share", "qzdesk")
+def default_dir():
+    """与核心（src/user_data.rs）同一套规则：设备上优先 /userdata/qzdesk。
+
+    核心从 0.2 起自己就是提醒的权威（`/api/timers`），这个脚本只是备用入口；
+    目录对齐了，脚本与界面读写的才是同一个文件。
+    """
+    device = "/userdata/qzdesk"
+    try:
+        os.makedirs(device, exist_ok=True)
+        return device
+    except OSError:
+        return os.path.join(os.path.expanduser("~"), ".local", "share", "qzdesk")
+
+
 TIMER_DIR = os.environ.get(
     "QZDESK_TIMER_DIR",
-    os.environ.get("DESKBOT_TIMER_DIR", QZDESK_DATA_DIR),
+    os.environ.get("DESKBOT_TIMER_DIR", default_dir()),
 )
 TIMER_FILE = os.path.join(TIMER_DIR, "timers.json")
 MAX_TIMERS = 8

@@ -4,12 +4,6 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 build_dir=${QZDESK_BUILD_DIR:-"$script_dir/build"}
 
-# Skills are loaded from the persistent QZdesk Skill directory by default.
-# A read-only source tree can still be supplied explicitly with
-# QZDESK_SKILL_SOURCE_DIR when it is intentionally needed.
-
-# 这份脚本只跑 LVGL SDL 模拟器：它按宿主机（x86）编译，产物在真机（RV1106）上用不了。
-# 真机镜像是 Rockchip SDK 的 ./build_qzdesk.sh 交叉编译出来的，见 README。
 
 # The SDL simulator has no ALSA capture/playback devices. Keep the core
 # network and GUI paths active without starting failing ALSA threads.
@@ -21,9 +15,7 @@ export QZDESK_AUDIO_DISABLED=1
 if [[ -z "${QZDESK_BUILD_CORE:-}" &&
       -x "$script_dir/xiaozhi_core/target/release/xiaozhi-linux-rs" ]]; then
     export QZDESK_BUILD_CORE=OFF
-    # 关掉核心编译后，CMake 那一步的 copy 也不会跑，$build_dir 里的 core 就会
-    # 悄悄落后于 target/release：明明重新编译过，跑起来的还是上一次的旧核心。
-    # 这里补一次同步（两边一致时是空操作），免得再出现「改了代码却像没生效」。
+
     cmake -E copy_if_different \
         "$script_dir/xiaozhi_core/target/release/xiaozhi-linux-rs" \
         "$build_dir/xiaozhi_linux_rs" >/dev/null 2>&1 || true

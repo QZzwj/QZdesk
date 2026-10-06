@@ -4,6 +4,7 @@
 #include "qzdesk_core.h"
 #include "smarthome.h"
 #include "face_camera.h"
+#include "web_client.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -174,16 +175,27 @@ static void build_status_screen(void)
  * 定时提醒
  * ------------------------------------------------------------------------- */
 
+/* 提醒存在核心那边（`timers.json`，与语音用的 MCP 工具同一份），界面这里只是
+ * 一份拿来渲染的副本：
+ *
+ *   - 语音说"提醒我七点半喝水"，核心写进表，这里下一次刷新就能看见；
+ *   - 在界面上加的提醒，语音与网页控制台也读得到；
+ *   - 重启设备不会再把它清空（以前这张表只在内存里）。
+ *
+ * 到点的播报也由核心做（写进聊天记录），所以人翻在别的页面上照样收得到。 */
 typedef struct {
+    int id;          /* 核心分配的 id，删除时用它 */
     int hour;
     int minute;
     bool daily;
-    bool fired;
+    char label[32];
 } reminder_t;
 
-#define REMINDER_MAX 4
+#define REMINDER_MAX 8   /* 与核心的 MAX_REMINDERS 一致 */
 static reminder_t reminders[REMINDER_MAX];
 static int reminder_count;
+/** 提醒页每这么多拍（秒）与核心对齐一次。 */
+#define REMINDER_POLL_TICKS 10
 static lv_obj_t *reminder_list;
 static lv_obj_t *reminder_banner;
 static lv_obj_t *reminder_banner_text;
@@ -208,6 +220,54 @@ static void show_banner(const char *text)
     if (banner_timer) lv_timer_del(banner_timer);
     banner_timer = lv_timer_create(hide_banner, 8000, NULL);
     lv_timer_set_repeat_count(banner_timer, 1);
+}
+
+/** 发一次请求。成功返回 true；失败时把服务端的错误文案（若有）写进 `error`。 */
+static bool reminder_request(const char *method, const char *path, const char *body,
+                             char *error, size_t error_size)
+{
+    static char response[8192];
+
+    response[0] = '\0';
+    if (error && error_size > 0) error[0] = '\0';
+    if (qz_web_request(method, path, body, response, sizeof(response))) return true;
+    if (error && error_size > 0 &&
+        !qz_json_string(response, "error", error, error_size)) {
+        snprintf(error, error_size, "本地服务未连接");
+    }
+    return false;
+}
+
+/** 拉一次提醒列表，覆盖本地副本。返回 false 表示核心不可达（保留原列表）。 */
+static bool reminders_reload(void)
+{
+    static char body[8192];
+    int count = 0;
+
+    if (!qz_web_request("GET", "/api/timers", NULL, body, sizeof(body))) return false;
+
+    for (int i = 0; i < REMINDER_MAX; i++) {
+        const char *object = qz_json_item(body, "timers", i);
+        reminder_t *r;
+        int value;
+        if (!object) break;
+        r = &reminders[count];
+        memset(r, 0, sizeof(*r));
+        if (!qz_json_int(object, "id", &value) || value <= 0) continue;
+        r->id = value;
+        if (!qz_json_int(object, "hour", &value)) continue;
+        r->hour = value;
+        if (!qz_json_int(object, "minute", &value)) continue;
+        r->minute = value;
+        qz_json_bool(object, "daily", &r->daily);
+        if (!qz_json_string(object, "label", r->label, sizeof(r->label)) ||
+            r->label[0] == '\0') {
+            snprintf(r->label, sizeof(r->label), "提醒");
+        }
+        count++;
+    }
+    reminder_count = count;
+    return true;
 }
 
 static void remove_reminder(lv_event_t *event);
@@ -236,7 +296,9 @@ static void rebuild_reminders(void)
         lv_obj_t *time_label = qz_text(row, clock, 17, qz_color(QZ_TEXT));
         lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 14, 0);
 
-        lv_obj_t *name = qz_text(row, "提醒", 12, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_t *name = qz_text(row, reminders[i].label, 12, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_set_width(name, reminders[i].daily ? 74 : 100);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
         lv_obj_align(name, LV_ALIGN_LEFT_MID, 78, 0);
 
         if (reminders[i].daily) {
@@ -246,20 +308,20 @@ static void rebuild_reminders(void)
 
         lv_obj_t *remove = qz_icon_button(row, LV_SYMBOL_CLOSE, 28);
         lv_obj_align(remove, LV_ALIGN_RIGHT_MID, -12, 0);
-        lv_obj_set_user_data(remove, (void *)(intptr_t)i);
+        /* 删除按核心的 id，而不是这一行的下标：列表随时可能被语音改动过 */
+        lv_obj_set_user_data(remove, (void *)(intptr_t)reminders[i].id);
         lv_obj_add_event_cb(remove, remove_reminder, LV_EVENT_CLICKED, NULL);
     }
 }
 
 static void remove_reminder(lv_event_t *event)
 {
-    int index = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(event));
-    if (index < 0 || index >= reminder_count) return;
-    for (int i = index; i < reminder_count - 1; i++) {
-        reminders[i] = reminders[i + 1];
-    }
-    reminder_count--;
-    rebuild_reminders();
+    int id = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(event));
+    char path[48];
+    if (id <= 0) return;
+    snprintf(path, sizeof(path), "/api/timers/%d", id);
+    reminder_request("DELETE", path, NULL, NULL, 0);
+    if (reminders_reload()) rebuild_reminders();
 }
 
 static void close_add_modal(lv_event_t *event)
@@ -277,14 +339,27 @@ static void add_modal_dismissed(lv_event_t *event)
 
 static void add_confirm(lv_event_t *event)
 {
-    (void)event;
-    if (reminder_count < REMINDER_MAX && add_hour_roller && add_minute_roller) {
-        reminder_t *r = &reminders[reminder_count++];
-        r->hour = lv_roller_get_selected(add_hour_roller);
-        r->minute = lv_roller_get_selected(add_minute_roller) * 5;
-        r->daily = lv_obj_has_state(add_daily_switch, LV_STATE_CHECKED);
-        r->fired = false;
-        rebuild_reminders();
+    char body[128];
+    char error[96];
+
+    if (!add_hour_roller || !add_minute_roller) {
+        close_add_modal(event);
+        return;
+    }
+    /* 直接交给核心：语音、网页控制台与这里用的是同一份提醒表，
+     * 重复或超上限时也由核心给出原因。 */
+    snprintf(body, sizeof(body),
+             "{\"hour\":%d,\"minute\":%d,\"daily\":%s,\"label\":\"提醒\"}",
+             lv_roller_get_selected(add_hour_roller),
+             lv_roller_get_selected(add_minute_roller) * 5,
+             lv_obj_has_state(add_daily_switch, LV_STATE_CHECKED) ? "true" : "false");
+
+    if (reminder_request("POST", "/api/timers", body, error, sizeof(error))) {
+        if (reminders_reload()) rebuild_reminders();
+    } else {
+        char text[112];
+        snprintf(text, sizeof(text), "%s", error[0] ? error : "保存失败");
+        show_banner(text);
     }
     close_add_modal(event);
 }
@@ -389,35 +464,15 @@ static void open_add_modal(lv_event_t *event)
     lv_obj_add_event_cb(confirm, add_confirm, LV_EVENT_CLICKED, NULL);
 }
 
-/** Minute tick: fire reminders whose time matches the wall clock. */
-static void reminder_tick(void)
+/** 与核心对齐提醒列表。
+ *
+ *  到点判定已经搬到核心（它把播报写进聊天记录，界面翻在别处也收得到），这里只
+ *  做界面该做的那件事：把语音刚加的提醒、或刚响过被撤掉的一次性提醒反映到
+ *  屏幕上。 */
+static void reminder_poll(void)
 {
-    time_t now = time(NULL);
-    struct tm local_now;
-    localtime_r(&now, &local_now);
-    int now_mod = local_now.tm_hour * 60 + local_now.tm_min;
-
-    for (int i = reminder_count - 1; i >= 0; i--) {
-        reminder_t *r = &reminders[i];
-        int target = r->hour * 60 + r->minute;
-        if (target == now_mod) {
-            if (!r->fired) {
-                r->fired = true;
-                char text[48];
-                snprintf(text, sizeof(text), "到点了（%02d:%02d），记得安排", r->hour, r->minute);
-                show_banner(text);
-                if (!r->daily) {
-                    for (int j = i; j < reminder_count - 1; j++) {
-                        reminders[j] = reminders[j + 1];
-                    }
-                    reminder_count--;
-                    rebuild_reminders();
-                }
-            }
-        } else {
-            r->fired = false;
-        }
-    }
+    if (lv_screen_active() != screens[QZ_APPLET_REMINDER]) return;
+    if (reminders_reload()) rebuild_reminders();
 }
 
 static void build_reminder_screen(void)
@@ -455,6 +510,8 @@ static void build_reminder_screen(void)
     lv_obj_add_event_cb(add, open_add_modal, LV_EVENT_CLICKED, NULL);
 
     reminder_count = 0;
+    /* 建页时先拉一次：核心可能已经装着语音加过的提醒 */
+    reminders_reload();
     rebuild_reminders();
 }
 
@@ -462,24 +519,78 @@ static void build_reminder_screen(void)
  * 番茄钟
  * ------------------------------------------------------------------------- */
 
-#define POMO_FOCUS 25 * 60
-#define POMO_BREAK 5 * 60
-
+/* 番茄钟的状态机同样在核心：界面只显示与操作。
+ *
+ * 于是语音说的"开始番茄钟"和屏幕上的按钮动的是同一个计时器，切页面、退出界面
+ * 都不会把它弄丢；换阶段与结束时的播报由核心写进聊天记录。界面保留一个本地
+ * 倒计时，只为让秒数看起来是连续走的，每隔几拍与核心对一次表。 */
 static lv_obj_t *pomo_arc;
 static lv_obj_t *pomo_clock;
 static lv_obj_t *pomo_phase_chip;
 static lv_obj_t *pomo_count;
 static lv_obj_t *pomo_start_caption;
-static bool pomo_running;
-static bool pomo_break;
-static int pomo_remaining = POMO_FOCUS;
-static int pomo_done;
 
-static int pomo_total(void) { return pomo_break ? POMO_BREAK : POMO_FOCUS; }
+static bool pomo_active;
+static bool pomo_paused;
+static bool pomo_break;
+static int pomo_remaining;
+static int pomo_phase_total = 25 * 60;
+static int pomo_done;
+static int pomo_cycles = 4;
+/** 番茄钟页每这么多拍（秒）与核心对一次表。 */
+#define POMO_POLL_TICKS 5
+
+static void pomo_refresh(void);
+
+/** 把核心返回的番茄钟状态读进界面变量。 */
+static bool pomo_sync(const char *json)
+{
+    char phase[16] = "";
+    bool flag = false;
+    int value = 0;
+    int focus_minutes = 25;
+    int break_minutes = 5;
+
+    if (!qz_json_bool(json, "active", &flag)) return false;
+    pomo_active = flag;
+    pomo_paused = false;
+    qz_json_bool(json, "paused", &pomo_paused);
+    if (qz_json_string(json, "phase", phase, sizeof(phase))) {
+        pomo_break = strcmp(phase, "break") == 0;
+    }
+    if (qz_json_int(json, "remaining_seconds", &value)) pomo_remaining = value;
+    if (qz_json_int(json, "completed_cycles", &value)) pomo_done = value;
+    if (qz_json_int(json, "total_cycles", &value) && value > 0) pomo_cycles = value;
+    qz_json_int(json, "focus_minutes", &focus_minutes);
+    qz_json_int(json, "break_minutes", &break_minutes);
+    pomo_phase_total = (pomo_break ? break_minutes : focus_minutes) * 60;
+    if (pomo_phase_total <= 0) pomo_phase_total = 60;
+    return true;
+}
+
+static bool pomo_reload(void)
+{
+    static char body[2048];
+
+    if (!qz_web_request("GET", "/api/pomodoro", NULL, body, sizeof(body))) return false;
+    return pomo_sync(body);
+}
+
+/** 给核心发一个动作，成功后用核心返回的状态刷新界面。 */
+static void pomo_send(const char *action)
+{
+    static char body[2048];
+    char payload[48];
+
+    snprintf(payload, sizeof(payload), "{\"action\":\"%s\"}", action);
+    if (!qz_web_request("POST", "/api/pomodoro", payload, body, sizeof(body))) return;
+    if (pomo_sync(body)) pomo_refresh();
+}
 
 static void pomo_refresh(void)
 {
-    lv_arc_set_value(pomo_arc, pomo_total() - pomo_remaining);
+    lv_arc_set_range(pomo_arc, 0, pomo_phase_total);
+    lv_arc_set_value(pomo_arc, pomo_phase_total - pomo_remaining);
     /* Focus is the accent; rest is the healthy-state green. */
     lv_obj_set_style_arc_color(pomo_arc, qz_color(pomo_break ? QZ_GREEN : QZ_ACCENT),
                                LV_PART_INDICATOR);
@@ -487,48 +598,59 @@ static void pomo_refresh(void)
     char clock[16];
     snprintf(clock, sizeof(clock), "%02d:%02d", pomo_remaining / 60, pomo_remaining % 60);
     lv_label_set_text(pomo_clock, clock);
-    lv_label_set_text(pomo_phase_chip, pomo_break ? "休息一下" : "专注中");
-    lv_obj_set_style_text_color(pomo_phase_chip,
-                               qz_color(pomo_break ? QZ_GREEN : QZ_ACCENT_TEXT), 0);
-    char count[24];
-    snprintf(count, sizeof(count), "已完成 %d 个番茄", pomo_done);
+    if (!pomo_active) {
+        lv_label_set_text(pomo_phase_chip, "未开始");
+        lv_obj_set_style_text_color(pomo_phase_chip, qz_color(QZ_TEXT_TERTIARY), 0);
+    } else if (pomo_paused) {
+        lv_label_set_text(pomo_phase_chip, "已暂停");
+        lv_obj_set_style_text_color(pomo_phase_chip, qz_color(QZ_TEXT_SECONDARY), 0);
+    } else {
+        lv_label_set_text(pomo_phase_chip, pomo_break ? "休息一下" : "专注中");
+        lv_obj_set_style_text_color(pomo_phase_chip,
+                                   qz_color(pomo_break ? QZ_GREEN : QZ_ACCENT_TEXT), 0);
+    }
+    char count[40];
+    snprintf(count, sizeof(count), "已完成 %d/%d 轮", pomo_done, pomo_cycles);
     lv_label_set_text(pomo_count, count);
     if (pomo_start_caption) {
-        lv_label_set_text(pomo_start_caption, pomo_running ? "暂停" : "开始");
+        lv_label_set_text(pomo_start_caption,
+                          !pomo_active ? "开始" : (pomo_paused ? "继续" : "暂停"));
     }
 }
 
+/** 每拍走一秒；换阶段与结束由核心判定，这里只让秒数看起来是连续走的。 */
 static void pomo_tick(void)
 {
-    if (!pomo_running || lv_screen_active() != screens[QZ_APPLET_POMODORO]) return;
+    static int since_sync;
 
-    pomo_remaining--;
-    if (pomo_remaining <= 0) {
-        if (!pomo_break) {
-            pomo_done++;
-            pomo_break = true;
-            pomo_remaining = POMO_BREAK;
-        } else {
-            pomo_break = false;
-            pomo_remaining = POMO_FOCUS;
-        }
+    if (lv_screen_active() != screens[QZ_APPLET_POMODORO]) {
+        since_sync = 0;
+        return;
     }
-    pomo_refresh();
+    if (since_sync <= 0) {
+        since_sync = POMO_POLL_TICKS;
+        if (pomo_reload()) pomo_refresh();
+        return;
+    }
+    since_sync--;
+    if (pomo_active && !pomo_paused && pomo_remaining > 0) {
+        pomo_remaining--;
+        pomo_refresh();
+    }
 }
 
 static void pomo_toggle(lv_event_t *event)
 {
     (void)event;
-    pomo_running = !pomo_running;
-    pomo_refresh();
+    if (!pomo_active) pomo_send("start");
+    else if (pomo_paused) pomo_send("resume");
+    else pomo_send("pause");
 }
 
 static void pomo_reset(lv_event_t *event)
 {
     (void)event;
-    pomo_running = false;
-    pomo_remaining = pomo_total();
-    pomo_refresh();
+    pomo_send("stop");
 }
 
 static void build_pomodoro_screen(void)
@@ -543,7 +665,7 @@ static void build_pomodoro_screen(void)
     lv_obj_align(pomo_arc, LV_ALIGN_TOP_MID, 0, 54);
     lv_arc_set_rotation(pomo_arc, 135);
     lv_arc_set_bg_angles(pomo_arc, 0, 270);
-    lv_arc_set_range(pomo_arc, 0, POMO_FOCUS);
+    lv_arc_set_range(pomo_arc, 0, pomo_phase_total);
     lv_arc_set_value(pomo_arc, 0);
     lv_obj_remove_style(pomo_arc, NULL, LV_PART_KNOB);
     lv_obj_clear_flag(pomo_arc, LV_OBJ_FLAG_CLICKABLE);
@@ -575,6 +697,8 @@ static void build_pomodoro_screen(void)
     lv_obj_center(pomo_start_caption);
     lv_obj_add_event_cb(start, pomo_toggle, LV_EVENT_CLICKED, NULL);
 
+    /* 建页时先对一次表：核心可能已经有一段在跑的番茄钟（语音开的） */
+    pomo_reload();
     pomo_refresh();
 }
 
@@ -990,9 +1114,15 @@ static void build_face_screen(void)
 
 static void applet_tick(lv_timer_t *timer)
 {
+    static int reminder_ticks;
+
     (void)timer;
-    reminder_tick();
     pomo_tick();
+    /* 提醒列表定期与核心对齐：语音刚加的、或刚响过被撤掉的一次性提醒 */
+    if (--reminder_ticks <= 0) {
+        reminder_ticks = REMINDER_POLL_TICKS;
+        reminder_poll();
+    }
 }
 
 void qz_applets_init(lv_obj_t *apps_screen)

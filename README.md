@@ -33,6 +33,8 @@ QZdesk 是一台跑在 Linux 嵌入式板上的 AI 桌面终端，由两个进�
 | 网页控制台 | 设备自带的单页控制台（默认 `:8080`）：技能、实时聊天、天气、性能、智能家居 |
 | 设备页数据 | 天气直连 Open-Meteo（免 Key）、性能每 2 秒采样 `/proc` 与 `statvfs`；设备页与网页读同一份快照 |
 | 无板开发 | 同一份代码在 PC 上用 LVGL SDL 模拟器跑（480×320 窗口）；Wi-Fi / 背光 / 音量 / 时区走真实接口，且都可用环境变量覆盖 |
+| 提醒与番茄钟 | 存在核心上：语音、设备界面、网页读写同一份，重启不丢；到点写进聊天记录 |
+| 核心日志 | 最近几百行留在内存里，网页 `日志` 卡与设备服务同一份，排查不用连 ssh |
 
 ## 系统架构
 
@@ -176,6 +178,10 @@ cd <Rockchip SDK>
 | `POST` | `/api/devices/discover` | 触发设备发现 |
 | `POST` | `/api/devices/command` | 控制设备：`{id, action, value}` |
 | `GET` / `PUT` | `/api/smarthome` | 读取 / 修改 MQTT 中枢配置 |
+| `GET` / `POST` | `/api/timers` | 提醒列表 / 新建提醒（语音、设备界面、网页读写同一份） |
+| `DELETE` | `/api/timers/<id>` | 删除一条提醒 |
+| `GET` / `POST` | `/api/pomodoro` | 番茄钟状态 / 操作（`start`、`pause`、`resume`、`stop`、`status`） |
+| `GET` | `/api/logs?limit=` | 核心最近日志（内存环形缓冲，默认返回 200 行） |
 
 ## MCP 工具
 
@@ -185,8 +191,8 @@ cd <Rockchip SDK>
 | --- | --- | --- |
 | `get_system_status` | `system_status.sh` | CPU 负载、内存、磁盘、运行时间 |
 | `robot_move` | `robot_move.sh` | 机器人运动控制（forward / backward / left / right / stop） |
-| `set_timer` | `set_timer.py` | 新建定时提醒（支持每日重复） |
-| `pomodoro` | `pomodoro.py` | 番茄钟 |
+| `set_timer` | 内置 | 新建提醒；到点写进聊天记录，界面与网页同时看到 |
+| `pomodoro` | 内置 | 番茄钟（专注 / 休息循环，可查剩余时间） |
 | `skill_list` / `skill_search` / `skill_read` | 内置 | 列出 / 检索 / 读取本地技能 |
 | `skill_status` / `skill_validate` / `skill_reload` | 内置 | 技能体检、校验与重新扫描 |
 | `device_list` / `device_control` | 内置 | 智能家居设备列表与控制 |

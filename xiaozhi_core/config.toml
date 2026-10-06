@@ -141,50 +141,8 @@ type = "object"
 type = "string"
 description = "运动方向：forward、backward、left、right 或 stop"
 
-[[mcp.tools]]
-name = "set_timer"
-description = "为设备新建一个定时提醒。当用户说“提醒我”“定个闹钟”“每天几点做什么”时调用。创建后到点会在设备屏幕上弹出提示条。hour 为 0-23，minute 为 0-59，daily 表示是否每天重复，label 是提醒内容。"
-type = "subprocess"
-executable = "python3"
-args = ["./set_timer.py"]
-mode = "sync"
-timeout_ms = 5000
-[mcp.tools.input_schema]
-type = "object"
-required = ["hour", "minute"]
-[mcp.tools.input_schema.properties.hour]
-type = "integer"
-description = "小时，取值 0-23"
-[mcp.tools.input_schema.properties.minute]
-type = "integer"
-description = "分钟，取值 0-59"
-[mcp.tools.input_schema.properties.label]
-type = "string"
-description = "提醒内容，例如 喝水、开会"
-[mcp.tools.input_schema.properties.daily]
-type = "boolean"
-description = "true 表示每天重复，false 表示只提醒一次，默认 true"
-
-[[mcp.tools]]
-name = "pomodoro"
-description = "控制设备上的番茄钟（专注-休息计时循环）。当用户说“开始番茄钟”“专注 25 分钟”“我要开始专注”“休息一下”“暂停番茄钟”“番茄钟还剩多久”时调用。action 取 start/pause/resume/stop/status；focus_minutes 为专注时长（默认 25 分钟），break_minutes 为休息时长（默认 5 分钟），cycles 为轮数（默认 4 轮）。"
-type = "subprocess"
-executable = "python3"
-args = ["./pomodoro.py"]
-mode = "sync"
-timeout_ms = 5000
-[mcp.tools.input_schema]
-type = "object"
-required = ["action"]
-[mcp.tools.input_schema.properties.action]
-type = "string"
-description = "start 开始、pause 暂停、resume 继续、stop 停止、status 查询剩余时间"
-[mcp.tools.input_schema.properties.focus_minutes]
-type = "integer"
-description = "专注时长（分钟），默认 25"
-[mcp.tools.input_schema.properties.break_minutes]
-type = "integer"
-description = "休息时长（分钟），默认 5"
-[mcp.tools.input_schema.properties.cycles]
-type = "integer"
-description = "总共几轮，默认 4"
+# set_timer 与 pomodoro 是核心内置工具（见 src/mcp_gateway/timer_tools.rs）：它们直接
+# 读写核心里的提醒 / 番茄钟表，与设备界面、网页控制台用的是同一份数据。以前这两个工具
+# 写成子进程脚本（set_timer.py / pomodoro.py），脚本只把命令写进文件等着"界面来消费"，
+# 而界面从来没有读过那些文件 —— 于是语音说的"提醒我七点半喝水"在设备上什么都不会发生。
+# 那两个脚本仍在仓库里（备用，且它们的默认目录已与核心对齐），但不再注册为 MCP 工具。

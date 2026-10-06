@@ -3,6 +3,7 @@
 use crate::mcp_gateway::skill::{SkillManager, SkillRole};
 use crate::chat::ChatHub;
 use crate::net_link::NetCommand;
+use crate::timers::{PomodoroOptions, TimerStore};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -35,6 +36,36 @@ fn default_enabled() -> bool {
 
 #[derive(Deserialize)]
 struct ChatRequest { text: String }
+
+/// 新建提醒。字段与 `set_timer.py` 的入参一致，语音与界面写的是同一套。
+#[derive(Deserialize)]
+struct ReminderRequest {
+    hour: u32,
+    minute: u32,
+    #[serde(default)]
+    label: String,
+    #[serde(default = "default_enabled")]
+    daily: bool,
+    #[serde(default)]
+    date: String,
+}
+
+/// 番茄钟操作。`action` 缺省当查询，界面刷新状态时可以直接发空对象。
+#[derive(Deserialize)]
+struct PomodoroRequest {
+    #[serde(default = "default_pomodoro_action")]
+    action: String,
+    #[serde(default)]
+    focus_minutes: Option<u32>,
+    #[serde(default)]
+    break_minutes: Option<u32>,
+    #[serde(default)]
+    cycles: Option<u32>,
+}
+
+fn default_pomodoro_action() -> String {
+    "status".to_string()
+}
 
 /// 控制一台局域网设备。设备 id 放在 body 里而不是路径里：Zigbee 设备的 id 来自
 /// friendly_name，可能是中文，走路径就得处理百分号编码，没必要。
@@ -69,6 +100,7 @@ pub async fn run(
     smarthome: Arc<crate::smarthome::SmartHomeHub>,
     weather: crate::weather::WeatherService,
     performance: crate::performance::PerformanceService,
+    timers: TimerStore,
 ) -> anyhow::Result<()> {
     let port = std::env::var("QZDESK_SKILL_WEB_PORT")
         .or_else(|_| std::env::var("XIAOZHI_SKILL_WEB_PORT"))
@@ -108,6 +140,7 @@ pub async fn run(
         let smarthome = smarthome.clone();
         let weather = weather.clone();
         let performance = performance.clone();
+        let timers = timers.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_connection(
                 stream,
@@ -118,6 +151,7 @@ pub async fn run(
                 smarthome,
                 weather,
                 performance,
+                timers,
             )
             .await
             {
@@ -127,6 +161,8 @@ pub async fn run(
     }
 }
 
+/// 每个 HTTP 连接一个任务。参数都是各服务的句柄，拆成结构体反而更绕。
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: TcpStream,
     manager: Arc<SkillManager>,
@@ -136,6 +172,7 @@ async fn handle_connection(
     smarthome: Arc<crate::smarthome::SmartHomeHub>,
     weather: crate::weather::WeatherService,
     performance: crate::performance::PerformanceService,
+    timers: TimerStore,
 ) -> anyhow::Result<()> {
     let mut buffer = vec![0_u8; 8192];
     let mut request = Vec::new();
@@ -306,6 +343,127 @@ async fn handle_connection(
                 400,
                 "application/json; charset=utf-8",
                 json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
+            ),
+        },
+        /* 核心日志：内存里那份环形缓冲，`?limit=` 控制条数。
+         * 排查「技能有没有下发」这类问题，看这里比翻 /var/log 快得多。 */
+        _ if method == "GET" && path.starts_with("/api/logs") => {
+            let limit = path
+                .split_once('?')
+                .and_then(|(_, query)| {
+                    query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("limit="))
+                })
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(200)
+                .clamp(1, crate::logbuf::CAPACITY);
+            (
+                200,
+                "application/json; charset=utf-8",
+                json!({
+                    "ok": true,
+                    "buffered": crate::logbuf::len(),
+                    "lines": crate::logbuf::tail(limit),
+                })
+                .to_string(),
+            )
+        }
+        /* 提醒与番茄钟：核心是唯一权威，设备界面与网页读写这里，语音侧的同名
+         * MCP 工具写的也是同一份（见 timers.rs 的模块说明）。 */
+        ("GET", "/api/timers") => (
+            200,
+            "application/json; charset=utf-8",
+            json!({
+                "ok": true,
+                "max": crate::timers::MAX_REMINDERS,
+                "timers": timers.reminders(),
+            })
+            .to_string(),
+        ),
+        ("POST", "/api/timers") => match serde_json::from_slice::<ReminderRequest>(body) {
+            Ok(input) => match timers.add_reminder(
+                input.hour,
+                input.minute,
+                &input.label,
+                input.daily,
+                &input.date,
+            ) {
+                Ok(reminder) => (
+                    200,
+                    "application/json; charset=utf-8",
+                    json!({ "ok": true, "reminder": reminder, "timers": timers.reminders() })
+                        .to_string(),
+                ),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({ "ok": false, "error": error }).to_string(),
+                ),
+            },
+            Err(error) => (
+                400,
+                "application/json; charset=utf-8",
+                json!({ "ok": false, "error": format!("JSON 格式错误: {}", error) }).to_string(),
+            ),
+        },
+        _ if method == "DELETE" && path.starts_with("/api/timers/") => {
+            match path["/api/timers/".len()..].trim().parse::<u64>() {
+                Ok(id) => match timers.remove_reminder(id) {
+                    Ok(()) => (
+                        200,
+                        "application/json; charset=utf-8",
+                        json!({ "ok": true, "timers": timers.reminders() }).to_string(),
+                    ),
+                    Err(error) => (
+                        404,
+                        "application/json; charset=utf-8",
+                        json!({ "ok": false, "error": error }).to_string(),
+                    ),
+                },
+                Err(_) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({ "ok": false, "error": "提醒 id 必须是数字" }).to_string(),
+                ),
+            }
+        }
+        ("GET", "/api/pomodoro") => {
+            let state = timers.pomodoro();
+            let message = crate::timers::pomodoro_text(&state);
+            (
+                200,
+                "application/json; charset=utf-8",
+                json!({ "ok": true, "state": state, "message": message }).to_string(),
+            )
+        }
+        ("POST", "/api/pomodoro") => match serde_json::from_slice::<PomodoroRequest>(body) {
+            Ok(input) => match timers.pomodoro_action(
+                input.action.trim(),
+                PomodoroOptions {
+                    focus_minutes: input.focus_minutes,
+                    break_minutes: input.break_minutes,
+                    cycles: input.cycles,
+                },
+            ) {
+                Ok(state) => {
+                    let message = crate::timers::pomodoro_text(&state);
+                    (
+                        200,
+                        "application/json; charset=utf-8",
+                        json!({ "ok": true, "state": state, "message": message }).to_string(),
+                    )
+                }
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({ "ok": false, "error": error }).to_string(),
+                ),
+            },
+            Err(error) => (
+                400,
+                "application/json; charset=utf-8",
+                json!({ "ok": false, "error": format!("JSON 格式错误: {}", error) }).to_string(),
             ),
         },
         ("GET", "/api/skills") => (200, "application/json; charset=utf-8", manager.list().to_string()),

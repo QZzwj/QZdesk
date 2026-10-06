@@ -4,6 +4,7 @@ mod audio_bridge;
 mod config;
 mod controller;
 mod gui_bridge;
+mod logbuf;
 mod mcp_gateway;
 mod net_link;
 mod performance;
@@ -12,7 +13,9 @@ mod state_machine;
 mod skill_web;
 mod chat;
 mod smarthome;
+mod timers;
 mod tts;
+mod user_data;
 mod weather;
 
 use audio_bridge::{AudioBridge, AudioEvent};
@@ -42,19 +45,29 @@ fn device_ip() -> Option<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 初始化日志
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format(|buf, record| {
-            use std::io::Write;
-            writeln!(
-                buf,
-                "[{} {:<5}] {}",
-                buf.timestamp(),
-                record.level(),
-                record.args()
-            )
-        })
-        .init();
+    /* 初始化日志：终端/文件照旧（启动脚本把标准输出重定向到
+     * `/var/log/qzdesk.log`），另外留一份最近几百行在内存里，给网页
+     * `/api/logs` 与设备「日志」页看——排查不必再连 ssh 翻文件。 */
+    {
+        let env = env_logger::Env::default().default_filter_or("info");
+        let inner = env_logger::Builder::from_env(env)
+            .format(|buf, record| {
+                use std::io::Write;
+                writeln!(
+                    buf,
+                    "[{} {:<5}] {}",
+                    buf.timestamp(),
+                    record.level(),
+                    record.args()
+                )
+            })
+            .build();
+        /* 级别交给 env_logger 自己算（`RUST_LOG=info,qzdesk=debug` 这种指令也认），
+         * 再写进 log facade——不写的话每一条都会被 facade 在入口挡掉，慢日志、
+         * 网页日志页都会是空的。 */
+        let level = inner.filter();
+        logbuf::install(Box::new(inner), level);
+    }
 
     match device_ip() {
         Some(ip) => log::info!("QZdesk device IP: {}", ip),
@@ -116,6 +129,25 @@ async fn main() -> anyhow::Result<()> {
     mcp_server.register_tool(Box::new(smarthome::tools::DeviceControlTool::new(
         smarthome.clone(),
     )));
+    /* 提醒与番茄钟：语音（MCP 工具）、设备界面、网页控制台读写的都是这一份，
+     * 落盘文件与 `set_timer.py` / `pomodoro.py` 共用（见 timers.rs 的模块说明）。
+     *
+     * 注册在配置里的同名工具之后：老配置（或设备上的 xiaozhi_config.json）里
+     * 仍写着 `set_timer`/`pomodoro` 的子进程脚本，这里用内置实现顶掉它，
+     * 否则模型写的还是那个"界面从来不读"的文件。 */
+    let timer_store = timers::TimerStore::load();
+    log::info!(
+        "提醒 {} 条，番茄钟{}（数据目录 {}）",
+        timer_store.reminders().len(),
+        if timer_store.pomodoro().active { "进行中" } else { "未运行" },
+        timer_store.dir().display()
+    );
+    mcp_server.register_tool(Box::new(mcp_gateway::timer_tools::SetTimerTool::new(
+        timer_store.clone(),
+    )));
+    mcp_server.register_tool(Box::new(mcp_gateway::timer_tools::PomodoroTool::new(
+        timer_store.clone(),
+    )));
     let mcp_server = Arc::new(mcp_server);
 
     // 创建通道，用于组件间通信
@@ -129,7 +161,9 @@ async fn main() -> anyhow::Result<()> {
     // GUI 都从这里进来，两边共用同一套合成 / 分包 / 节流逻辑。
     let (tx_core_cmd, mut rx_core_cmd) = mpsc::channel::<CoreCommand>(16);
 
-    let chat_hub = ChatHub::new();
+    /* 聊天记录落盘：重启设备后接着上一次的对话，而不是从空白开始。
+     * 记录本身仍是"只留一份"——界面与网页只是这份记录的显示器。 */
+    let chat_hub = ChatHub::load();
     let web_skill_manager = Arc::new(skill_manager);
     let web_net_tx = tx_net_cmd.clone();
     let web_chat_hub = chat_hub.clone();
@@ -151,6 +185,31 @@ async fn main() -> anyhow::Result<()> {
             log::error!("GuiBridge error: {}", e);
         }
     });
+
+    /* 提醒与番茄钟的推进放在核心：界面不必停在那两页、甚至不必开着。到点写进
+     * 聊天记录（web 走 SSE、GUI 走 UDP），两边同时看到，而不是只在某个页面上
+     * 闪一下——用户翻到别的页面照样收得到。 */
+    {
+        let store = timer_store.clone();
+        let hub = chat_hub.clone();
+        let bridge = gui_bridge.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            // 掉拍（休眠、卡顿）后按真实时间继续，不补一串空转
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                for event in store.tick(timers::unix_now()) {
+                    log::info!("{}", event.text());
+                    if let Some(message) = hub.push(chat::ChatRole::System, event.text()) {
+                        if let Err(error) = bridge.send_message(&message).await {
+                            log::warn!("提醒推送界面失败: {}", error);
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // 天气：核心自己去拉 Open-Meteo（免费、无需 Key），缓存 + 定时刷新。
     // 它把同一份快照同时推给 GUI（UDP）和网页控制台（HTTP），网络请求全在这个
@@ -175,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
     // 所以放在两个服务之后启动。
     let web_weather = weather.clone();
     let web_performance = performance.clone();
+    let web_timer_store = timer_store.clone();
     tokio::spawn(async move {
         if let Err(error) = skill_web::run(
             web_skill_manager,
@@ -184,6 +244,7 @@ async fn main() -> anyhow::Result<()> {
             web_smarthome,
             web_weather,
             web_performance,
+            web_timer_store,
         )
         .await
         {

@@ -33,6 +33,8 @@ A skill is a directory with a `SKILL.md`, imported from the web console; once im
 | Web console | A single-page console served by the device (default `:8080`): skills, live chat, weather, performance, smart home |
 | Device data | Weather comes straight from Open-Meteo (no API key) and performance samples `/proc` and `statvfs` every 2 seconds; the device UI and the web page read the same snapshot |
 | Board-free development | The same code runs on a PC through the LVGL SDL simulator (480×320 window); Wi-Fi / backlight / volume / timezone use the real interfaces and can all be overridden by environment variables |
+| Reminders & pomodoro | Stored in the core: voice, device UI and the web page read and write one copy, and a restart does not lose it; when a reminder fires it lands in the chat record |
+| Core logs | The last few hundred lines stay in memory; the web `logs` card and the device read the same source, so no ssh needed to debug |
 
 ## Architecture
 
@@ -176,6 +178,10 @@ Every capability of the web console is served by these JSON endpoints (`xiaozhi_
 | `POST` | `/api/devices/discover` | Trigger device discovery |
 | `POST` | `/api/devices/command` | Control a device: `{id, action, value}` |
 | `GET` / `PUT` | `/api/smarthome` | Read / update the MQTT hub configuration |
+| `GET` / `POST` | `/api/timers` | Reminder list / create one (voice, device UI and this page share one copy) |
+| `DELETE` | `/api/timers/<id>` | Delete a reminder |
+| `GET` / `POST` | `/api/pomodoro` | Pomodoro state / action (`start`, `pause`, `resume`, `stop`, `status`) |
+| `GET` | `/api/logs?limit=` | Recent core logs (in-memory ring, 200 lines by default) |
 
 ## MCP Tools
 
@@ -185,8 +191,8 @@ The core exposes 12 MCP tools to the cloud (`tools/list`), registered from the `
 | --- | --- | --- |
 | `get_system_status` | `system_status.sh` | CPU load, memory, disk, uptime |
 | `robot_move` | `robot_move.sh` | Robot motion control (forward / backward / left / right / stop) |
-| `set_timer` | `set_timer.py` | Create a timer reminder (supports a daily repeat) |
-| `pomodoro` | `pomodoro.py` | Pomodoro timer |
+| `set_timer` | built-in | Create a reminder; when it fires the notice goes into the chat record, visible on the device and the web page |
+| `pomodoro` | built-in | Pomodoro (focus / break cycles, reports the time left) |
 | `skill_list` / `skill_search` / `skill_read` | built-in | List / search / read local skills |
 | `skill_status` / `skill_validate` / `skill_reload` | built-in | Skill diagnostics, validation and rescan |
 | `device_list` / `device_control` | built-in | Smart-home device listing and control |

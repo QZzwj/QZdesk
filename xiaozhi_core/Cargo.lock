@@ -2047,6 +2047,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "futures-util",
+ "libc",
  "log",
  "mac_address",
  "opus",
