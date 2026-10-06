@@ -149,46 +149,17 @@ The device is an ARMv7 / RV1106 Linux board: **nothing is compiled on it, and ho
 
 ```bash
 cd <Rockchip SDK>       # not shipped with this repository — see the note below
-./build.sh lunch        # first time: pick the RV1106_QZdesk + SPI_NAND board configuration
 ./build_qzdesk.sh       # builds the UI + cross-compiles the core, then packs output/image/update.img
 ```
 
+The board configuration has to be picked once beforehand (the script reminds you): `./build.sh lunch` → RV1106_QZdesk + SPI_NAND.
+
 - UI `qzdesk_screen`: built by the SDK's cross toolchain through this repository's `CMakeLists.txt` (the SDK's `project/app/qzdesk/src` points at this repository);
 - Core `xiaozhi_linux_rs`: built by `xiaozhi_core/build_armv7.sh`, statically linked against musl, so the target rootfs needs no extra shared libraries;
-- Output lands in the SDK's `project/app/out/bin/` and is packed into `output/image/update.img` for flashing.
+- Output lands in the SDK's `project/app/out/bin/` and is packed into `output/image/update.img` for flashing; on boot `S99qzdesk` starts the UI, which then starts the core.
 
 > [!NOTE]
 > The Rockchip SDK is a separate repository and is **not shipped here**. This repository holds only the application side (UI + core); board configuration (panel timings, partition layout, defconfig) lives in the SDK.
-
-<details>
-<summary>Expand: manual CMake commands for the simulator, and building only one part</summary>
-
-Simulator (PC):
-
-```bash
-cmake -S . -B /tmp/qzdesk-sim-build -DQZDESK_SIMULATOR=ON
-cmake --build /tmp/qzdesk-sim-build -j2
-/tmp/qzdesk-sim-build/qzdesk_screen
-```
-
-Both executables land in the build directory: `qzdesk_screen` and `xiaozhi_linux_rs`.
-
-- Core only: `cmake --build <build-dir> --target qzdesk_core_build`
-- UI only: `-DQZDESK_BUILD_CORE=OFF`
-- Custom Rust target triple: `-DQZDESK_CARGO_TARGET=<target>`
-- `CMAKE_BUILD_TYPE` defaults to `Release` (LVGL's software renderer is noticeably slower at `-O0`); pass `Debug` explicitly when you want it
-
-Cross-compiling only the core (without going through the SDK):
-
-```bash
-cd xiaozhi_core
-bash scripts/armv7-unknown-linux-uclibceabihf/build.sh   # RV1106 + uClibc
-./build_armv7.sh core                                    # or static musl
-```
-
-Deployment: put `qzdesk_screen`, `xiaozhi_linux_rs` and the runtime `xiaozhi_config.json` in the same directory on the device (the SDK uses `/oem/usr/bin/`), then start the core first and the UI second — or let the UI spawn the core (see below).
-
-</details>
 
 ## Usage
 

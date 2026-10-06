@@ -149,46 +149,17 @@ flowchart TB
 
 ```bash
 cd <Rockchip SDK>       # 本仓库不含 SDK，需另行准备
-./build.sh lunch        # 首次：选板级 RV1106_QZdesk + SPI_NAND
 ./build_qzdesk.sh       # 编界面 + 交叉编核心，最后打包 output/image/update.img
 ```
 
+首次需要先选板级（脚本会提示）：`./build.sh lunch` → RV1106_QZdesk + SPI_NAND。
+
 - 界面 `qzdesk_screen`：由 SDK 的交叉工具链经本仓库的 `CMakeLists.txt` 编出（SDK 里 `project/app/qzdesk/src` 指向本仓库）；
 - 核心 `xiaozhi_linux_rs`：走 `xiaozhi_core/build_armv7.sh`，静态 musl 链接，目标 rootfs 不需要额外动态库；
-- 产物落在 SDK 的 `project/app/out/bin/`，再打包成 `output/image/update.img` 烧到板子上。
+- 产物落在 SDK 的 `project/app/out/bin/`，打包成 `output/image/update.img` 烧到板子上；开机由 `S99qzdesk` 拉起界面，界面再拉起核心。
 
 > [!NOTE]
 > Rockchip SDK 是独立仓库，**不随本仓库提供**。本仓库只有应用侧代码（界面 + 核心）；板级配置（面板时序、分区表、defconfig）都在 SDK 里。
-
-<details>
-<summary>展开：模拟器的手工 CMake 命令、以及只编某一部分</summary>
-
-模拟器（PC）：
-
-```bash
-cmake -S . -B /tmp/qzdesk-sim-build -DQZDESK_SIMULATOR=ON
-cmake --build /tmp/qzdesk-sim-build -j2
-/tmp/qzdesk-sim-build/qzdesk_screen
-```
-
-两个可执行文件都会生成在构建目录：`qzdesk_screen` 与 `xiaozhi_linux_rs`。
-
-- 只编译核心：`cmake --build <build-dir> --target qzdesk_core_build`
-- 只编译界面：`-DQZDESK_BUILD_CORE=OFF`
-- 指定 Rust 目标三元组：`-DQZDESK_CARGO_TARGET=<target>`
-- 默认 `CMAKE_BUILD_TYPE=Release`（LVGL 软件渲染在 `-O0` 下会明显卡顿），需调试请显式传 `Debug`
-
-只交叉编译核心（不经过 SDK 时）：
-
-```bash
-cd xiaozhi_core
-bash scripts/armv7-unknown-linux-uclibceabihf/build.sh   # RV1106 + uClibc
-./build_armv7.sh core                                    # 或静态 musl
-```
-
-部署：把 `qzdesk_screen`、`xiaozhi_linux_rs` 与运行时配置 `xiaozhi_config.json` 放到设备同一目录（SDK 默认 `/oem/usr/bin/`），先起核心再起界面；也可让界面自动拉起核心（见下）。
-
-</details>
 
 ## 使用
 

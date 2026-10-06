@@ -101,8 +101,8 @@ python3 QZdesk-Demo/tools/mk_mascot_assets.py          # 加 --preview 可输出
 ```bash
 # 界面里调：设置 → 通用设置 → 材质通透度（0–100%，实时）
 # 或者启动前用环境变量定初值：
-QZDESK_MATERIAL_OPA=85 ./run.sh     # 整机材质
-QZDESK_GLASS_OPA=70 ./run.sh        # 只调工具条/输入栏，让它比板块更薄
+QZDESK_MATERIAL_OPA=85 ./run.sh --simulator    # 整机材质
+QZDESK_GLASS_OPA=70 ./run.sh --simulator       # 只调工具条/输入栏，让它比板块更薄
 ```
 
 - `100%` = 实心白（参考实现那套扁平观感），`0%` = 完全透明；**默认 90%**。
@@ -193,7 +193,7 @@ info、chevron），只有助手形象使用位图资源。
 # CMakeLists.txt 现在默认 Release（-O3 -DNDEBUG），只有在显式传
 # -DCMAKE_BUILD_TYPE= 时才会退回无优化。旧版本用 run.sh 建的 build/ 目录
 # 里 CMAKE_BUILD_TYPE 是空的，请删掉重建：
-rm -rf QZdesk-Demo/build && ./QZdesk-Demo/run.sh
+rm -rf build && ./run.sh --simulator
 ```
 
 其余与流畅度相关的取舍都写在代码注释里，要点：
@@ -251,33 +251,13 @@ rootfs 时跳过），否则 `wpa_cli` 无法连接。无线网卡、配置文�
 
 ## 构建
 
-```sh
-cmake -S QZdesk-Demo -B /tmp/qzdesk-demo-build
-cmake --build /tmp/qzdesk-demo-build -j2
-```
-
-也可以直接运行一键脚本。它会自动配置、编译 QZdesk 和 Rust 核心，并启动界面：
+界面在 PC 上用 LVGL SDL 模拟器跑（`480x320` 窗口，鼠标模拟触摸）。一键脚本会自动配置、编译 QZdesk 和 Rust 核心，并启动界面：
 
 ```sh
-./QZdesk-Demo/run.sh
+./run.sh --simulator
 ```
 
-电脑上使用 LVGL 模拟器：
-
-```sh
-./QZdesk-Demo/run.sh --simulator
-```
-
-在 PC 上用 LVGL SDL 模拟器运行：
-
-```sh
-cmake -S QZdesk-Demo -B /tmp/qzdesk-sim-build -DQZDESK_SIMULATOR=ON
-cmake --build /tmp/qzdesk-sim-build -j2
-/tmp/qzdesk-sim-build/qzdesk_screen
-```
-
-模拟器以 `480x320` 窗口运行，鼠标可模拟触摸。默认构建仍面向 RV1106，
-使用 `/dev/fb0` 和 `/dev/input/event0`。
+真机镜像（界面与核心一起打进 `update.img`）由 Rockchip SDK 的 `./build_qzdesk.sh` 出，见仓库根 README。
 
 面板时序在 SDK 的设备树里设置（例如 `SDK/sysdrv/source/kernel/arch/arm/boot/dts/` 下的
 `*-86panel-ipc.dtsi`，其中 `hactive/vactive` 目前是 720×720）。换用 480×320 横屏面板时
@@ -290,23 +270,7 @@ LVGL 9.2.3 的源码与配置随仓库提供，放在 `third_party/`（`lvgl/`�
 
 `xiaozhi_core/` 是 QZdesk 的 Rust 核心源码，包含实时音频、云端 WebSocket、设备激活和 MCP 功能。构建产物与 LVGL 界面是两个进程，通过本机 UDP 通信：核心监听 `5678`，QZdesk 监听 `5679`。
 
-默认 CMake 构建会同时生成 `qzdesk_screen` 与 `xiaozhi_linux_rs`，两个产物都位于构建目录：
-
-```sh
-cmake -S QZdesk-Demo -B /tmp/qzdesk-build -DQZDESK_SIMULATOR=ON
-cmake --build /tmp/qzdesk-build -j2
-```
-
-只构建核心可使用：`cmake --build /tmp/qzdesk-build --target qzdesk_core_build`。仅构建界面时使用 `-DQZDESK_BUILD_CORE=OFF`。
-
-需要指定 Rust 目标三元组时，设置 `-DQZDESK_CARGO_TARGET=<target>`；RV1106 的 uClibc 构建仍建议使用下方的原厂脚本，因为该脚本会准备专用工具链和 ALSA 链接环境。
-
-RV1106 使用 uClibc 时，请在核心目录执行其随附的交叉编译脚本：
-
-```sh
-cd QZdesk-Demo/xiaozhi_core
-bash scripts/armv7-unknown-linux-uclibceabihf/build.sh
-```
+核心不单独手工构建：模拟器下由 `./run.sh --simulator` 一并编出，真机则由 SDK 的 `./build_qzdesk.sh` 交叉编译后跟界面一起打进镜像。
 
 将生成的 `xiaozhi_linux_rs` 与其运行时 `xiaozhi_config.json` 部署到设备后，先启动核心，再启动 `qzdesk_screen`。助手页面会主动请求连接状态；TTS 文本、激活码和核心状态会直接显示到聊天界面，同时驱动全屏表情的状态切换。
 
