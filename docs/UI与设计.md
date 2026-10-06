@@ -101,8 +101,8 @@ python3 QZdesk-Demo/tools/mk_mascot_assets.py          # 加 --preview 可输出
 ```bash
 # 界面里调：设置 → 通用设置 → 材质通透度（0–100%，实时）
 # 或者启动前用环境变量定初值：
-QZDESK_MATERIAL_OPA=85 ./run.sh --simulator    # 整机材质
-QZDESK_GLASS_OPA=70 ./run.sh --simulator       # 只调工具条/输入栏，让它比板块更薄
+QZDESK_MATERIAL_OPA=85 ./run.sh     # 整机材质
+QZDESK_GLASS_OPA=70 ./run.sh        # 只调工具条/输入栏，让它比板块更薄
 ```
 
 - `100%` = 实心白（参考实现那套扁平观感），`0%` = 完全透明；**默认 90%**。
@@ -193,7 +193,7 @@ info、chevron），只有助手形象使用位图资源。
 # CMakeLists.txt 现在默认 Release（-O3 -DNDEBUG），只有在显式传
 # -DCMAKE_BUILD_TYPE= 时才会退回无优化。旧版本用 run.sh 建的 build/ 目录
 # 里 CMAKE_BUILD_TYPE 是空的，请删掉重建：
-rm -rf build && ./run.sh --simulator
+rm -rf build && ./run.sh
 ```
 
 其余与流畅度相关的取舍都写在代码注释里，要点：
@@ -254,7 +254,7 @@ rootfs 时跳过），否则 `wpa_cli` 无法连接。无线网卡、配置文�
 界面在 PC 上用 LVGL SDL 模拟器跑（`480x320` 窗口，鼠标模拟触摸）。一键脚本会自动配置、编译 QZdesk 和 Rust 核心，并启动界面：
 
 ```sh
-./run.sh --simulator
+./run.sh
 ```
 
 真机镜像（界面与核心一起打进 `update.img`）由 Rockchip SDK 的 `./build_qzdesk.sh` 出，见仓库根 README。
@@ -270,7 +270,7 @@ LVGL 9.2.3 的源码与配置随仓库提供，放在 `third_party/`（`lvgl/`�
 
 `xiaozhi_core/` 是 QZdesk 的 Rust 核心源码，包含实时音频、云端 WebSocket、设备激活和 MCP 功能。构建产物与 LVGL 界面是两个进程，通过本机 UDP 通信：核心监听 `5678`，QZdesk 监听 `5679`。
 
-核心不单独手工构建：模拟器下由 `./run.sh --simulator` 一并编出，真机则由 SDK 的 `./build_qzdesk.sh` 交叉编译后跟界面一起打进镜像。
+核心不单独手工构建：模拟器下由 `./run.sh` 一并编出，真机则由 SDK 的 `./build_qzdesk.sh` 交叉编译后跟界面一起打进镜像。
 
 将生成的 `xiaozhi_linux_rs` 与其运行时 `xiaozhi_config.json` 部署到设备后，先启动核心，再启动 `qzdesk_screen`。助手页面会主动请求连接状态；TTS 文本、激活码和核心状态会直接显示到聊天界面，同时驱动全屏表情的状态切换。
 

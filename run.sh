@@ -10,14 +10,6 @@ build_dir=${QZDESK_BUILD_DIR:-"$script_dir/build"}
 
 # 这份脚本只跑 LVGL SDL 模拟器：它按宿主机（x86）编译，产物在真机（RV1106）上用不了。
 # 真机镜像是 Rockchip SDK 的 ./build_qzdesk.sh 交叉编译出来的，见 README。
-# 不带参数等同于 --simulator；其余参数一律拒绝，免得再有人以为编出了真机版本。
-case "${1:-}" in
-    "" | --simulator) ;;
-    *)
-        printf '用法: %s [--simulator]（不带参数等同模拟器）\n' "$0" >&2
-        exit 2
-        ;;
-esac
 
 # The SDL simulator has no ALSA capture/playback devices. Keep the core
 # network and GUI paths active without starting failing ALSA threads.
