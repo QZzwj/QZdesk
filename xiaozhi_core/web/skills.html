@@ -235,7 +235,6 @@ body.scrolled::after{opacity:1}
   height:calc(100dvh - 116px);min-height:0;
 }
 .editor-card{grid-column:1;grid-row:2;align-self:start}
-.timers-card{grid-column:1;grid-row:3;align-self:start}
 
 /* ===========================================================================
    卡片：结构层，材质更实（不做 backdrop-filter，见文件头）
@@ -412,21 +411,6 @@ body.scrolled::after{opacity:1}
 
 .skills{list-style:none;margin:12px 18px 18px;padding:0;display:flex;flex-direction:column;gap:11px}
 
-/* 提醒与番茄钟：提醒行沿用 Skill 卡的行式样，时间用等宽数字对齐 */
-.timer{
-  display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:16px;
-  background:#fff;
-  box-shadow:var(--ring),0 1px 2px rgba(16,24,40,.05),0 8px 20px -14px rgba(16,24,40,.28);
-}
-.timer-clock{font-size:17px;font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums}
-.timer-label{flex:1;min-width:0;font-size:13px;color:var(--fg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.timer-empty{margin:6px 4px;font-size:13px;color:var(--fg-3)}
-.timer-form{display:flex;align-items:center;gap:8px;margin:8px 18px 0;flex-wrap:wrap}
-.timer-form input[type=number]{
-  width:66px;padding:7px 9px;border-radius:10px;border:1px solid var(--line);
-  background:var(--glass-solid);color:var(--fg);font-size:13px;font-variant-numeric:tabular-nums;
-}
-.timer-daily{display:flex;align-items:center;gap:5px;font-size:13px;color:var(--fg-2)}
 .skill{
   position:relative;
   padding:14px 15px;border-radius:16px;
@@ -740,7 +724,6 @@ textarea{resize:vertical;line-height:1.6}
 @media (max-width:900px){
   .wrap{grid-template-columns:1fr;padding-top:16px}
   .wrap>.col{display:flex;grid-column:auto}
-  .skills-card,.chat-card,.editor-card,.timers-card{grid-column:auto;grid-row:auto}
   .chat-card{position:static;min-height:0}
   .sidebar{order:2}
   .col{order:1}
@@ -1050,25 +1033,6 @@ textarea{resize:vertical;line-height:1.6}
                 </details>
             </section>
 
-            <section class="card timers-card" aria-labelledby="timersTitle">
-                <div class="card-head">
-                    <div>
-                        <p class="eyebrow">DEVICE / TIMERS</p>
-                        <h2 id="timersTitle">提醒</h2>
-                    </div>
-                    <button class="btn ghost sm" id="timersRefresh" type="button">刷新</button>
-                </div>
-                <p class="chat-note">提醒存在设备核心上：语音、设备屏幕和这个页面读写同一份，到点会写进下面的对话记录。</p>
-                <form class="timer-form" id="timerForm">
-                    <input id="timerHour" type="number" min="0" max="23" step="1" value="7" aria-label="小时">
-                    <span>:</span>
-                    <input id="timerMinute" type="number" min="0" max="59" step="5" value="30" aria-label="分钟">
-                    <label class="timer-daily"><input id="timerDaily" type="checkbox" checked>每天</label>
-                    <button class="btn sm" type="submit">加提醒</button>
-                </form>
-                <ul class="skills" id="timers"></ul>
-                <p class="msg" id="timersMsg" role="status" aria-live="polite"></p>
-            </section>
         </div>
 
     </main>
@@ -2099,115 +2063,6 @@ textarea{resize:vertical;line-height:1.6}
         loadPerformance();
         startPerformance();
 
-        /* ---------------- 提醒 ----------------
-           存在核心上：语音、设备屏幕与这个页面读写的是同一份。页面只做两件事，
-           渲染状态、把按钮动作发给核心。 */
-        const TIMER_REFRESH_MS = 20000;
-
-        function renderTimers(timers) {
-            const list = $('#timers');
-            list.innerHTML = '';
-            if (!timers.length) {
-                const empty = document.createElement('li');
-                empty.className = 'timer-empty';
-                empty.textContent = '还没有提醒。用语音说“提醒我七点半喝水”，或在上面加一条。';
-                list.appendChild(empty);
-                return;
-            }
-            timers.forEach(function (item) {
-                const li = document.createElement('li');
-                li.className = 'timer';
-                const clock = document.createElement('span');
-                clock.className = 'timer-clock';
-                clock.textContent = String(item.hour).padStart(2, '0') + ':' + String(item.minute).padStart(2, '0');
-                const label = document.createElement('span');
-                label.className = 'timer-label';
-                label.textContent = item.label || '提醒';
-                li.appendChild(clock);
-                li.appendChild(label);
-                if (item.daily) {
-                    const tag = document.createElement('span');
-                    tag.className = 'tag none';
-                    tag.textContent = '每天';
-                    li.appendChild(tag);
-                }
-                const remove = document.createElement('button');
-                remove.className = 'btn ghost sm';
-                remove.type = 'button';
-                remove.textContent = '删除';
-                remove.addEventListener('click', function () { removeTimer(item.id); });
-                li.appendChild(remove);
-                list.appendChild(li);
-            });
-        }
-
-        async function loadTimers() {
-            try {
-                const data = await fetchJson('/api/timers');
-                renderTimers(Array.isArray(data.timers) ? data.timers : []);
-            } catch (error) {
-                setMsg('timersMsg', error.message, false);
-            }
-        }
-
-        async function removeTimer(id) {
-            try {
-                await fetchJson('/api/timers/' + id, { method: 'DELETE' });
-                setMsg('timersMsg', '已删除', true);
-                loadTimers();
-            } catch (error) {
-                setMsg('timersMsg', error.message, false);
-            }
-        }
-
-        function refreshTimers() { loadTimers(); }
-        let timersTimer = null;
-        function startTimers() { if (!timersTimer) timersTimer = setInterval(loadTimers, TIMER_REFRESH_MS); }
-        function stopTimers() { if (timersTimer) { clearInterval(timersTimer); timersTimer = null; } }
-
-        $('#timersRefresh').addEventListener('click', loadTimers);
-
-        $('#timerForm').addEventListener('submit', async function (event) {
-            event.preventDefault();
-            const hour = parseInt($('#timerHour').value, 10);
-            const minute = parseInt($('#timerMinute').value, 10);
-            if (!(hour >= 0 && hour <= 23) || !(minute >= 0 && minute <= 59)) {
-                setMsg('timersMsg', '时间要填 0-23 时、0-59 分', false);
-                return;
-            }
-            try {
-                await fetchJson('/api/timers', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        hour: hour,
-                        minute: minute,
-                        daily: $('#timerDaily').checked,
-                        label: '提醒',
-                    }),
-                });
-                setMsg('timersMsg', '已加提醒，到点会写进对话记录', true);
-                loadTimers();
-            } catch (error) {
-                setMsg('timersMsg', error.message, false);
-            }
-        });
-
-        /* 切到后台就停提醒轮询，切回来再续上 */
-        document.addEventListener('visibilitychange', function () {
-            if (document.hidden) {
-                stopTimers();
-            } else {
-                loadTimers();
-                startTimers();
-            }
-        });
-        window.addEventListener('pagehide', function () {
-            stopTimers();
-        });
-
-        loadTimers();
-        startTimers();
     </script>
 
 <script>
