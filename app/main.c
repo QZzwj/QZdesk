@@ -81,8 +81,6 @@ int main(void)
                 lv_screen_load(qz_applets_screen(QZ_APPLET_CAMERA));
             } else if (strcmp(open, "apps") == 0) {
                 lv_screen_load(apps);
-            } else if (strcmp(open, "assistant") == 0) {
-                lv_screen_load(assistant);
             }
         }
     }

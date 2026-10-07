@@ -469,10 +469,8 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t size)
         int32_t side = (i == 0) ? -1 : 1;
         face->eye[i] = eye_blob(face->ver_panel, s * EYE_SIZE / 210, s * EYE_SIZE / 210);
         lv_obj_align(face->eye[i], LV_ALIGN_CENTER, side * s * EYE_DX / 210, 0);
-        /* Echo-Mate 是深底白眼；我们的卡片是白的，眼睛用主题文字色。必须走
-         * qz_obj_set_bg_color 而不是裸 set：这样切换深色模式时眼睛会跟着反白，
-         * 否则黑眼落在黑底上，整个表情就“看不见”了。 */
-        qz_obj_set_bg_color(face->eye[i], QZ_TEXT, 0);
+        /* Echo-Mate 是深底白眼；我们的卡片是白的，眼睛用主题文字色（深色模式自动反白） */
+        lv_obj_set_style_bg_color(face->eye[i], qz_color(QZ_TEXT), 0);
     }
 
     /* 嘴（平时透明，说话时出现） */
@@ -480,7 +478,7 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t size)
     lv_obj_align(face->mouth_panel, LV_ALIGN_CENTER, 0, s * MOUTH_PANEL_Y / 210);
     face->mouth = eye_blob(face->mouth_panel, s * MOUTH_SIZE / 210, s * MOUTH_SIZE / 210);
     lv_obj_align(face->mouth, LV_ALIGN_CENTER, 0, s * MOUTH_Y / 210);
-    qz_obj_set_bg_color(face->mouth, QZ_TEXT, 0);
+    lv_obj_set_style_bg_color(face->mouth, qz_color(QZ_TEXT), 0);
     lv_obj_set_style_bg_opa(face->mouth, LV_OPA_TRANSP, 0);
 
     /* 三张装饰图（来自 Echo-Mate 的 assets） */
