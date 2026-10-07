@@ -56,7 +56,9 @@
 typedef enum {
     /* surfaces — follow the theme */
     QZ_BG = 0,
+    QZ_BG_GRAD,     /**< canvas vertical-gradient bottom stop（玻璃需要底子有层次） */
     QZ_CARD,
+    QZ_CARD_GRAD,   /**< plate vertical-gradient bottom stop */
     QZ_BAR,
     QZ_FILL,
     QZ_FILL_PRESSED,
@@ -129,6 +131,8 @@ void qz_material_register(lv_obj_t *obj, bool floating);
  * of lv_obj_set_style_bg_color() etc. when the colour comes from a token.
  * ------------------------------------------------------------------------- */
 void qz_obj_set_bg_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
+/** 同上，但作用于渐变的末端色（配合 bg_grad_dir = VER 的纵向微渐变）。 */
+void qz_obj_set_bg_grad_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
 void qz_obj_set_text_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
 void qz_obj_set_border_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
 void qz_obj_set_shadow_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);

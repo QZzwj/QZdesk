@@ -32,7 +32,9 @@ static const struct {
     uint32_t dark;
 } qz_palette[] = {
     [QZ_BG]             = { 0xE5E5EA, 0x000000 }, /* canvas: systemGray5 / true black (OLED) */
+    [QZ_BG_GRAD]        = { 0xD8DAE3, 0x101014 }, /* canvas gradient bottom（顶部用 QZ_BG） */
     [QZ_CARD]           = { 0xFFFFFF, 0x1C1C1E }, /* grouped plate: white / systemGray6 dark */
+    [QZ_CARD_GRAD]      = { 0xF1F2F6, 0x161619 }, /* plate gradient bottom（顶部用 QZ_CARD） */
     [QZ_BAR]            = { 0xFFFFFF, 0x1C1C1E }, /* toolbar glass fill */
     [QZ_FILL]           = { 0xF2F2F7, 0x2C2C2E }, /* recessed fill / track */
     [QZ_FILL_PRESSED]   = { 0xE9E9EF, 0x3A3A3C }, /* pressed / switch-off track */
@@ -141,6 +143,13 @@ void qz_obj_set_bg_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selecto
     ensure_delete_hook(obj);
 }
 
+void qz_obj_set_bg_grad_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
+{
+    lv_obj_set_style_bg_grad_color(obj, qz_color(token), sel);
+    track_record(obj, LV_STYLE_BG_GRAD_COLOR, sel, token);
+    ensure_delete_hook(obj);
+}
+
 void qz_obj_set_text_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
 {
     lv_obj_set_style_text_color(obj, qz_color(token), sel);
@@ -176,6 +185,9 @@ static void theme_refresh_all_records(void)
         switch (rec->prop) {
         case LV_STYLE_BG_COLOR:
             lv_obj_set_style_bg_color(rec->obj, c, rec->selector);
+            break;
+        case LV_STYLE_BG_GRAD_COLOR:
+            lv_obj_set_style_bg_grad_color(rec->obj, c, rec->selector);
             break;
         case LV_STYLE_TEXT_COLOR:
             lv_obj_set_style_text_color(rec->obj, c, rec->selector);
@@ -489,9 +501,12 @@ void qz_style_screen(lv_obj_t *obj)
 {
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_OFF);
-    /* Flat systemGray5 canvas. The reference carries its whole hierarchy on two
-     * greys and a white, so there is no wash, no bloom and nothing to bake. */
+    /* Canvas with a subtle vertical gradient: glass needs a backdrop with
+     * tonal depth, or 68%-alpha plates read as flat paint. Filling a VER
+     * gradient costs the same as a solid fill (per-row constant colour). */
     qz_obj_set_bg_color(obj, QZ_BG, 0);
+    qz_obj_set_bg_grad_color(obj, QZ_BG_GRAD, 0);
+    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_radius(obj, 0, 0);
@@ -827,12 +842,17 @@ lv_obj_t *qz_arc_piece(lv_obj_t *parent, int32_t width, int32_t height, int32_t 
 
 void qz_style_plate(lv_obj_t *obj)
 {
-    /* The workhorse surface: opaque plate on the grey canvas, no border and no
-     * shadow. Depth is the value difference between the plate and the canvas —
-     * a shadow would only duplicate what the grey already says. */
+    /* The workhorse surface, now glass: translucent plate with a vertical
+     * sheen (top = QZ_CARD, bottom = QZ_CARD_GRAD) and a 1px specular rim.
+     * RV1106 预算内的玻璃三件套 —— 混合已在跑，渐变填充与实心同价，
+     * 描边按周长计；刻意不加深色阴影（逐像素高斯，一张大卡 10~20ms）。 */
     qz_obj_set_bg_color(obj, QZ_CARD, 0);
+    qz_obj_set_bg_grad_color(obj, QZ_CARD_GRAD, 0);
+    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(obj, (lv_opa_t)material_opa, 0);
-    lv_obj_set_style_border_width(obj, 0, 0);
+    lv_obj_set_style_border_width(obj, 1, 0);
+    qz_obj_set_border_color(obj, QZ_GLASS_RIM, 0);
+    lv_obj_set_style_border_opa(obj, (lv_opa_t)(QZ_RIM_OPA * 2 / 5), 0);
     lv_obj_set_style_shadow_width(obj, 0, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     qz_material_register(obj, false);
