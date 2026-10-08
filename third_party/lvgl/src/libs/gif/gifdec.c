@@ -596,17 +596,30 @@ read_image_data(gd_GIF * gif, int interlace)
         if(ret == 1) key_size++;
         entry = table->entries[key];
         str_len = entry.length;
-	if(frm_off + str_len >= frm_size){
-		LV_LOG_WARN("LZW table token overflows the frame buffer");
-		return -1;
-	}
+	/* QZdesk 补丁：原本这里是 `>=`，会把"最后一个 token 恰好填满整帧"的
+	 * 合法帧误判为溢出并 return -1；而错误路径不会复位文件位置，解析器就此
+	 * 错位，后续读出乱码（unknown extension / Frame coordinates out of image
+	 * bounds / lv_realloc 失败），最终可能越界写崩。写入循环覆盖的是
+	 * [frm_off, frm_off+str_len-1]，恰好填满时索引正好落在最后一格，不会越界，
+	 * 所以这里应为 `>`。详见 docs/UI与设计.md「吉祥物表情」。 */
+	/* QZdesk 补丁：原实现是 `if(frm_off + str_len >= frm_size) { 警告; return -1; }`
+	 * —— 直接丢弃整帧。两处问题：
+	 *   1) 恰好填满整帧的合法 token 被误判为溢出（写入下标上限是 frm_size-1）；
+	 *   2) GIF 规范允许最后一个 token 伸过帧尾（PIL 等编码器就是这么编的），
+	 *      正确做法是按帧裁剪，而不是判帧非法。
+	 * 而丢弃帧的错误路径不会复位文件位置（下面那句 f_gif_seek 只在成功时执行），
+	 * 解析器就此错位：后续读出 unknown extension / Frame coordinates out of image
+	 * bounds / LZW 表无限增长，最终越界写崩。表现到界面就是"表情卡住不动"。
+	 * 这里改成把伸过帧尾的像素跳过。 */
         for(i = 0; i < str_len; i++) {
             p = frm_off + entry.length - 1;
-            x = p % gif->fw;
-            y = p / gif->fw;
-            if(interlace)
-                y = interlaced_line_index((int) gif->fh, y);
-            gif->frame[(gif->fy + y) * gif->width + gif->fx + x] = entry.suffix;
+            if(p < frm_size) {
+                x = p % gif->fw;
+                y = p / gif->fw;
+                if(interlace)
+                    y = interlaced_line_index((int) gif->fh, y);
+                gif->frame[(gif->fy + y) * gif->width + gif->fx + x] = entry.suffix;
+            }
             if(entry.prefix == 0xFFF)
                 break;
             else

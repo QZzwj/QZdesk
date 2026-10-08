@@ -98,7 +98,11 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t design_px)
     face->root = lv_obj_create(parent);
     (lv_obj_set_size)(face->root, box, box);
     (lv_obj_set_style_radius)(face->root, box / 5, 0);
-    lv_obj_set_style_clip_corner(face->root, true, 0);   /* 方角要被圆角裁掉 */
+    /* 圆角不靠 clip_corner：那会让 LVGL 把子对象渲进 ARGB8888 图层再做遮罩，
+     * 而且只在重绘区域与"上/中/下三条带"相交时才生效（lv_refr.c:199-248）——
+     * 表情每帧只重绘脸区，圆角实测会时灵时不灵、甚至整个变直角。素材已把四角
+     * 做成透明（见 tools/build_otto_emoji.py），这里给一层黑底圆角，透过透明角
+     * 看到的就是它，边缘由 LVGL 的圆角抗锯齿保证。 */
     lv_obj_set_style_bg_color(face->root, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(face->root, LV_OPA_COVER, 0);
     (lv_obj_set_style_border_width)(face->root, 0, 0);

@@ -17,7 +17,7 @@
 import argparse
 import os
 import sys
-from PIL import Image
+from PIL import Image, ImageDraw
 
 # 状态 -> 表情名。改这里就能换表情，重跑脚本即可（生成物会同步）。
 STATE_MAP = [
@@ -84,6 +84,22 @@ def scale_gif(src_path, size, out_path):
         # PIL 会拿它去 convert(RGBA) 而报错；这里显式丢掉。
         q.info.pop("transparency", None)
         out_frames.append(q)
+
+    # 圆角烘进素材：四角做成透明，露出容器的黑底圆角。
+    # 不这么做就得靠 lv_obj_set_style_clip_corner()，而 LVGL 只在"上/中/下三条带
+    # 与本次重绘区域相交"时才把子对象渲进 ARGB 图层做遮罩（lv_refr.c:199-248）——
+    # 表情每帧只重绘脸区，圆角就时灵时不灵，实测甚至会整个变成直角。
+    # GIF 的透明是 1 bit，边界是硬的；但容器本身的黑底圆角带抗锯齿，且二者同色，
+    # 最终看到的圆角边缘取自容器，依旧平滑。
+    rounded = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(rounded).rounded_rectangle([0, 0, size - 1, size - 1],
+                                              radius=size // 5, fill=255)
+    masked = []
+    for q in out_frames:
+        rgba = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        rgba.paste(q.convert("RGB"), (0, 0), rounded)
+        masked.append(rgba)
+    out_frames = masked
     out_frames[0].save(out_path, save_all=True, append_images=out_frames[1:],
                        duration=FRAME_MS, loop=0, optimize=True, disposal=2)
     return n, os.path.getsize(out_path)
