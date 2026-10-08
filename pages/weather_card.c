@@ -112,8 +112,9 @@ void qz_weather_icon_render(lv_obj_t *box, const char *key)
     if (!box) return;
     /* 只清图标画布：转圈是它的兄弟对象，不受影响。 */
     lv_obj_clean(box);
-    /* A8 蒙版按主题色染色：一套资源，浅色/深色主题都对 */
-    lv_obj_t *image = qz_icon_image(box, icon, ICON_BOX, qz_color(tint));
+    /* A8 蒙版按主题色染色：一套资源，浅色/深色主题都对。小屏紧凑版把画布放大
+     * 了，图标档位要跟着放大，否则大画布里躺着一个 40px 的小图标。 */
+    lv_obj_t *image = qz_icon_image(box, icon, qz_compact() ? 64 : ICON_BOX, qz_color(tint));
     if (image) lv_obj_center(image);
 }
 
@@ -291,6 +292,26 @@ lv_obj_t *qz_weather_card_create(lv_obj_t *parent, int x, int y, int width, int 
     range_label = text_line(card, 33, QZ_TEXT_TERTIARY);   /* 最高/最低 + 风速 */
     detail_label = text_line(card, 47, QZ_TEXT_SECONDARY); /* 体感 + 湿度 */
     place_label = text_line(card, 61, QZ_TEXT_TERTIARY);   /* 城市 + 更新时间 */
+
+    if (qz_compact()) {
+        /* 小屏：整卡压成一条横排 —— 图标 + 大温度 + 描述 + 城市，砍掉两行次要
+         * 信息（最高最低/体感湿度）。数字同样按"目标实际像素 ×1.5"写。 */
+        lv_obj_set_size(icon_box, 64, 64);
+        lv_obj_align(icon_box, LV_ALIGN_LEFT_MID, 12, 0);
+        lv_obj_set_size(spinner, 30, 30);
+        lv_obj_align(spinner, LV_ALIGN_LEFT_MID, 12 + (64 - 30) / 2, 0);
+        lv_obj_align(temp_row, LV_ALIGN_LEFT_MID, 88, 0);
+        lv_obj_set_style_pad_column(temp_row, 8, 0);
+        lv_obj_set_style_text_font(temp_label, qz_font_size(34), 0);
+        lv_obj_set_style_text_font(desc_label, qz_font_size(20), 0);
+        lv_obj_add_flag(range_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
+        /* 城市/更新时间贴右边，跟左边的温度分开 */
+        lv_obj_set_style_text_font(place_label, qz_font_size(18), 0);
+        lv_obj_set_style_text_align(place_label, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(place_label, 150);
+        lv_obj_align(place_label, LV_ALIGN_RIGHT_MID, -16, 0);
+    }
 
     /* 订阅核心事件：助手页拿着轮询，这里只加一条订阅，不会抢走它的包。 */
     qzdesk_core_subscribe(core_event, NULL);

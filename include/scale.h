@@ -68,6 +68,19 @@ static inline int qz_scale_downscaled(void)
     return qz_panel_w < QZ_DESIGN_W || qz_panel_h < QZ_DESIGN_H;
 }
 
+/**
+ * 小屏（两个方向都比设计稿小）：页面改用**紧凑版布局**。
+ *
+ * 480×320 的设计稿按 2/3 缩到 320×240 时，缩的不只是尺寸 —— 每屏能放下的
+ * 内容也跟着变成 1/2.25，硬塞原来那套排版必然字小、卡小。所以小屏上换一套
+ * 版式：元素更少更大（主页丢掉次要说明行、入口卡改成并排大字）。判定要求
+ * 两个方向都小，避免只在一边挤的中间面板被误判。
+ */
+static inline int qz_compact(void)
+{
+    return qz_panel_w < QZ_DESIGN_W && qz_panel_h < QZ_DESIGN_H;
+}
+
 /** 横向比例分子 = 面板宽 × 设计高；纵向 = 面板高 × 设计宽。 */
 static inline int64_t qz_scale_xnum(void)
 {
@@ -87,9 +100,11 @@ static inline int64_t qz_scale_minnum(void)
     return xnum < ynum ? xnum : ynum;
 }
 
-/** 字号下限：等比缩到 7px 的中文已经糊了，宁可略微不"等比"也要能读。 */
+/** 字号下限：小屏上"字比布局缩得更多"时宁可略微不等比，也要保证还能读。
+ *  9px 的中文在 240 高的屏上糊成一团（设计稿里 9~14px 那批小标签会被全部压到
+ *  同一个 9px，层级也没了），所以提到 11px。 */
 #ifndef QZ_MIN_FONT_PX
-#define QZ_MIN_FONT_PX 9
+#define QZ_MIN_FONT_PX 11
 #endif
 
 /**
@@ -141,12 +156,31 @@ static inline uint32_t qz_scale_zoom(uint32_t zoom)
     return (uint32_t)(((uint64_t)zoom * qz_scale_minnum() + QZ_SCALE_DEN / 2) / QZ_SCALE_DEN);
 }
 
-/** 字号缩放，带上限（见 QZ_MIN_FONT_PX）。 */
+/**
+ * 字号用的比例：**按纵向缩**，但最多放到横向比例的 1.15 倍。
+ *
+ * 字高是纵向的量，所以字号的合理比例是纵向的那个，而不是"两方向取小"：
+ * 320×240 的面板上横向 2/3、纵向 3/4，若字号也按 2/3 缩，设计稿里 9~14px
+ * 那批小标签会被压到 7~9px 再被下限截平，整屏文字挤成同一个字号、层级消失
+ * （实测每页 59 处文字都在 9px 上）。
+ *
+ * 上限 1.15 倍横向比例是防"竖屏/极窄屏"：那时横向才是约束，字号比横向比例大
+ * 太多就会顶破定宽的标签。480×320 的默认面板下两者相等，仍是恒等变换。
+ */
+static inline int64_t qz_scale_fontnum(void)
+{
+    int64_t ynum = qz_scale_ynum();
+    int64_t cap = qz_scale_xnum() * 115 / 100;
+
+    return ynum < cap ? ynum : cap;
+}
+
+/** 字号缩放，带下限（见 QZ_MIN_FONT_PX）。 */
 static inline int32_t qz_scale_font(int32_t px)
 {
     if (qz_scale_downscaled()) {
         /* 只有真的在缩小才设下限：面板不小于设计稿时字号必须逐像素与设计一致。 */
-        lv_coord_t scaled = qz_scale_px(px);
+        lv_coord_t scaled = qz_scale_ratio(px, qz_scale_fontnum());
         return scaled < QZ_MIN_FONT_PX ? QZ_MIN_FONT_PX : (int32_t)scaled;
     }
     return px;
