@@ -7,8 +7,8 @@ QZdesk-Demo/
 ├── app/
 │   ├── main.c              # LVGL、fbdev、触摸和主循环
 │   ├── theme.c             # 设计令牌、字体、卡片/滑块/开关样式与动效
-│   ├── ai_face.c           # 吉祥物表情（5 种状态切换 + 呼吸/漂浮动效）
-│   ├── mascot_assets.c     # 由表情图烘焙出的 LVGL 位图资源（自动生成）
+│   ├── ai_face.c           # 吉祥物表情（小智标准 GIF：状态 -> 表情，深色圆角屏）
+│   ├── otto_emoji.c        # 表情 GIF 字节与状态映射表（由脚本生成，勿手改）
 │   ├── config.c            # Echo 服务配置、设备 IP、电量读取、背光/音量/时区
 │   ├── skills.c            # 核心本地 Skill 服务的极简 HTTP 客户端
 │   ├── qzdesk_core.c       # QZdesk 核心 UDP GUI 协议适配
@@ -20,8 +20,8 @@ QZdesk-Demo/
 │   ├── skills_page.c       # 技能页（读取核心 Skill 服务，切换主/备/关闭）
 │   ├── applets.c           # 独立小应用：系统状态 / 定时提醒 / 番茄钟 / 设备控制 / 存在检测 / 运动相机
 │   └── settings.c          # 设置 / WLAN / 通用设置 / 关于
-├── assets/mascot/          # 吉祥物表情原图（idle/happy/thinking/confused/speaking）
-├── tools/                  # mk_mascot_assets.py：表情图 -> LVGL 资源
+├── assets/mascot/otto/     # 缩放留档的小智标准表情 GIF（生成物）
+├── tools/                  # build_otto_emoji.py：表情 GIF -> 嵌入固件的 C 资源
 ├── include/                # 各模块公开接口
 ├── xiaozhi_core/           # 内置 QZdesk Rust 核心（MIT）
 └── CMakeLists.txt
@@ -73,64 +73,56 @@ QZdesk-Demo/
 管线，这一版只有取景与拍照；快门存的是预览帧（640×480 缩放后的面板尺寸），
 不是传感器原始分辨率。
 
-### 吉祥物表情（Echo-Mate 式双眼）
+### 吉祥物表情（小智标准 GIF）
 
-吉祥物**不是位图**，是纯 LVGL 对象画的双眼机器人脸：一条透明"眼睛面板"（210×80 基准）
-里两只白色圆角眼（80×80，@x∓60），下面一只嘴（60×60，平时透明，说话时出现并上下动），
-问号 / 思考 / 手三张 60px 装饰图负责"没听懂 / 思考"。结构与编排移植自同门项目
-Echo-Mate（`Demo/DeskBot_demo/gui_app/pages/ui_ChatBotPage`，装饰图资源也取自那里）。
+脸用的是**小智标准表情**：素材取自 [`txp666/otto-emoji-gif-component`](https://github.com/txp666/otto-emoji-gif-component)
+（MIT）的 21 个 240×240 黑白风格表情 GIF，33 帧、每帧 80ms —— 也就是真机上小智设备
+的那张脸。我们取其中 10 个，缩放到界面需要的三档尺寸后把 **GIF 字节嵌进固件**，运行
+时交给 LVGL 的 `lv_gif`（内存源）解码播放：设备上不需要放任何素材文件，也就不会出现
+"素材缺失 → 表情空白"。
 
-每种状态是一段**定时编排**（一串带延时的 `lv_anim`），由 250ms 调度器驱动：状态变化
-就重置并播新编排，播完自动重播（待机有两种编排交替）。
+| 档位 | 物理尺寸 | 用在哪 |
+| --- | --- | --- |
+| `QZ_OTTO_60` | 60px | 设置-关于卡片（`qz_face_create(hero, 60)`） |
+| `QZ_OTTO_88` | 88px | 主页 AI 助手大卡片（`qz_face_create(card, 88)`） |
+| `QZ_OTTO_164` | 164px | 对话页全屏表情（`qz_face_create(face_view, 164)`） |
 
-- **眨眼** = 把整条眼睛面板高度压到 10px（子对象被面板裁剪，看起来就是眼皮合上）；
-- **看四周** = 面板平移；**说话** = 嘴出现并上下动两轮、中途眨一次；
-- **没听懂 / 惊讶** = 问号旋转淡入淡出 + 眼睛收窄脉冲；**思考** = 手图 + 问号；
-- 我们附加的开心 / 困倦 / 单眼眨是同一词汇的编排（蹦跳眨眼 / 慢眨下沉 / 单眼压扁）。
+状态映射（`QZ_FACE_*` → 表情名）写在 `tools/build_otto_emoji.py` 的 `STATE_MAP`：
+待机 `neutral`、说话 `happy`、思考 `thinking`、开心 `laughing`、困惑 `confused`、
+喜欢 `loving`、惊讶 `surprised`、困倦 `sleepy`、眨眼 `winking`、兴奋 `silly`。
 
-眼睛与嘴的颜色用主题文字色（浅色模式黑、深色模式自动反白），所以深浅两套主题都不用
-另做素材。所有尺寸按 `face size / 210` 等比换算，60px（关于卡片）、88px（主页大卡片）、
-164px（全屏表情）共用同一套编排。
+**为什么换掉上一版自己画的双眼脸**：那套是手写几何 + `lv_anim` 链的编排（成对的动画
+配"捕获当前坐标当起点"的写法），出现过「闭眼那一拍没接上睁眼 → 眼睛面板卡在 4px、
+眼睛被裁剪窗整个裁掉」的空白（实测待机 3.5s 后持续空白 3.8s）；另有一处坑是
+`lv_obj_align()` 存的是 align + 偏移而不是坐标，尺寸一变父布局就重新居中，把每拍写
+的绝对坐标顶掉。换用成熟素材 + 现成解码器后，这两类问题都不复存在；我们只负责选片、
+定尺寸和省 CPU。
 
-调试：`QZDESK_FACE_CYCLE=2500`（毫秒可调）逐个轮播状态，状态号打到 stderr。
+**脸的外框**是一层深色圆角"屏幕"（表情自带黑底，露在白卡片上就是一块机器人的脸屏）：
+容器尺寸取**物理像素**（`qz_scale_px(设计像素)`，两边都不溢出），资源按"最接近的一档"
+选（320×240 下 88 设计像素只有 59 物理像素，直接播 60px 那一档，不再缩一遍），图案
+1:1 不做缩放。
 
-`assets/mascot/` 里的位图狗与 `tools/mk_mascot_assets.py` 烘焙脚本目前已不被引用，
-留作备选；确认不用可以整目录删除（约 16MB 源图）。
+**代价与取舍**（实测）：
 
-因为各张原图取景不同（有的带全身、有的只到胸口），脚本里有 `FRAMING` 表逐张微调
-缩放，保证五个表情的脸在画布里大小一致 —— 表情切换时才不会"忽大忽小"。换新图后
-跑一次脚本，用 `--preview` 输出灰/蓝/白三种底色的预览图核对效果。
+- 固件体积：三档合计 **793KB** GIF 字节（生成源码 3.3MB），模拟器二进制 2.8MB → 3.6MB；
+- 解码缓冲：`lv_gif` 的画布是 ARGB8888，164² ≈ 107KB / 88² ≈ 31KB / 60² ≈ 14KB 每实例；
+- CPU：**只解码当前屏上的那张脸** —— 三处脸分属主页、关于页、对话页三块屏幕，内部
+  500ms 定时器发现自己的屏幕不是当前屏就 `lv_gif_pause()`（恢复时接着播，不重头开始）；
+  `qz_reduce_motion()` 也按长时间暂停处理；
+- 同状态重复调用 `qz_face_set_state()` 不会重载资源，避免无谓地重启解码。
 
-替换形象或新增表情：
+换表情或加表情：改 `STATE_MAP` 后重跑生成脚本即可（`--src` 指向素材的 `gifs/` 目录）：
 
 ```sh
-# 用同名文件替换 assets/mascot/*.png（建议正方形、主体居中、纯色或已抠好的背景），然后：
-python3 QZdesk-Demo/tools/mk_mascot_assets.py          # 加 --preview 可输出效果预览
+python3 tools/build_otto_emoji.py --src /path/to/otto-emoji-gif-component/gifs
 ```
 
-换形象时**必须核对**三件事：
+脚本会按"所有帧的内容并集"裁掉黑边（脸撑满屏幕）、量化到 16 级灰（体积约减半），
+并把缩放后的 GIF 留档在 `assets/mascot/otto/`。素材版权与署名见仓库根目录
+[`NOTICE`](../NOTICE)。
 
-1. **眼睛的位置与颜色**。眨眼不是换帧，而是在位图上盖两条深色"眼皮"胶囊，位置与颜色
-   取自当前形象 —— 都在 `app/ai_face.c` 顶部的 `QZ_FACE_EYE_SPAN_PCT / _W_PCT / _H_PCT /
-   _ROW_PCT / _COLOR`（画布百分比，与烘焙尺寸无关）。新形象眼距不同就会盖到脸颊上，
-   照新形象重量一遍即可。
-2. **逐张构图**。脚本按内容外框归一化后再套 `FRAMING[state]` 的 `(zoom, dy)`；各张原图
-   取景不同时必须微调，否则切表情会"忽大忽小"（用 `--preview` 的三种底色核对）。
-3. **状态数**。新增一个表情要同时改四处：`mk_mascot_assets.py` 的 `STATES`、
-   `ai_face.h` 的 `qz_face_state_t`、`ai_face.c` 的 `state_image()` 与 `qz_face_state_text()`。
-
-`ai_face.c` 通过 `lv_image` + `LV_IMAGE_ALIGN_CENTER` 显示，按 `size / QZ_MASCOT_SIZE`
-做等比缩放，所以 60px（关于卡片）、88px（主页大卡片）、164px（全屏表情）共用同一份资源；
-图像缩放走内联采样（`lv_image_set_antialias`），不会申请图层缓冲。切换表情是淡入 + 上移，
-另外有呼吸、漂浮、摇摆等位移动效维持"活着"的感觉（都不申请图层）。
-
-体积：`RGB565A8` 每张 192² 约 110KB，五张约 550KB（`app/mascot_assets.c` 那 4MB 是
-十六进制展开的文本，编进固件的是 110KB/张）。`assets/mascot/blink.png` 是早期的闭眼帧
-（烘焙为 `qz_mascot_blink`），但现在眨眼走矢量眼皮、没有代码引用它 —— 换形象时不必做；
-想省 110KB 也可以删掉，同时从脚本的 `STATES` 里去掉。
-
-> 表情集本身怎么设计（每个表情的画法、动效参数、交互优先级与状态映射、新增状态的接法）
-> 见 [`吉祥物表情设计.md`](./吉祥物表情设计.md)。
+调试：`QZDESK_FACE_CYCLE=2500`（毫秒可调）逐个轮播状态，状态号打到 stderr。
 
 ### 材质与层次
 

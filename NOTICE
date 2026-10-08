@@ -1,0 +1,41 @@
+# 第三方素材与许可
+
+本仓库包含下列第三方作品，按各自许可证使用。修改（缩放、裁边、量化）见
+`tools/build_otto_emoji.py`。
+
+## 小智标准表情 GIF
+
+- 来源：https://github.com/txp666/otto-emoji-gif-component
+- 用途：吉祥物的表情动画（`assets/mascot/otto/*.gif`、以及由它们生成的
+  `app/otto_emoji.c` / `include/otto_emoji.h`）
+- 改动：从 21 个 240×240 表情中取 10 个，缩放为 60/88/164 三档、裁掉四周黑边、
+  量化到 16 级灰，并把 GIF 字节嵌入固件
+
+```
+MIT License
+
+Copyright (c) 2025 小鹏
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## 其他
+
+LVGL（`third_party/lvgl`，MIT）、QZdesk Rust 核心（`xiaozhi_core`，MIT）等依赖的
+许可证在其各自目录内。

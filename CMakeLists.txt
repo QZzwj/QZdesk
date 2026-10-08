@@ -49,9 +49,7 @@ add_executable(qzdesk_screen
     app/scale.c
     app/theme.c
     app/ai_face.c
-    app/img_question60.c
-    app/img_think60.c
-    app/img_hand60.c
+    app/otto_emoji.c
     app/face_camera.c
     app/icon_assets.c
     app/config.c
