@@ -73,6 +73,7 @@ stop_previous_qzdesk
 
 # 面板尺寸可选：界面按 480×320 的设计稿布局，缩放到实际屏幕（见 include/scale.h）。
 # 模拟器里用 QZDESK_PANEL=320x240 在**启动时**选一块屏来模拟，不需要重编。
+export QZDESK_PANEL="${QZDESK_PANEL:-320x240}"
 if [[ -n "${QZDESK_PANEL:-}" ]]; then
     printf '面板尺寸：%s\n' "$QZDESK_PANEL"
 fi

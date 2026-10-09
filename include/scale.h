@@ -69,16 +69,16 @@ static inline int qz_scale_downscaled(void)
 }
 
 /**
- * 小屏（两个方向都比设计稿小）：页面改用**紧凑版布局**。
+ * 小屏：页面改用**紧凑版布局**。
  *
  * 480×320 的设计稿按 2/3 缩到 320×240 时，缩的不只是尺寸 —— 每屏能放下的
  * 内容也跟着变成 1/2.25，硬塞原来那套排版必然字小、卡小。所以小屏上换一套
- * 版式：元素更少更大（主页丢掉次要说明行、入口卡改成并排大字）。判定要求
- * 两个方向都小，避免只在一边挤的中间面板被误判。
+ * 版式：元素更少更大（主页丢掉次要说明行、入口卡改成并排大字）。
+ * 任一方向不足设计稿时使用紧凑布局，320×320 或 480×240 也需要收紧内容。
  */
 static inline int qz_compact(void)
 {
-    return qz_panel_w < QZ_DESIGN_W && qz_panel_h < QZ_DESIGN_H;
+    return qz_panel_w < QZ_DESIGN_W || qz_panel_h < QZ_DESIGN_H;
 }
 
 /** 横向比例分子 = 面板宽 × 设计高；纵向 = 面板高 × 设计宽。 */
@@ -102,9 +102,9 @@ static inline int64_t qz_scale_minnum(void)
 
 /** 字号下限：小屏上"字比布局缩得更多"时宁可略微不等比，也要保证还能读。
  *  9px 的中文在 240 高的屏上糊成一团（设计稿里 9~14px 那批小标签会被全部压到
- *  同一个 9px，层级也没了），所以提到 11px。 */
+ *  同一个 9px，层级也没了），所以使用至少 12px（中文实际行高约 15px）。 */
 #ifndef QZ_MIN_FONT_PX
-#define QZ_MIN_FONT_PX 11
+#define QZ_MIN_FONT_PX 12
 #endif
 
 /**
@@ -178,12 +178,8 @@ static inline int64_t qz_scale_fontnum(void)
 /** 字号缩放，带下限（见 QZ_MIN_FONT_PX）。 */
 static inline int32_t qz_scale_font(int32_t px)
 {
-    if (qz_scale_downscaled()) {
-        /* 只有真的在缩小才设下限：面板不小于设计稿时字号必须逐像素与设计一致。 */
-        lv_coord_t scaled = qz_scale_ratio(px, qz_scale_fontnum());
-        return scaled < QZ_MIN_FONT_PX ? QZ_MIN_FONT_PX : (int32_t)scaled;
-    }
-    return px;
+    int32_t scaled = qz_scale_downscaled() ? qz_scale_ratio(px, qz_scale_fontnum()) : px;
+    return scaled < QZ_MIN_FONT_PX ? QZ_MIN_FONT_PX : scaled;
 }
 
 /**

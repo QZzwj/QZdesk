@@ -20,40 +20,20 @@
  * rest.
  *
  * 高度都从设计稿推出来，不写死：两列必须正好收尾在 QZ_BOTTOM 这条线上。 */
-#define HERO_Y 36
-#define HERO_W 260
-/* 底部只留一个 gutter 的留白，卡片一直长到底。 */
-#define QZ_BOTTOM QZ_GUTTER
-#define HERO_H (QZ_DESIGN_H - HERO_Y - QZ_BOTTOM)
-#define SIDE_W 176
-/* 天气卡高度保持固定：它的文字列是顶部对齐的（见 weather_card.c），变高只会多出
- * 一块空白、还把左侧图标挤到中间。剩余空间均分给两张入口卡。 */
-#define WEATHER_H 86
-#define SIDE_GAP 10
-#define SIDE_H ((QZ_DESIGN_H - QZ_BOTTOM - HERO_Y - WEATHER_H - 2 * SIDE_GAP) / 2)
-#define SIDE_X (QZ_DESIGN_W - QZ_GUTTER - SIDE_W)
-#define SIDE_Y2 (HERO_Y + WEATHER_H + SIDE_GAP)
-#define SIDE_Y3 (SIDE_Y2 + SIDE_H + SIDE_GAP)
-
-/* ------------------------------------------------------------------------- *
- * 紧凑版（小屏：面板两个方向都比设计稿小，见 scale.h 的 qz_compact()）
+/* 主页只有三块，按"两行"排：
+ *     状态栏 / 上半 AI 助手 / 下半 左天气 右应用
+ * 设置不再占首页格子，改为应用页里的一个入口（pages/apps.c）。
  *
- * 数字按"目标实际像素 ×1.5"写：面板 320×240、缩放 2/3，所以设计 30 -> 实际
- * 20px、设计 20 -> 实际 13px。版式也比大屏版少东西：状态栏 + 主卡 + 天气 +
- * 两个并排入口，主卡去掉次要说明行 —— 小屏上"少而大"好过"多而挤"。
- * 竖向预算（设计像素，共 320）：状态栏 36 / 主卡 44..184 / 天气 190..246 /
- * 入口 252..306 / 底部留 14。
- * ------------------------------------------------------------------------- */
-#define C_STATUS_H   36
-#define C_HERO_Y     44
-#define C_HERO_H     140
-#define C_HERO_FACE  120
-#define C_WEATHER_Y  190
-#define C_WEATHER_H  56
-#define C_ENTRY_Y    252
-#define C_ENTRY_H    54
-#define C_ENTRY_GAP  16
-#define C_ENTRY_W    ((QZ_DESIGN_W - 2 * QZ_GUTTER - C_ENTRY_GAP) / 2)
+ * 尺寸按"真机 320×240 上想要的实际像素 ×4/3"写：缩放层会把设计稿缩 2/3
+ * （实机 = 设计 × 2/3），所以设计 30 的标题在真机上是 20px、设计 132 的高是 88px。
+ * 竖向预算：状态栏 35 / 主卡 43..175 / 下半 183..304 / 底部留白 16。 */
+#define HOME_STATUS_H 35
+#define HOME_HERO_Y   43
+#define HOME_HERO_H   132
+#define HOME_ROW_Y    183
+#define HOME_ROW_H    121
+#define HOME_TILE_GAP 14
+#define HOME_TILE_W   ((QZ_DESIGN_W - 2 * QZ_GUTTER - HOME_TILE_GAP) / 2)
 
 static lv_obj_t *assistant_screen;
 static lv_obj_t *apps_screen;
@@ -84,11 +64,6 @@ static void show_apps(lv_event_t *event)
     qz_screen_load(apps_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, QZ_DUR_SCREEN);
 }
 
-static void show_settings(lv_event_t *event)
-{
-    (void)event;
-    qz_screen_load(settings_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, QZ_DUR_SCREEN);
-}
 
 /* ------------------------------------------------------------------------- *
  * Status bar
@@ -161,45 +136,16 @@ static void update_status(void)
  * Cards
  * ------------------------------------------------------------------------- */
 
-static lv_obj_t *home_card(lv_obj_t *parent, int x, int y, int width, int height,
-                           const char *symbol, const char *title, const char *detail,
-                           uint32_t tile, uint32_t mark)
-{
-    lv_obj_t *card = qz_card_button(parent, width, height);
-    lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, y);
-    /* 图标在左、文字在右：天气卡片占了右列顶部之后这两张卡变矮，
-     * 横排比竖排更合适，也仍然是一眼看懂的一张卡。 */
-    lv_obj_t *icon = qz_squircle(card, 32, tile);
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
-    lv_obj_t *glyph = qz_symbol(icon, symbol, 16, qz_color(mark));
-    lv_obj_center(glyph);
-
-    lv_obj_t *name = qz_text(card, title, 14, qz_color(QZ_TEXT));
-    lv_obj_align(name, LV_ALIGN_LEFT_MID, 52, -9);
-
-    lv_obj_t *caption = qz_text(card, detail, 10, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(caption, LV_ALIGN_LEFT_MID, 52, 9);
-    lv_obj_set_width(caption, width - 52 - 10);
-    /* 高度锁成一行，副标题才会用省略号截断。LVGL 的 LONG_DOT 是"先换行、放不下
-     * 才打点"，标签高度自适应时它永远选择换行 —— 小屏上字号变大后副标题刚好会
-     * 折成两行，把标题顶掉（实测"WLAN · 声音 · 显示"就叠在了"设置"上）。
-     * 行高是算好的物理像素，用带括号的调用绕开 scale.h 的二次缩放。 */
-    (lv_obj_set_height)(caption, lv_font_get_line_height(qz_font_size(10)));
-    lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
-    return card;
-}
-
+/** 主页主卡：上半部分整块 —— 脸 + 标题 + 一句提示 + 在线胶囊。 */
 static void hero_card(lv_obj_t *parent)
 {
-    lv_obj_t *card = qz_card_button(parent, HERO_W, HERO_H);
-    lv_obj_align(card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, HERO_Y);
-    /* A white plate, not a colour field. The reference builds its hierarchy out
-     * of type (grey caption over black value) and spends the accent only on what
-     * can be acted on, so the hero stays a plate and the accent shows up in the
-     * status pill and the chevron. */
+    lv_obj_t *card = qz_card_button(parent, QZ_DESIGN_W - 2 * QZ_GUTTER, HOME_HERO_H);
+    lv_obj_align(card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, HOME_HERO_Y);
+
+    /* 脸外面套一圈浅色圆盘，白卡上一块黑屏太生硬 */
     lv_obj_t *halo = lv_obj_create(card);
-    lv_obj_set_size(halo, 96, 96);
-    lv_obj_align(halo, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_set_size(halo, 114, 114);
+    lv_obj_align(halo, LV_ALIGN_LEFT_MID, 12, 0);
     lv_obj_set_style_radius(halo, LV_RADIUS_CIRCLE, 0);
     qz_obj_set_bg_color(halo, QZ_FILL, 0);
     lv_obj_set_style_bg_opa(halo, LV_OPA_COVER, 0);
@@ -208,82 +154,23 @@ static void hero_card(lv_obj_t *parent)
     lv_obj_clear_flag(halo, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(halo, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *face = qz_face_create(card, 88);
-    lv_obj_align(face, LV_ALIGN_LEFT_MID, 12, 0);
+    /* 设计 102 -> 实机 68：落在 60px 那一档资源上，1:1 播、不缩放不裁切 */
+    lv_obj_t *face = qz_face_create(card, 102);
+    lv_obj_align(face, LV_ALIGN_LEFT_MID, 18, 0);
     qz_face_set_state(face, QZ_FACE_IDLE);
 
-    lv_obj_t *title = qz_text(card, "AI 助手", 18, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 130, -44);
+    lv_obj_t *title = qz_text(card, "AI 助手", 30, qz_color(QZ_TEXT));       /* 实机 20 */
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 152, -22);
+    lv_obj_t *hint = qz_text(card, "点击开始对话", 20, qz_color(QZ_TEXT_SECONDARY));  /* 实机 15 */
+    lv_obj_align(hint, LV_ALIGN_LEFT_MID, 152, 18);
 
-    lv_obj_t *hint = qz_text(card, "点击开始对话", 12, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(hint, LV_ALIGN_LEFT_MID, 130, -12);
-
-    lv_obj_t *tag = qz_text(card, "语音 · 文字 · 表情", 10, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(tag, LV_ALIGN_LEFT_MID, 130, 16);
-
-    /* The one accent mark on the plate, and the cue that it opens something. */
-    lv_obj_t *go = qz_chevron(card, qz_color(QZ_ACCENT), 15);
-    lv_obj_align(go, LV_ALIGN_RIGHT_MID, -16, 6);
-
-    hero_badge = lv_obj_create(card);
-    lv_obj_set_size(hero_badge, 54, 20);
-    lv_obj_align(hero_badge, LV_ALIGN_TOP_RIGHT, -10, 10);
-    lv_obj_set_style_radius(hero_badge, LV_RADIUS_CIRCLE, 0);
-    /* Tinted pill: the accent marks the state, the dot says which one it is,
-     * and the caption stays dark enough to read at 11px. */
-    qz_obj_set_bg_color(hero_badge, QZ_ACCENT_TINT, 0);
-    lv_obj_set_style_bg_opa(hero_badge, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hero_badge, 0, 0);
-    lv_obj_set_style_pad_all(hero_badge, 0, 0);
-    lv_obj_clear_flag(hero_badge, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(hero_badge, LV_OBJ_FLAG_SCROLLABLE);
-
-    hero_badge_dot = lv_obj_create(hero_badge);
-    lv_obj_set_size(hero_badge_dot, 5, 5);
-    lv_obj_align(hero_badge_dot, LV_ALIGN_LEFT_MID, 9, 0);
-    lv_obj_set_style_radius(hero_badge_dot, LV_RADIUS_CIRCLE, 0);
-    qz_obj_set_bg_color(hero_badge_dot, QZ_GREEN, 0);
-    lv_obj_set_style_border_width(hero_badge_dot, 0, 0);
-    lv_obj_clear_flag(hero_badge_dot, LV_OBJ_FLAG_CLICKABLE);
-    hero_badge_text = qz_text(hero_badge, "在线", 11, qz_color(QZ_ACCENT_DARK));
-    lv_obj_align(hero_badge_text, LV_ALIGN_LEFT_MID, 19, 0);
-
-    lv_obj_add_event_cb(card, show_assistant, LV_EVENT_CLICKED, NULL);
-    qz_animate_entrance(card, 0);
-}
-
-/** 紧凑版主卡：脸更大、标题 20px 实际、只留一句提示。 */
-static void hero_card_compact(lv_obj_t *parent)
-{
-    lv_obj_t *card = qz_card_button(parent, QZ_DESIGN_W - 2 * QZ_GUTTER, C_HERO_H);
-    lv_obj_align(card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, C_HERO_Y);
-
-    lv_obj_t *halo = lv_obj_create(card);
-    lv_obj_set_size(halo, 128, 128);
-    lv_obj_align(halo, LV_ALIGN_LEFT_MID, 10, 0);
-    lv_obj_set_style_radius(halo, LV_RADIUS_CIRCLE, 0);
-    qz_obj_set_bg_color(halo, QZ_FILL, 0);
-    lv_obj_set_style_bg_opa(halo, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(halo, 0, 0);
-    lv_obj_set_style_pad_all(halo, 0, 0);
-    lv_obj_clear_flag(halo, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(halo, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *face = qz_face_create(card, C_HERO_FACE);
-    lv_obj_align(face, LV_ALIGN_LEFT_MID, 16, 0);
-    qz_face_set_state(face, QZ_FACE_IDLE);
-
-    lv_obj_t *title = qz_text(card, "AI 助手", 30, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 168, -24);
-    lv_obj_t *hint = qz_text(card, "点击开始对话", 20, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(hint, LV_ALIGN_LEFT_MID, 168, 18);
-
+    /* 唯一的一处强调色，同时暗示"点进去" */
     lv_obj_t *go = qz_chevron(card, qz_color(QZ_ACCENT), 22);
     lv_obj_align(go, LV_ALIGN_RIGHT_MID, -18, 0);
 
     hero_badge = lv_obj_create(card);
     lv_obj_set_size(hero_badge, 78, 30);
-    lv_obj_align(hero_badge, LV_ALIGN_TOP_RIGHT, -14, 14);
+    lv_obj_align(hero_badge, LV_ALIGN_TOP_RIGHT, -14, 12);
     lv_obj_set_style_radius(hero_badge, LV_RADIUS_CIRCLE, 0);
     qz_obj_set_bg_color(hero_badge, QZ_ACCENT_TINT, 0);
     lv_obj_set_style_bg_opa(hero_badge, LV_OPA_COVER, 0);
@@ -306,26 +193,20 @@ static void hero_card_compact(lv_obj_t *parent)
     qz_animate_entrance(card, 0);
 }
 
-/** 紧凑版入口卡：图标 + 标题 15px 实际 + 一行说明，横向排。 */
-static lv_obj_t *compact_entry(lv_obj_t *parent, int x, int y, int w, int h,
-                               const char *symbol, const char *title, const char *detail,
-                               uint32_t tile, uint32_t mark)
+/** 下半部分的方块：图标在上、标题在下（天气那一格由天气卡自己画）。 */
+static lv_obj_t *home_tile(lv_obj_t *parent, int x, const char *symbol, const char *title,
+                           uint32_t tile, uint32_t mark)
 {
-    lv_obj_t *card = qz_card_button(parent, w, h);
-    lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_t *card = qz_card_button(parent, HOME_TILE_W, HOME_ROW_H);
+    lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, HOME_ROW_Y);
 
-    lv_obj_t *icon = qz_squircle(card, 42, tile);
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 12, 0);
-    lv_obj_t *glyph = qz_symbol(icon, symbol, 22, qz_color(mark));
+    lv_obj_t *icon = qz_squircle(card, 60, tile);            /* 实机 40 */
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 14);
+    lv_obj_t *glyph = qz_symbol(icon, symbol, 34, qz_color(mark));   /* 实机 23 */
     lv_obj_center(glyph);
 
-    lv_obj_t *name = qz_text(card, title, 22, qz_color(QZ_TEXT));
-    lv_obj_align(name, LV_ALIGN_LEFT_MID, 66, -10);
-    lv_obj_t *caption = qz_text(card, detail, 16, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(caption, LV_ALIGN_LEFT_MID, 66, 13);
-    lv_obj_set_width(caption, w - 76);
-    (lv_obj_set_height)(caption, lv_font_get_line_height(qz_font_size(16)));
-    lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
+    lv_obj_t *name = qz_text(card, title, 30, qz_color(QZ_TEXT));    /* 实机 20 */
+    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 82);
     return card;
 }
 
@@ -345,76 +226,48 @@ lv_obj_t *qz_desktop_create(const char *server)
     desktop_screen = lv_obj_create(NULL);
     qz_style_screen(desktop_screen);
 
-    /* Status bar（小屏上整条更高、字更大） */
-    const int cps = qz_compact();
+    /* Status bar：尺寸按真机（320×240）的目标像素定，大面板上同比例放大 */
     lv_obj_t *status = lv_obj_create(desktop_screen);
-    lv_obj_set_size(status, lv_pct(100), cps ? C_STATUS_H : QZ_STATUS_H);
+    lv_obj_set_size(status, lv_pct(100), HOME_STATUS_H);
     lv_obj_align(status, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_opa(status, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(status, 0, 0);
     lv_obj_set_style_pad_all(status, 0, 0);
     lv_obj_clear_flag(status, LV_OBJ_FLAG_SCROLLABLE);
 
-    clock_label = qz_text(status, "--:--", cps ? 20 : 13, qz_color(QZ_TEXT));
+    clock_label = qz_text(status, "--:--", 20, qz_color(QZ_TEXT));
     lv_obj_align(clock_label, LV_ALIGN_LEFT_MID, QZ_GUTTER, 0);
 
-    battery_icon = qz_icon_image(status, QZ_ICON_BATTERY_4, cps ? 28 : 16, qz_color(QZ_TEXT));
+    battery_icon = qz_icon_image(status, QZ_ICON_BATTERY_4, 26, qz_color(QZ_TEXT));
     lv_obj_align(battery_icon, LV_ALIGN_RIGHT_MID, -QZ_GUTTER, 0);
-    battery_label = qz_text(status, "100%", cps ? 18 : 10, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, cps ? -QZ_GUTTER - 36 : -QZ_GUTTER - 24, 0);
-    wifi_icon = qz_icon_image(status, QZ_ICON_WIFI, cps ? 28 : 16, qz_color(QZ_TEXT));
-    lv_obj_align(wifi_icon, LV_ALIGN_RIGHT_MID, cps ? -QZ_GUTTER - 100 : -QZ_GUTTER - 70, 0);
+    battery_label = qz_text(status, "100%", 18, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, -QZ_GUTTER - 36, 0);
+    wifi_icon = qz_icon_image(status, QZ_ICON_WIFI, 26, qz_color(QZ_TEXT));
+    lv_obj_align(wifi_icon, LV_ALIGN_RIGHT_MID, -QZ_GUTTER - 100, 0);
 
     /* 设备地址：原来单独占底部一行（连那条指示条一起删掉了），现在放在状态栏
      * 中间 —— 左边是时间、右边是无线与电量，中间正好空着。 */
     char address[32];
     qz_device_ip(address, sizeof(address));
-    address_label = qz_text(status, address, cps ? 16 : 11, qz_color(QZ_TEXT_TERTIARY));
+    address_label = qz_text(status, address, 16, qz_color(QZ_TEXT_TERTIARY));
     lv_obj_align(address_label, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_t *weather;
-    lv_obj_t *settings;
-    lv_obj_t *apps;
+    /* 上半：AI 助手（整宽） */
+    hero_card(desktop_screen);
 
-    if (cps) {
-        /* 紧凑版：主卡占满宽度，天气压成一条，两个入口并排（见上面的尺寸表） */
-        hero_card_compact(desktop_screen);
+    /* 下半左：天气。数据由核心异步取好、缓存好后推过来，这里只负责显示；点一下
+     * 进天气详情页（刷新按钮在详情页里），网络请求都不在 UI 线程里。 */
+    lv_obj_t *weather = qz_weather_card_create(desktop_screen, QZ_GUTTER, HOME_ROW_Y,
+                                               HOME_TILE_W, HOME_ROW_H);
+    qz_weather_page_init(desktop_screen);
 
-        weather = qz_weather_card_create(desktop_screen, QZ_GUTTER, C_WEATHER_Y,
-                                         QZ_DESIGN_W - 2 * QZ_GUTTER, C_WEATHER_H);
-        qz_weather_page_init(desktop_screen);
-
-        settings = compact_entry(desktop_screen, QZ_GUTTER, C_ENTRY_Y, C_ENTRY_W, C_ENTRY_H,
-                                 LV_SYMBOL_SETTINGS, "设置", "WLAN · 声音",
-                                 QZ_ACCENT, QZ_TEXT_ON_ACCENT);
-        lv_obj_add_event_cb(settings, show_settings, LV_EVENT_CLICKED, NULL);
-        apps = compact_entry(desktop_screen, QZ_GUTTER + C_ENTRY_W + C_ENTRY_GAP, C_ENTRY_Y,
-                             C_ENTRY_W, C_ENTRY_H, LV_SYMBOL_LIST, "应用", "工具与技能",
-                             QZ_ACCENT_TINT, QZ_ACCENT_DARK);
-        lv_obj_add_event_cb(apps, show_apps, LV_EVENT_CLICKED, NULL);
-    } else {
-        /* Hero card */
-        hero_card(desktop_screen);
-
-        /* 天气卡片：数据由核心异步取好、缓存好后推过来，这里只负责显示；
-         * 点一下进天气详情页（刷新按钮在详情页里），网络请求都不在 UI 线程里。 */
-        weather = qz_weather_card_create(desktop_screen, SIDE_X, HERO_Y, SIDE_W, WEATHER_H);
-        qz_weather_page_init(desktop_screen);
-
-        /* Secondary cards */
-        settings = home_card(desktop_screen, SIDE_X, SIDE_Y2, SIDE_W, SIDE_H,
-                             LV_SYMBOL_SETTINGS, "设置", "WLAN · 声音",
-                             QZ_ACCENT, QZ_TEXT_ON_ACCENT);
-        lv_obj_add_event_cb(settings, show_settings, LV_EVENT_CLICKED, NULL);
-        apps = home_card(desktop_screen, SIDE_X, SIDE_Y3, SIDE_W, SIDE_H,
-                         LV_SYMBOL_LIST, "应用", "工具与技能",
-                         QZ_ACCENT_TINT, QZ_ACCENT_DARK);
-        lv_obj_add_event_cb(apps, show_apps, LV_EVENT_CLICKED, NULL);
-    }
+    /* 下半右：应用（设置已经收进应用页里）。 */
+    lv_obj_t *apps = home_tile(desktop_screen, QZ_GUTTER + HOME_TILE_W + HOME_TILE_GAP,
+                               LV_SYMBOL_LIST, "应用", QZ_ACCENT_TINT, QZ_ACCENT_DARK);
+    lv_obj_add_event_cb(apps, show_apps, LV_EVENT_CLICKED, NULL);
 
     qz_animate_entrance(weather, 70);
-    qz_animate_entrance(settings, 110);
-    qz_animate_entrance(apps, 150);
+    qz_animate_entrance(apps, 130);
 
     update_status();
     lv_timer_create(status_timer, 1000, NULL);

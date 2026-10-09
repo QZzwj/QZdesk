@@ -4,13 +4,29 @@
 #include "theme.h"
 #include <stdio.h>
 
-/* Two columns and two visible rows; swipe vertically for the remaining apps. */
-#define ROW_W ((QZ_DESIGN_W - 3 * QZ_GUTTER) / 2)
-#define ROW_GAP 14
-#define ROW_TOP 64
-#define ROW_H ((QZ_DESIGN_H - ROW_TOP - QZ_GUTTER - ROW_GAP) / 2)
-#define COL_LEFT QZ_GUTTER
-#define COL_RIGHT (QZ_DESIGN_W - QZ_GUTTER - ROW_W)
+/*
+ * 应用页 —— 字号按真机面板 **320×240** 标定（见 include/scale.h：设计稿 ×0.75
+ * 铺满实屏），所以这里每个数字都按「真机想要的实像素 × 4/3」写：
+ *
+ *   工具栏标题「应用」  设计 19 -> 实机 14px（原来 15 -> 11，跟正文一样大，标题层级没了）
+ *   页头「设备工具」    设计 19 -> 实机 14px
+ *   卡片标题            设计 26 -> 实机 20px（原来 18 -> 13）
+ *   卡片副标题          设计 16 -> 实机 12px（原来 13 -> 11）
+ *   图标方片 / 图标     设计 52 / 28 -> 实机 35×39 / 21px
+ *
+ * 格子尺寸与坐标由 qz_grid_metrics() / qz_grid_pos() 统一给（theme.c），
+ * 这里只负责格子里面怎么摆。8 个入口 = 2×4：一屏看得见两行（2×2），后两行下滑。
+ */
+#define TITLE_PX 26      /**< 卡片标题（实机 20） */
+#define CAPTION_PX 16    /**< 卡片副标题（实机 12） */
+#define TEXT_BOX 22      /**< 单行副标题的高度：锁成一行，LONG_DOT 才会打点不折行 */
+#define TILE_ICON 52     /**< 图标方片（实机 35×39） */
+#define TILE_GLYPH 28    /**< 方片里的图标（实机 21） */
+#define TILE_PAD_LEFT 12 /**< 方片左内缩 */
+#define TEXT_X 74        /**< 文字列起点（方片右边留 10 设计像素） */
+#define TITLE_Y 22       /**< 标题上沿 */
+#define CAPTION_Y 58     /**< 副标题上沿 */
+#define ROW_TOP 100      /**< 内容区起点：两行页头（标题 + 说明）下面 */
 
 static lv_obj_t *apps_screen;
 static lv_obj_t *desktop_screen;
@@ -54,25 +70,33 @@ static void open_performance(lv_event_t *event)
     }
 }
 
-/** Large tiles inside the bounded vertical scroll area. */
+/** 2 列网格里的一格：位置与尺寸都由 qz_grid_* 统一算，超出部分靠父容器下滑。 */
 static lv_obj_t *app_row(lv_obj_t *grid, int col, int row, const char *symbol,
                          const char *title, const char *detail, uint32_t tile,
                          uint32_t mark, lv_event_cb_t cb, void *user_data)
 {
-    (void)detail;
-    lv_obj_t *card = qz_card_button(grid, ROW_W, ROW_H);
-    lv_obj_set_pos(card, col ? COL_RIGHT : COL_LEFT, row * (ROW_H + ROW_GAP));
+    int32_t x, y, tile_w, tile_h;
+    qz_grid_metrics(&tile_w, &tile_h);
+    qz_grid_pos(col, row, &x, &y);
 
-    lv_obj_t *icon = qz_squircle(card, 54, tile);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 12);
-    lv_obj_t *glyph = qz_symbol(icon, symbol, 28, qz_color(mark));
+    lv_obj_t *card = qz_card_button(grid, tile_w, tile_h);
+    /* set_pos 而不是 align：滚动容器的内容高度会变，align 会被父布局重算 */
+    lv_obj_set_pos(card, x, y);
+
+    lv_obj_t *icon = qz_squircle(card, TILE_ICON, tile);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, TILE_PAD_LEFT, 0);
+    lv_obj_t *glyph = qz_symbol(icon, symbol, TILE_GLYPH, qz_color(mark));
     lv_obj_center(glyph);
 
-    lv_obj_t *name = qz_text(card, title, 22, qz_color(QZ_TEXT));
-    lv_obj_set_width(name, ROW_W - 24);
-    lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 78);
+    /* 文字两行在方片右边：标题大、副标题小。副标题必须锁成一行高 ——
+     * LONG_DOT 是"先换行再打点"，字变大后不锁高度就会折出第二行叠到卡片外。 */
+    lv_obj_t *name = qz_text(card, title, TITLE_PX, qz_color(QZ_TEXT));
+    lv_obj_align(name, LV_ALIGN_TOP_LEFT, TEXT_X, TITLE_Y);
+    lv_obj_t *caption = qz_text(card, detail, CAPTION_PX, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(caption, tile_w - TEXT_X - 12);
+    lv_obj_set_height(caption, TEXT_BOX);
+    lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
+    lv_obj_align(caption, LV_ALIGN_TOP_LEFT, TEXT_X, CAPTION_Y);
 
     lv_obj_add_event_cb(card, cb, LV_EVENT_CLICKED, user_data);
     qz_animate_entrance(card, (uint32_t)((col + row) * 40));
@@ -85,7 +109,7 @@ lv_obj_t *qz_apps_create(void)
     qz_style_screen(apps_screen);
 
     lv_obj_t *toolbar = lv_obj_create(apps_screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 46);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
@@ -93,9 +117,17 @@ lv_obj_t *qz_apps_create(void)
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, back_to_desktop, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "应用", 22, qz_color(QZ_TEXT));
+    /* 标题：小屏上原来的 15 只有实机 11px，和正文一样大，标题层级没了 */
+    lv_obj_t *title = qz_text(toolbar, "应用", 19, qz_color(QZ_TEXT));
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
 
+    lv_obj_t *intro = qz_text(apps_screen, "设备工具", 19, qz_color(QZ_TEXT));
+    lv_obj_align(intro, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 54);
+    lv_obj_t *hint = qz_text(apps_screen, "独立小应用，点开即用", 15,
+                             qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 78);
+
+    /* 小屏：一屏显示 2×2，后面的行往下滑。 */
     lv_obj_t *grid = qz_page_scroll(apps_screen, ROW_TOP);
 
     /* Tiles alternate between the accent and the neutral fill — the same
@@ -111,11 +143,15 @@ lv_obj_t *qz_apps_create(void)
     app_row(grid, 1, 1, LV_SYMBOL_PLAY, "番茄钟", "专注与休息",
             QZ_ACCENT_TINT, QZ_ACCENT_DARK, open_applet,
             (void *)(intptr_t)QZ_APPLET_POMODORO);
-
+    app_row(grid, 1, 2, LV_SYMBOL_EYE_OPEN, "存在检测", "有人靠近自动亮屏",
+            QZ_ACCENT_TINT, QZ_ACCENT_DARK, open_applet,
+            (void *)(intptr_t)QZ_APPLET_FACE);
     app_row(grid, 0, 2, LV_SYMBOL_GPS, "设备控制", "声音 · 背光",
             QZ_ACCENT, QZ_TEXT_ON_ACCENT, open_applet,
             (void *)(intptr_t)QZ_APPLET_CONTROL);
-
+    app_row(grid, 0, 3, LV_SYMBOL_VIDEO, "运动相机", "取景 · 快门存图",
+            QZ_ACCENT, QZ_TEXT_ON_ACCENT, open_applet,
+            (void *)(intptr_t)QZ_APPLET_CAMERA);
     app_row(grid, 1, 3, LV_SYMBOL_SETTINGS, "设置", "WLAN · 声音 · 显示",
             QZ_ACCENT_TINT, QZ_ACCENT_DARK, open_settings, NULL);
     return apps_screen;

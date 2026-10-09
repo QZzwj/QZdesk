@@ -9,7 +9,7 @@
  * 部署：SDK 侧装在 oem 分区的 /oem/usr/share/fonts 下。候选按顺序尝试，
  * 开发机上走第一条，设备上走第二条，两边都不必重编。 */
 #define QZ_FONT_PATH "/home/jn/QZdesk/NanoTikBazHei-Bold.ttf"
-#define QZ_FONT_SLOTS 20
+#define QZ_FONT_SLOTS 32
 
 static const char *qz_font_paths[] = {
     QZ_FONT_PATH,
@@ -40,8 +40,8 @@ static const struct {
     [QZ_FILL_PRESSED]   = { 0xE9E9EF, 0x3A3A3C }, /* pressed / switch-off track */
     [QZ_SEPARATOR]      = { 0xC6C6C8, 0x38383A }, /* hairline */
     [QZ_TEXT]           = { 0x000000, 0xFFFFFF },
-    [QZ_TEXT_SECONDARY] = { 0x6E6E73, 0xFFFFFF }, /* 深色下按要求不再压灰：直接用白 */
-    [QZ_TEXT_TERTIARY]  = { 0x8E8E93, 0xFFFFFF }, /* 同上：深色下三级文字也是白 */
+    [QZ_TEXT_SECONDARY] = { 0x55555B, 0xFFFFFF }, /* Small text stays legible on the canvas. */
+    [QZ_TEXT_TERTIARY]  = { 0x5F5F65, 0xFFFFFF }, /* Dark mode retains white secondary text. */
     [QZ_SHADOW]         = { 0x1C1C1E, 0x000000 },
     [QZ_FACE_BUBBLE]    = { 0xE4EFFF, 0x2C2C2E }, /* AI thinking pips */
     [QZ_KNOB]           = { 0xFFFFFF, 0xFFFFFF }, /* slider / switch knob stays white */
@@ -457,7 +457,7 @@ void qz_font_init(void)
     }
     fclose(file);
     custom_font_size = (size_t)size;
-    /* 正文字号也按面板缩放（见 include/scale.h）：设计稿 16px，320 面板上 11px。 */
+    /* 正文字号也按面板缩放（见 include/scale.h）：设计稿 16px，320 面板上 12px。 */
     font_body = lv_tiny_ttf_create_data_ex(custom_font_data, (size_t)size, qz_scale_font(16),
                                            LV_FONT_KERNING_NONE, 0);
     if (!font_body) {
@@ -803,10 +803,10 @@ lv_obj_t *qz_chevron(lv_obj_t *parent, lv_color_t color, int32_t size)
     if (!points) return NULL;
     points[0].x = 0;
     points[0].y = 0;
-    points[1].x = size / 2;
-    points[1].y = size / 2;
+    points[1].x = qz_scale_x(size / 2);
+    points[1].y = qz_scale_y(size / 2);
     points[2].x = 0;
-    points[2].y = size;
+    points[2].y = qz_scale_y(size);
 
     lv_obj_t *line = lv_line_create(parent);
     lv_line_set_points(line, points, 3);
@@ -899,6 +899,60 @@ lv_obj_t *qz_card_button(lv_obj_t *parent, int width, int height)
     return card;
 }
 
+/* 2 列网格：间距与格子高。实际显示 2×2，多的行往下滑。 */
+#define QZ_GRID_GAP 14
+#define QZ_GRID_TILE_H 96
+
+lv_obj_t *qz_back_button(lv_obj_t *parent)
+{
+    lv_obj_t *btn = qz_icon_button(parent, LV_SYMBOL_LEFT, QZ_TOUCH_BACK);
+    /* 视觉上仍是原来的小圆，但把命中区往外扩一圈：小屏上拇指也点得中。 */
+    lv_obj_set_ext_click_area(btn, 8);
+    return btn;
+}
+
+void qz_make_scrollable(lv_obj_t *obj)
+{
+    if (!obj) return;
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(obj, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+}
+
+lv_obj_t *qz_page_scroll(lv_obj_t *screen, int32_t top)
+{
+    lv_obj_t *area = lv_obj_create(screen);
+    lv_obj_set_size(area, lv_pct(100), QZ_DESIGN_H - top - QZ_GUTTER);
+    lv_obj_align(area, LV_ALIGN_TOP_MID, 0, top);
+    lv_obj_set_style_bg_opa(area, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(area, 0, 0);
+    lv_obj_set_style_shadow_width(area, 0, 0);
+    lv_obj_set_style_pad_all(area, 0, 0);
+    lv_obj_set_scroll_dir(area, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(area, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(area, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_add_flag(area, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    return area;
+}
+
+void qz_grid_metrics(int32_t *tile_w, int32_t *tile_h)
+{
+    int32_t content = QZ_DESIGN_W - 2 * QZ_GUTTER;
+    if (tile_w) *tile_w = (content - QZ_GRID_GAP) / 2;
+    /* 高度按"实机至少 64px"取：太小手指会点串行 */
+    if (tile_h) *tile_h = QZ_GRID_TILE_H;
+}
+
+void qz_grid_pos(int32_t col, int32_t row, int32_t *x, int32_t *y)
+{
+    int32_t w, h;
+    qz_grid_metrics(&w, &h);
+    if (x) *x = QZ_GUTTER + col * (w + QZ_GRID_GAP);
+    if (y) *y = row * (h + QZ_GRID_GAP);
+}
+
 lv_obj_t *qz_button(lv_obj_t *parent, const char *caption, int width, int height)
 {
     lv_obj_t *btn = lv_button_create(parent);
@@ -909,6 +963,7 @@ lv_obj_t *qz_button(lv_obj_t *parent, const char *caption, int width, int height
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     qz_add_press_feedback(btn);
     qz_add_press_scale(btn, 96);
     lv_obj_t *caption_label = qz_text(btn, caption, 15, qz_color(QZ_TEXT));
@@ -928,6 +983,7 @@ lv_obj_t *qz_icon_button(lv_obj_t *parent, const char *icon, int size)
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     qz_add_press_feedback(btn);
     qz_add_press_scale(btn, 96);
     qz_add_touch_glint(btn);
@@ -1102,7 +1158,7 @@ static void glint_follow(void)
     lv_point_t point;
     if (!indev || !touch_glint) return;
     lv_indev_get_point(indev, &point);
-    lv_obj_set_pos(touch_glint, point.x - 36, point.y - 36);
+    (lv_obj_set_pos)(touch_glint, point.x - qz_scale_x(36), point.y - qz_scale_y(36));
 }
 
 /** Fade the glint out. Safe to call when nothing is showing. */

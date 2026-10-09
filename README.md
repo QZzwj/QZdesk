@@ -4,7 +4,7 @@
 
 <h1 align="center">QZdesk</h1>
 
-<p align="center">一块 480×320 横屏嵌入式 AI 桌面终端：本地 LVGL 界面 + Rust 语音核心 + 可导入的技能</p>
+<p align="center">适配 320×240 及更大横屏的嵌入式 AI 桌面终端：本地 LVGL 界面 + Rust 语音核心 + 可导入的技能</p>
 
 <p align="center">
 🇨🇳 <a href="./README.md">简体中文</a> | 🇺🇸 <a href="./README.en.md">English</a>
@@ -16,7 +16,7 @@
 
 QZdesk 是一台跑在 Linux 嵌入式板上的 AI 桌面终端，由两个进程组成，彼此走本机 UDP（界面负责拉起核心）：
 
-- **`qzdesk_screen`**（C + LVGL）——480×320 横屏界面，管触摸、fbdev、Wi-Fi、背光、音量；
+- **`qzdesk_screen`**（C + LVGL）——以 320×240 为最小基准的横屏界面，管触摸、fbdev、Wi-Fi、背光、音量；
 - **`xiaozhi_linux_rs`**（Rust）——语音核心，接小智云端做实时语音对话，并对外提供 MCP 网关、本地技能、智能家居、天气、性能监控与一个网页控制台。
 
 技能（Skill）以 `SKILL.md` 为单位从网页导入，导入后直接改变 AI 的人格、语气与输出格式，**不用改代码、也不用重新烧录**——把「会说话的桌面助手」做成可裁剪、可换人设、可接本地设备的整机方案。
@@ -32,7 +32,7 @@ QZdesk 是一台跑在 Linux 嵌入式板上的 AI 桌面终端，由两个进�
 | 文字聊天 | GUI 输入框与网页共用一个入口：文字先在本地合成语音，再按麦克风同样的报文上行 |
 | 网页控制台 | 设备自带的单页控制台（默认 `:8080`）：技能、实时聊天、天气、性能、智能家居 |
 | 设备页数据 | 天气直连 Open-Meteo（免 Key）、性能每 2 秒采样 `/proc` 与 `statvfs`；设备页与网页读同一份快照 |
-| 无板开发 | 同一份代码在 PC 上用 LVGL SDL 模拟器跑（480×320 窗口）；Wi-Fi / 背光 / 音量 / 时区走真实接口，且都可用环境变量覆盖 |
+| 无板开发 | 同一份代码在 PC 上用 LVGL SDL 模拟器跑（默认 320×240 窗口）；Wi-Fi / 背光 / 音量 / 时区走真实接口，且都可用环境变量覆盖 |
 | 存在检测 | 摄像头帧差判断「有人靠近」：自动亮屏并让助手打个招呼（5 分钟冷却）；接上 RKNN 模型即可升级为人脸识别 |
 | 提醒与番茄钟 | 存在核心上：语音、设备界面、网页读写同一份，重启不丢；到点写进聊天记录 |
 | 核心日志 | 最近几百行留在内存里，网页 `日志` 卡与设备服务同一份，排查不用连 ssh |
@@ -69,7 +69,7 @@ xiaozhi_linux_rs（Rust 语音核心）
 ### 在 PC 上运行（模拟器）
 
 ```bash
-./run.sh      # 480×320 窗口，鼠标模拟触摸
+./run.sh      # 默认 320×240 窗口，鼠标模拟触摸
 ```
 
 `run.sh` 只跑模拟器，按宿主机编译（产物是 x86 二进制，真机用不上）。它会关掉占用 TCP 8080 的旧服务 → 配置并编译 `qzdesk_screen` 与 Rust 核心 → 带守护循环启动。常用开关：
@@ -80,7 +80,7 @@ xiaozhi_linux_rs（Rust 语音核心）
 | `QZDESK_BUILD_DIR=...` | 指定构建目录（默认 `build`） |
 | `QZDESK_JOBS=N` | 并行编译任务数 |
 | `QZDESK_REPLACE_PORT_8080=0` | 不自动关闭占用 8080 的旧进程 |
-| `QZDESK_PANEL=320x240` | 按另一种面板尺寸构建并启动（默认 `480x320`） |
+| `QZDESK_PANEL=480x320` | 启动时模拟较大面板（默认 `320x240`，无需重新编译） |
 
 ### 真机（RV1106）构建镜像
 
@@ -226,11 +226,20 @@ cd <Rockchip SDK>
 
 界面按 Apple HIG 浅色系统实现，设计令牌集中在 `include/theme.h`，动效曲线与时长同样收敛在那里；配色、材质通透度、吉祥物位图烘焙、内存与渲染取舍、性能调优手段见 [`docs/UI与设计.md`](./docs/UI与设计.md)。几个值得先知道的约束：
 
-- 480×320、16 位色深，`lv_conf.h` 的 `LV_MEM_SIZE` 为 2MB；
+- 最小适配基准 320×240、16 位色深，`lv_conf.h` 的 `LV_MEM_SIZE` 为 2MB；
 - 大尺寸对象不要做缩放/旋转动画（LVGL 会申请整块 ARGB 图层，嵌入式堆上容易分配失败）；
 - 界面按 **480×320 的设计稿**布局，`include/scale.h` 横竖各按各自比例缩放到**实际面板**
   （整屏铺满、不留白）：真机读 `/dev/fb0` 的尺寸，模拟器用 `QZDESK_PANEL=320x240 ./run.sh`
-  在启动时选一块屏。所以同一份二进制换任何比例的屏都不用重编，**不要改 theme.h**。
+  在启动时选一块屏。任一方向小于设计稿时使用紧凑布局，中文最小字号为 12px；应用页首屏显示 2×2 个入口，向下滑动查看其余应用，较长列表和详情采用分页。较大面板继续自动适配，无需重新编译。
+
+设备界面的布局回归检查使用真实 LVGL 对象、字体和渲染结果，覆盖页面、分页、键盘及弹窗：
+
+```bash
+tools/check_layout.sh
+QZ_LAYOUT_PANELS="320x240 480x320 320x320 480x240" tools/check_layout.sh
+```
+
+报告和 PPM 截图输出至 `build/layout-check/<分辨率>/`。检查工具使用本地样例数据，不启动核心服务、不修改设备设置。网页控制台在小屏通过页面选择器切换各功能，长内容在屏内区域滚动；使用 Node.js 和 Playwright 可运行 `node tools/check_web_layout.cjs`，截图输出至 `build/web-layout-check/`。Playwright 需要已安装 Chromium（`npx playwright install chromium`）。
 
 ## 排查
 
@@ -252,5 +261,4 @@ cd <Rockchip SDK>
 - 新增技能请提交为独立目录 + `SKILL.md`，不要改动核心代码。
 
 ## 许可证
-
-本项目与内置的语音核心 `xiaozhi_core/` 均以 **MIT** 发布，详见 [`LICENSE`](./LICENSE) 与 [`xiaozhi_core/LICENSE`](./xiaozhi_core/LICENSE)（Copyright © 2025 Hyrsoft）。
+MIT

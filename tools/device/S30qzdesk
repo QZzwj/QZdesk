@@ -1,0 +1,160 @@
+#!/bin/sh
+#
+# QZdesk 桌面自启脚本。放在 S30：排在设备节点与挂载之后、网络之前。
+#
+# 为什么不是原来的 S99：
+#   rcS 按字典序跑 init.d：
+#     S01seedrng S01syslogd S02klogd S02sysctl
+#     S10udev(设备节点) S20linkmount(oem 挂载) S20urandom S21appinit
+#     S40network S49ntp S50sshd S50telnet S50usbdevice(adb)
+#     S91smb S99_auto_reboot  <- 原来我就在这后面
+#   排在最后等于"等网络、ntp、ssh、smb 全跑完才画第一帧"，屏幕迟迟不亮。
+#   挪到 S30 后，挂载一完成就起界面，网络与核心连接在后台并行 —— 上机观感
+#   就是开机快了一截。代价是要自己确认 oem 已挂载、/dev/fb0 已就绪，所以下面
+#   有 READY_WAIT 就绪等待（等不到也照起，留给界面自己重试）。
+#
+# 只负责拉起界面进程：核心服务（xiaozhi_linux_rs）由界面按同一目录去找、去拉起、
+# 去重启，所以这里不管第二个进程。
+#
+# 字体、显示与触摸节点都在这里给默认值，要临时换设备节点改这里即可，不必重编程序：
+#   QZDESK_FONT   中文 TTF 字体路径
+#   QZDESK_FB     framebuffer 节点
+#   QZDESK_TOUCH  触摸输入节点
+#
+DAEMON=/oem/usr/bin/qzdesk_screen
+WORKDIR=/oem/usr/bin
+LOG=/var/log/qzdesk.log
+PIDFILE=/var/run/qzdesk.pid
+WIFI_KO=/oem/usr/lib/wifi   # RTL8723BS 驱动模块（镜像里没带时目录不存在，静默跳过）
+CAM_KO=/oem/usr/lib/camera  # SC3336 + rkcif/rkisp 驱动模块
+FW_SRC=/oem/usr/lib/firmware # WiFi 固件（开机补进 /lib/firmware）
+READY_WAIT=50           # 就绪等待轮数：50 × 100ms = 5 秒
+LOG_MAX=$((512 * 1024)) # 日志超过 512KB 就在启动时截断（免得越写越大拖慢写盘）
+
+export QZDESK_FONT=${QZDESK_FONT:-/oem/usr/share/fonts/NanoTikBazHei-Bold.ttf}
+export QZDESK_FB=${QZDESK_FB:-/dev/fb0}
+export QZDESK_TOUCH=${QZDESK_TOUCH:-/dev/input/event0}
+
+# 本脚本同时装在 rootfs /etc/init.d（rcS 跑）和 oem /oem/usr/etc/init.d（RkLunch 跑），
+# 没这个判断时两条路各起一次，两个界面进程抢同一个 framebuffer。
+running() {
+	# 1) 按 PID 文件判断（正常路径）
+	if [ -f "$PIDFILE" ]; then
+		pid=$(cat "$PIDFILE" 2>/dev/null)
+		[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+	fi
+	# 2) 兜底：按进程名判断。两个启动脚本（rcS 与 RkLunch）会同时跑，
+	#    只看 PID 文件会竞态起两份，两个进程抢 framebuffer/触摸 → 闪屏+误触。
+	[ -n "$(ps | grep '[q]zdesk_screen')" ]
+}
+
+ready() {
+	[ -x "$DAEMON" ] && [ -e "$QZDESK_FB" ] && [ -e "$QZDESK_FONT" ]
+}
+
+# WiFi：这块板子是 RTL8723BS（SDIO WiFi+BT），驱动模块放在 /oem/usr/lib/wifi。
+# 一定要在起界面之前加载好 —— 界面启动时会探测一次有没有无线网卡，好让无线页
+# 一进去就是可用状态。模块不在就静默跳过（镜像是纯有线的也不受影响）。
+# 只加载 cfg80211 + r8723bs：r8723bs 是 FullMAC SDIO 驱动，不走 mac80211
+# （Echo-Mate 的 insmod_wifi.sh 也是这么做的），多加载 mac80211 纯属浪费时间。
+load_wifi() {
+	# 固件：驱动写死从 /lib/firmware 读，而 rootfs 里没有，随包放在 oem，
+	# 这里开机补进去（rootfs 只读时拷不进去，驱动会 request_firmware 失败）。
+	if [ -d "$FW_SRC" ] && [ ! -e /lib/firmware/rtlwifi/rtl8723bs_nic.bin ]; then
+		mkdir -p /lib/firmware/rtlwifi /lib/firmware/rtlbt 2>/dev/null
+		cp -f "$FW_SRC"/rtlwifi/* /lib/firmware/rtlwifi/ 2>/dev/null
+		cp -f "$FW_SRC"/rtlbt/* /lib/firmware/rtlbt/ 2>/dev/null
+	fi
+
+	[ -d "$WIFI_KO" ] || return 0
+	[ -e /sys/class/net/wlan0 ] && return 0
+	for m in cfg80211 r8723bs; do
+		[ -f "$WIFI_KO/$m.ko" ] || continue
+		grep -q "^$m " /proc/modules 2>/dev/null && continue
+		insmod "$WIFI_KO/$m.ko" >>"$LOG" 2>&1
+	done
+	# 固件加载要一点时间（SDIO 探测 + 下载 firmware）
+	i=0
+	while [ "$i" -lt 20 ]; do
+		[ -e /sys/class/net/wlan0 ] && { echo "qzdesk: wlan0 就绪" >>"$LOG"; return 0; }
+		usleep 100000 2>/dev/null || sleep 1
+		i=$((i + 1))
+	done
+	echo "qzdesk: 等 wlan0 超时（模块加载了但没出网卡？查 dmesg | grep -i 8723）" >>"$LOG"
+}
+
+# 相机（SC3336 + rkcif/rkisp）：模块同样没进镜像，随包放在 /oem/usr/lib/camera。
+# 顺序是依赖顺序，不能换：rk_dvbm 是 ISP 的 buffer manager，sc3336 挂在 rkcif 上。
+# 界面已经起来之后再加载（见 start），万一某个模块把显示打乱，至少界面画过一帧；
+# 不想要相机（或它造成白屏）时，删掉 /oem/usr/lib/camera 或建一个 disable 文件即可。
+#
+# clr_unready_dev 是 Echo-Mate 的 insmod_ko.sh 里学的关键兜底：rkcif/rkisp 的
+# 异步 notifier 在传感器还没挂上时会把设备标记为 unready 而不注册 /dev/videoN，
+# 传感器后到就永远没有节点 —— 写 1 强制补注册（仅模块方式编译时有效，我们正是）。
+load_camera() {
+	[ -d "$CAM_KO" ] || return 0
+	[ -e "$CAM_KO/disable" ] && { echo "qzdesk: 相机模块已禁用（$CAM_KO/disable）" >>"$LOG"; return 0; }
+	# 顺序关键：video_rkcif 里打包着 mipi-csi2 桥驱动，它在 probe 时要求
+	# csi2-dphy-hw 已经就绪，否则直接 -22 硬失败（不是延迟探测），桥就永远
+	# 缺席，CIF 找不到远端传感器 —— 所以 dphy-hw/dphy 必须先于 rkcif 加载。
+	for m in rk_dvbm phy-rockchip-csi2-dphy-hw phy-rockchip-csi2-dphy video_rkcif video_rkisp sc3336; do
+		[ -f "$CAM_KO/$m.ko" ] || continue
+		grep -q "^$m " /proc/modules 2>/dev/null && continue
+		out=$(insmod "$CAM_KO/$m.ko" 2>&1)
+		[ -n "$out" ] && echo "qzdesk: 相机模块 $m: $out" >>"$LOG"
+	done
+	echo 1 > /sys/module/video_rkcif/parameters/clr_unready_dev 2>/dev/null
+	echo 1 > /sys/module/video_rkisp/parameters/clr_unready_dev 2>/dev/null
+	# 传感器 probe（I2C 读 CHIP_ID）+ MIPI 链路建立要一点时间，等节点出现
+	i=0
+	while [ "$i" -lt 30 ]; do
+		ls /dev/video* >/dev/null 2>&1 && { echo "qzdesk: 相机节点 $(ls /dev/video* | tr '\n' ' ')" >>"$LOG"; return 0; }
+		usleep 100000 2>/dev/null || sleep 1
+		i=$((i + 1))
+	done
+	echo "qzdesk: 等 /dev/video* 超时（查 dmesg | grep -iE 'sc3336|rkisp|rkcif'）" >>"$LOG"
+}
+
+wait_ready() {
+	i=0
+	while [ "$i" -lt "$READY_WAIT" ]; do
+		ready && return 0
+		usleep 100000 2>/dev/null || sleep 1
+		i=$((i + 1))
+	done
+	ready
+}
+
+start() {
+	running && { echo "qzdesk: 已在运行（pid $pid），跳过"; return 0; }
+	wait_ready || echo "qzdesk: 就绪等待超时，仍尝试启动（显示节点或字体可能还没到）"
+	[ -x "$DAEMON" ] || { echo "qzdesk: 找不到 $DAEMON"; return 1; }
+	mkdir -p /var/log /var/run
+	[ -f "$LOG" ] && [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -gt "$LOG_MAX" ] && : >"$LOG"
+	cd "$WORKDIR" || return 1
+	# 开机耗时基线：这里记一条 uptime，界面出图时自己再记一条，相减就是启动耗时
+	echo "qzdesk: 启动 uptime=$(cut -d' ' -f1 /proc/uptime)" >>"$LOG"
+	load_wifi
+	"$DAEMON" >>"$LOG" 2>&1 &
+	echo $! > "$PIDFILE"
+	echo "qzdesk: 已启动（pid $(cat $PIDFILE)），日志 $LOG"
+	# 界面先跑起来，再挂相机模块（相机初始化比较重，别挡住第一帧）
+	load_camera
+}
+
+stop() {
+	if [ -f "$PIDFILE" ]; then
+		kill "$(cat $PIDFILE)" 2>/dev/null
+		rm -f "$PIDFILE"
+	fi
+	killall qzdesk_screen 2>/dev/null
+	echo "qzdesk: 已停止"
+}
+
+case "$1" in
+	start)   start ;;
+	stop)    stop ;;
+	restart) stop; sleep 1; start ;;
+	status)  running && echo "qzdesk: 运行中（pid $pid）" || echo "qzdesk: 未运行" ;;
+	*)       echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

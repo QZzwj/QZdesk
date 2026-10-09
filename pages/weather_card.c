@@ -37,6 +37,8 @@ static lv_obj_t *detail_label;
 static lv_obj_t *place_label;
 /** 已经向核心要过现成快照（只问一次，之后靠推送）。 */
 static bool snapshot_requested;
+static bool card_is_narrow;
+static int card_width;
 /** 转圈开始的时刻（0 = 当前不在刷新），用于超时兜底。 */
 static uint32_t loading_started;
 /** 最近一次刷新是否已超时；用于把卡片明确保持在可重试状态。 */
@@ -98,8 +100,7 @@ static qz_icon_t icon_kind(const char *key, qz_color_token_t *tint)
 lv_obj_t *qz_weather_icon_create(lv_obj_t *parent, int size)
 {
     lv_obj_t *box = lv_obj_create(parent);
-    /* 画布就是图标的显示尺寸：资源按 16/24/40/72/96 烘焙，取最接近的一档，
-     * 矢量直出，不做位图缩放 */
+    /* 首页与详情页各自决定图标框尺寸，render 会把素材完整放入该框。 */
     lv_obj_set_size(box, size > 0 ? size : ICON_BOX, size > 0 ? size : ICON_BOX);
     make_plain(box);
     return box;
@@ -112,10 +113,22 @@ void qz_weather_icon_render(lv_obj_t *box, const char *key)
     if (!box) return;
     /* 只清图标画布：转圈是它的兄弟对象，不受影响。 */
     lv_obj_clean(box);
-    /* A8 蒙版按主题色染色：一套资源，浅色/深色主题都对。小屏紧凑版把画布放大
-     * 了，图标档位要跟着放大，否则大画布里躺着一个 40px 的小图标。 */
-    lv_obj_t *image = qz_icon_image(box, icon, qz_compact() ? 64 : ICON_BOX, qz_color(tint));
-    if (image) lv_obj_center(image);
+    /* 让图标内容跟随自己的框：详情页与首页卡片的尺寸不同。 */
+    lv_obj_update_layout(box);
+    int physical = lv_obj_get_width(box) < lv_obj_get_height(box)
+                       ? lv_obj_get_width(box) : lv_obj_get_height(box);
+    int design_size = (int)((int64_t)physical * QZ_SCALE_DEN / qz_scale_minnum());
+    lv_obj_t *image = qz_icon_image(box, icon, design_size, qz_color(tint));
+    if (image) {
+        const lv_image_dsc_t *source = lv_image_get_src(image);
+        /* qz_icon_image 选择的素材档可能比框大。所有面板都显式 fit，
+         * 再留一像素边缘，避免居中取整把描边推到框外。 */
+        int target = physical > 2 ? physical - 2 : physical;
+        int source_size = source->header.w > source->header.h
+                              ? source->header.w : source->header.h;
+        (lv_image_set_scale)(image, (uint32_t)(256 * target / source_size));
+        lv_obj_center(image);
+    }
 }
 
 /* ------------------------------------------------------------------------- *
@@ -176,9 +189,16 @@ void qz_weather_card_apply(const qzdesk_core_weather_t *weather)
 
     if (!weather->has_data) {
         /* 没有数据可显示：把原因写在最显眼的位置，并告诉用户能点一下重试。 */
-        message = weather->message[0] ? weather->message : "天气暂不可用";
+        /* 首页只显示状态摘要，完整错误原因在天气详情页内查看。 */
+        message = loading ? "正在刷新…" : "天气暂不可用";
         lv_obj_add_flag(temp_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_text_font(desc_label, qz_font_size(13), 0);
+        lv_obj_add_flag(icon_box, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_font(desc_label, qz_font_size(16), 0);
+        lv_obj_align(temp_row, LV_ALIGN_TOP_LEFT, 12, 8);
+        lv_obj_set_width(temp_row, card_width - 24);
+        lv_obj_align(desc_label, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_set_width(desc_label, lv_pct(100));
         lv_label_set_text(desc_label, message);
         lv_label_set_text(range_label, "");
         lv_label_set_text(detail_label, "");
@@ -188,7 +208,11 @@ void qz_weather_card_apply(const qzdesk_core_weather_t *weather)
     }
 
     lv_obj_clear_flag(temp_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_text_font(desc_label, qz_font_size(12), 0);
+    lv_obj_align(temp_row, LV_ALIGN_TOP_LEFT, 74, 8);
+    lv_obj_set_width(temp_row, card_is_narrow ? card_width - 86 : 126);
+    lv_obj_align(desc_label, LV_ALIGN_TOP_LEFT, 0, 38);
+    lv_obj_set_width(desc_label, lv_pct(100));
+    lv_obj_set_style_text_font(desc_label, qz_font_size(16), 0);
 
     snprintf(text, sizeof(text), "%d°", weather->temperature);
     lv_label_set_text(temp_label, text);
@@ -205,10 +229,15 @@ void qz_weather_card_apply(const qzdesk_core_weather_t *weather)
     snprintf(text, sizeof(text), "体感 %d° · 湿度 %d%%", weather->apparent, weather->humidity);
     lv_label_set_text(detail_label, text);
 
-    if (weather->updated[0] != '\0' && strcmp(weather->updated, "--:--") != 0) {
-        snprintf(text, sizeof(text), "%s · %s", weather->city, weather->updated);
+    if (strcmp(weather->status, "offline") == 0) {
+        /* 未联网：核心已停止请求，这里明确说一句，别让用户以为是天气服务坏了 */
+        snprintf(text, sizeof(text), "未联网%s%s",
+                 weather->updated[0] && strcmp(weather->updated, "--:--") != 0 ? " · " : "",
+                 weather->updated[0] && strcmp(weather->updated, "--:--") != 0 ? weather->updated : "");
+    } else if (weather->updated[0] != '\0' && strcmp(weather->updated, "--:--") != 0) {
+        snprintf(text, sizeof(text), stale ? "上次 · %s" : "更新 %s", weather->updated);
     } else {
-        snprintf(text, sizeof(text), "%s", weather->city);
+        snprintf(text, sizeof(text), "点击查看详情");
     }
     lv_label_set_text(place_label, text);
     /* 沿用上一次的数据时，时间那一行转成橙色：不吵，但看得出这不是刚取的。 */
@@ -251,12 +280,14 @@ static lv_obj_t *text_line(lv_obj_t *parent, int y, qz_color_token_t token)
     lv_obj_t *label = qz_text(parent, "", 10, qz_color(token));
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, TEXT_X, y);
     lv_obj_set_width(label, TEXT_W);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     return label;
 }
 
 lv_obj_t *qz_weather_card_create(lv_obj_t *parent, int x, int y, int width, int height)
 {
+    card_width = width;
+    card_is_narrow = width < height * 2;
     card = qz_card_button(parent, width, height);
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, y);
     lv_obj_add_event_cb(card, weather_tapped, LV_EVENT_CLICKED, NULL);
@@ -277,40 +308,35 @@ lv_obj_t *qz_weather_card_create(lv_obj_t *parent, int x, int y, int width, int 
     lv_obj_clear_flag(spinner, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
 
-    /* 温度与天气描述同排：温度大、描述小，字宽变化时自动贴在一起 */
+    /* 小卡片以温度为重点，城市可换两行；详细指标在点击后的页面查看。 */
+    lv_obj_set_size(icon_box, 46, 46);
+    lv_obj_align(icon_box, LV_ALIGN_TOP_LEFT, 12, 10);
+    lv_obj_set_size(spinner, 30, 30);
+    lv_obj_align(spinner, LV_ALIGN_TOP_LEFT, 20, 18);
+
     temp_row = lv_obj_create(card);
-    lv_obj_set_size(temp_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_align(temp_row, LV_ALIGN_TOP_LEFT, TEXT_X, 2);
+    lv_obj_set_size(temp_row, card_is_narrow ? width - 86 : 126, 60);
+    lv_obj_align(temp_row, LV_ALIGN_TOP_LEFT, 74, 8);
     make_plain(temp_row);
-    lv_obj_set_flex_flow(temp_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(temp_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(temp_row, 5, 0);
+    temp_label = qz_text(temp_row, "--°", 30, qz_color(QZ_TEXT));
+    lv_obj_align(temp_label, LV_ALIGN_TOP_LEFT, 0, 0);
+    desc_label = qz_text(temp_row, "", 16, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(desc_label, LV_ALIGN_TOP_LEFT, 0, 38);
+    lv_obj_set_width(desc_label, lv_pct(100));
+    lv_label_set_long_mode(desc_label, LV_LABEL_LONG_WRAP);
 
-    temp_label = qz_text(temp_row, "--°", 24, qz_color(QZ_TEXT));
-    desc_label = qz_text(temp_row, "", 12, qz_color(QZ_TEXT_SECONDARY));
-
-    range_label = text_line(card, 33, QZ_TEXT_TERTIARY);   /* 最高/最低 + 风速 */
-    detail_label = text_line(card, 47, QZ_TEXT_SECONDARY); /* 体感 + 湿度 */
-    place_label = text_line(card, 61, QZ_TEXT_TERTIARY);   /* 城市 + 更新时间 */
-
-    if (qz_compact()) {
-        /* 小屏：整卡压成一条横排 —— 图标 + 大温度 + 描述 + 城市，砍掉两行次要
-         * 信息（最高最低/体感湿度）。数字同样按"目标实际像素 ×1.5"写。 */
-        lv_obj_set_size(icon_box, 64, 64);
-        lv_obj_align(icon_box, LV_ALIGN_LEFT_MID, 12, 0);
-        lv_obj_set_size(spinner, 30, 30);
-        lv_obj_align(spinner, LV_ALIGN_LEFT_MID, 12 + (64 - 30) / 2, 0);
-        lv_obj_align(temp_row, LV_ALIGN_LEFT_MID, 88, 0);
-        lv_obj_set_style_pad_column(temp_row, 8, 0);
-        lv_obj_set_style_text_font(temp_label, qz_font_size(34), 0);
-        lv_obj_set_style_text_font(desc_label, qz_font_size(20), 0);
-        lv_obj_add_flag(range_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
-        /* 城市/更新时间贴右边，跟左边的温度分开 */
-        lv_obj_set_style_text_font(place_label, qz_font_size(18), 0);
-        lv_obj_set_style_text_align(place_label, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_obj_set_width(place_label, 150);
-        lv_obj_align(place_label, LV_ALIGN_RIGHT_MID, -16, 0);
+    range_label = text_line(card, 0, QZ_TEXT_TERTIARY);
+    detail_label = text_line(card, 0, QZ_TEXT_SECONDARY);
+    lv_obj_add_flag(range_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(detail_label, LV_OBJ_FLAG_HIDDEN);
+    place_label = qz_text(card, "", 16, qz_color(QZ_TEXT_TERTIARY));
+    lv_label_set_long_mode(place_label, LV_LABEL_LONG_WRAP);
+    if (card_is_narrow) {
+        lv_obj_set_width(place_label, width - 24);
+        lv_obj_align(place_label, LV_ALIGN_TOP_LEFT, 12, 76);
+    } else {
+        lv_obj_set_width(place_label, width - 226);
+        lv_obj_align(place_label, LV_ALIGN_TOP_LEFT, 214, 12);
     }
 
     /* 订阅核心事件：助手页拿着轮询，这里只加一条订阅，不会抢走它的包。 */

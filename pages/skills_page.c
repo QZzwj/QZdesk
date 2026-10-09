@@ -23,8 +23,59 @@ static lv_obj_t *service_label;
 static lv_obj_t *sheet_overlay;
 static lv_obj_t *sheet_title;
 static lv_obj_t *sheet_description;
-
 static qz_skill_t skills[QZ_SKILL_MAX];
+static lv_obj_t *list_page_label;
+static lv_obj_t *list_previous;
+static lv_obj_t *list_next;
+static int list_page;
+static int sheet_info_page;
+static int sheet_skill_index;
+
+#define COMPACT_SKILLS_PER_PAGE 1
+#define SHEET_INFO_CHARS 40
+
+/* Split at UTF-8 boundaries so every description remains readable, including
+ * long descriptions supplied by the service. The small screen never needs a
+ * scrolling sheet or an ellipsis to reach the remaining text. */
+static int description_chunk(const char *source, int page, char *out, size_t size)
+{
+    const char *start = source;
+    const char *cursor = source;
+    int characters = 0;
+    int pages = 1;
+    while (*cursor) {
+        if (characters && characters % SHEET_INFO_CHARS == 0) {
+            pages++;
+            if (pages - 1 == page) start = cursor;
+        }
+        cursor++;
+        while ((*cursor & 0xc0) == 0x80) cursor++;
+        characters++;
+    }
+    cursor = start;
+    for (int i = 0; *cursor && i < SHEET_INFO_CHARS; i++) {
+        cursor++;
+        while ((*cursor & 0xc0) == 0x80) cursor++;
+    }
+    size_t length = (size_t)(cursor - start);
+    if (length >= size) length = size - 1;
+    memcpy(out, start, length);
+    out[length] = '\0';
+    return pages;
+}
+
+static void sheet_info_changed(lv_event_t *event)
+{
+    const qz_skill_t *skill = &skills[sheet_skill_index];
+    const char *description = skill->description[0] ? skill->description : "未填写说明";
+    char text[QZ_SKILL_DESC_MAX];
+    int pages = description_chunk(description, 0, text, sizeof(text));
+    int direction = (int)(intptr_t)lv_event_get_user_data(event);
+    sheet_info_page = (sheet_info_page + direction + pages) % pages;
+    description_chunk(description, sheet_info_page, text, sizeof(text));
+    lv_label_set_text(sheet_description, text);
+}
+
 static int skill_count = -1;      /* -1 = the service could not be reached */
 static bool role_just_changed;
 
@@ -73,48 +124,12 @@ static void sheet_pick_role(lv_event_t *event)
     reload();
 }
 
-/** One tappable option inside the sheet. */
-static void sheet_option(lv_obj_t *panel, int y, const char *caption, const char *detail,
-                        bool current, int packed)
-{
-    lv_obj_t *row = lv_obj_create(panel);
-    lv_obj_set_size(row, lv_pct(100), 44);
-    lv_obj_align(row, LV_ALIGN_TOP_LEFT, 0, y);
-    lv_obj_set_style_radius(row, 12, 0);
-    qz_obj_set_bg_color(row, QZ_FILL, 0);
-    lv_obj_set_style_bg_opa(row, current ? (lv_opa_t)220 : LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    qz_add_press_feedback(row);
-    qz_add_touch_glint(row);
-    lv_obj_add_event_cb(row, sheet_pick_role, LV_EVENT_CLICKED, (void *)(intptr_t)packed);
-
-    lv_obj_t *title = qz_text(row, caption, 14, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 14, detail ? -8 : 0);
-    if (detail) {
-        lv_obj_t *hint = qz_text(row, detail, 10, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_align(hint, LV_ALIGN_LEFT_MID, 14, 10);
-    }
-    if (current) {
-        lv_obj_t *check = qz_symbol(row, LV_SYMBOL_OK, 14, qz_color(QZ_ACCENT));
-        lv_obj_align(check, LV_ALIGN_RIGHT_MID, -14, 0);
-    }
-}
-
 static void open_sheet(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
     if (index < 0 || index >= skill_count) return;
 
     const qz_skill_t *skill = &skills[index];
-    const char *descriptions[3] = {
-        "会话开始时注入正文，直接作为指令生效",
-        "平时不占用上下文，问题相关时才检索",
-        "保留在设备上，模型也看不到它",
-    };
-    const char *captions[3] = { "设为主技能", "设为备用", "关闭" };
     lv_obj_t *panel;
 
     close_sheet();
@@ -122,8 +137,8 @@ static void open_sheet(lv_event_t *event)
     lv_obj_add_event_cb(sheet_overlay, sheet_scrim_clicked, LV_EVENT_CLICKED, NULL);
 
     panel = lv_obj_create(sheet_overlay);
-    lv_obj_set_size(panel, QZ_DESIGN_W - 40, 268);
-    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 14);
+    lv_obj_set_size(panel, QZ_DESIGN_W - 40, 304);
+    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, qz_compact() ? 8 : 14);
     lv_obj_set_style_radius(panel, QZ_RADIUS_CARD, 0);
     qz_style_plate(panel);
     lv_obj_set_style_bg_opa(panel, (lv_opa_t)238, 0);
@@ -133,35 +148,55 @@ static void open_sheet(lv_event_t *event)
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
     sheet_title = qz_text(panel, skill->name, 16, qz_color(QZ_TEXT));
+    lv_obj_set_width(sheet_title, lv_pct(100));
+    lv_label_set_long_mode(sheet_title, LV_LABEL_LONG_WRAP);
     lv_obj_align(sheet_title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     sheet_description = qz_text(panel, skill->description[0] ? skill->description
                                                             : "未填写说明",
                                 10, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_set_width(sheet_description, lv_pct(100));
-    lv_label_set_long_mode(sheet_description, LV_LABEL_LONG_DOT);
-    lv_obj_align(sheet_description, LV_ALIGN_TOP_LEFT, 0, 22);
+    lv_label_set_long_mode(sheet_description, LV_LABEL_LONG_WRAP);
+    lv_obj_align(sheet_description, LV_ALIGN_TOP_LEFT, 0, 72);
 
-    /* Display order is 主技能 / 备用 / 关闭, which is not the enum order
-     * (none = 0), so map it explicitly instead of casting the loop index. */
-    static const qz_skill_role_t order[3] = {
-        QZ_SKILL_ROLE_PRIMARY, QZ_SKILL_ROLE_SECONDARY, QZ_SKILL_ROLE_NONE,
-    };
-    for (int i = 0; i < 3; i++) {
-        qz_skill_role_t role = order[i];
-        sheet_option(panel, 42 + i * 48, captions[i], descriptions[i],
-                     skill->role == role, (index << 2) | (int)role);
+    {
+        char chunk[QZ_SKILL_DESC_MAX];
+        const char *description = skill->description[0] ? skill->description : "未填写说明";
+        sheet_skill_index = index;
+        sheet_info_page = 0;
+        int pages = description_chunk(description, 0, chunk, sizeof(chunk));
+        lv_label_set_text(sheet_description, chunk);
+        if (pages > 1) {
+            lv_obj_t *previous = qz_button(panel, "上段说明", 132, 36);
+            lv_obj_align(previous, LV_ALIGN_TOP_LEFT, 0, 116);
+            lv_obj_add_event_cb(previous, sheet_info_changed, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)-1);
+            lv_obj_t *next = qz_button(panel, "下段说明", 132, 36);
+            lv_obj_align(next, LV_ALIGN_TOP_RIGHT, 0, 116);
+            lv_obj_add_event_cb(next, sheet_info_changed, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)1);
+        }
+        const qz_skill_role_t roles[] = {
+            QZ_SKILL_ROLE_PRIMARY, QZ_SKILL_ROLE_SECONDARY, QZ_SKILL_ROLE_NONE,
+        };
+        const char *labels[] = { "主技能", "备用", "关闭" };
+        for (int i = 0; i < 3; i++) {
+            lv_obj_t *choice = qz_button(panel, labels[i], 128, 44);
+            lv_obj_align(choice, LV_ALIGN_TOP_LEFT, i * 140, 154);
+            if (skill->role == roles[i]) qz_style_primary_button(choice);
+            lv_obj_add_event_cb(choice, sheet_pick_role, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)((index << 2) | (int)roles[i]));
+        }
+        lv_obj_t *notice = qz_text(panel, "主技能直接生效，备用按需检索\n切换后下一条消息重建会话",
+                                    14, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_set_width(notice, lv_pct(100));
+        lv_obj_align(notice, LV_ALIGN_TOP_LEFT, 0, 204);
+        lv_obj_t *cancel = qz_button(panel, "取消", 132, 36);
+        lv_obj_align(cancel, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+        lv_obj_add_event_cb(cancel, sheet_cancel, LV_EVENT_CLICKED, NULL);
+        return;
     }
 
-    /* 角色只影响之后新建的会话：主技能正文是在会话初始化时下发的，所以切换
-     * 后当前会话会重建一次。这一点必须写出来，否则用户会以为切换没生效。 */
-    lv_obj_t *notice = qz_text(panel, "切换后当前会话重建，下一条消息生效",
-                              10, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(notice, LV_ALIGN_TOP_LEFT, 2, 188);
-
-    lv_obj_t *cancel = qz_button(panel, "取消", 88, 32);
-    lv_obj_align(cancel, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    lv_obj_add_event_cb(cancel, sheet_cancel, LV_EVENT_CLICKED, NULL);
 }
 
 /* ------------------------------------------------------------------------- *
@@ -169,11 +204,31 @@ static void open_sheet(lv_event_t *event)
  * ------------------------------------------------------------------------- */
 
 static void skill_row_clicked(lv_event_t *event);
+static void rebuild(void);
+
+static void list_page_changed(lv_event_t *event)
+{
+    list_page += (int)(intptr_t)lv_event_get_user_data(event);
+    rebuild();
+}
 
 static void rebuild(void)
 {
     if (!list_card) return;
     lv_obj_clean(list_card);
+    int pages = skill_count > 0 ? (skill_count + COMPACT_SKILLS_PER_PAGE - 1) /
+                                  COMPACT_SKILLS_PER_PAGE : 1;
+    if (list_page >= pages) list_page = pages - 1;
+    if (list_page < 0) list_page = 0;
+    if (list_page_label) {
+        char page_text[32];
+        snprintf(page_text, sizeof(page_text), "%d / %d", list_page + 1, pages);
+        lv_label_set_text(list_page_label, page_text);
+        if (list_page == 0) lv_obj_add_state(list_previous, LV_STATE_DISABLED);
+        else lv_obj_remove_state(list_previous, LV_STATE_DISABLED);
+        if (list_page == pages - 1) lv_obj_add_state(list_next, LV_STATE_DISABLED);
+        else lv_obj_remove_state(list_next, LV_STATE_DISABLED);
+    }
 
     if (skill_count <= 0) {
         /* The card is a flex column, which ignores align on direct children, so
@@ -195,10 +250,13 @@ static void rebuild(void)
         return;
     }
 
-    for (int i = 0; i < skill_count; i++) {
+    int first = list_page * COMPACT_SKILLS_PER_PAGE;
+    int end = first + COMPACT_SKILLS_PER_PAGE;
+    if (end > skill_count) end = skill_count;
+    for (int i = first; i < end; i++) {
         const qz_skill_t *skill = &skills[i];
         lv_obj_t *row = lv_obj_create(list_card);
-        lv_obj_set_size(row, lv_pct(100), ROW_H);
+        lv_obj_set_size(row, lv_pct(100), 140);
         qz_style_row(row);
         lv_obj_set_style_radius(row, 0, 0);
         lv_obj_set_style_border_width(row, 1, 0);
@@ -218,7 +276,7 @@ static void rebuild(void)
                            : skill->role == QZ_SKILL_ROLE_SECONDARY ? QZ_ACCENT_DARK
                                                                   : QZ_TEXT_SECONDARY;
         lv_obj_t *pill = lv_obj_create(row);
-        lv_obj_set_size(pill, 54, 20);
+        lv_obj_set_size(pill, qz_compact() ? 74 : 54, qz_compact() ? 30 : 20);
         lv_obj_align(pill, LV_ALIGN_LEFT_MID, CARD_PAD, 0);
         lv_obj_set_style_radius(pill, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(pill, qz_color(pill_color), 0);
@@ -231,18 +289,11 @@ static void rebuild(void)
                                             qz_color(pill_text));
         lv_obj_center(pill_text_label);
 
-        lv_obj_t *name = qz_text(row, skill->name, 13, qz_color(QZ_TEXT));
-        lv_obj_align(name, LV_ALIGN_TOP_LEFT, CARD_PAD + 62, 9);
-        lv_obj_t *description = qz_text(row,
-                                        skill->description[0] ? skill->description
-                                                              : "未填写说明",
-                                        10, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_set_width(description, CONTENT_W - CARD_PAD - 62 - CARD_PAD - 14);
-        /* A fixed one line height is what makes LONG_DOT ellipsise: without it
-         * LVGL wraps the description and it spills out of the row. */
-        lv_obj_set_height(description, 13);
-        lv_label_set_long_mode(description, LV_LABEL_LONG_DOT);
-        lv_obj_align(description, LV_ALIGN_TOP_LEFT, CARD_PAD + 62, 27);
+        lv_obj_t *name = qz_text(row, skill->name, qz_compact() ? 16 : 13, qz_color(QZ_TEXT));
+        lv_obj_set_width(name, CONTENT_W - CARD_PAD * 2 - (qz_compact() ? 116 : 96));
+        lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID,
+                     CARD_PAD + (qz_compact() ? 86 : 62), 0);
 
         lv_obj_t *chev = qz_chevron(row, qz_color(QZ_TEXT_TERTIARY), 14);
         lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -CARD_PAD, 0);
@@ -286,7 +337,8 @@ static void reload(void)
         } else if (service_label) {
             char address[32];
             qz_device_ip(address, sizeof(address));
-            snprintf(text, sizeof(text), "浏览器访问 %s:8080 可编辑或新增", address);
+            snprintf(text, sizeof(text), qz_compact() ? "编辑与新增：%s:8080"
+                                                     : "浏览器访问 %s:8080 可编辑或新增", address);
             lv_label_set_text(service_label, text);
             qz_obj_set_text_color(service_label, QZ_TEXT_TERTIARY, 0);
         }
@@ -319,29 +371,31 @@ lv_obj_t *qz_skill_page_create(lv_obj_t *apps_screen)
     qz_style_screen(skill_screen);
 
     lv_obj_t *toolbar = lv_obj_create(skill_screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 48);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
-    lv_obj_t *back = qz_icon_button(toolbar, LV_SYMBOL_LEFT, 30);
+    lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, back_clicked, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *title = qz_text(toolbar, "技能", 15, qz_color(QZ_TEXT));
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_t *refresh = qz_icon_button(toolbar, LV_SYMBOL_REFRESH, 30);
+    lv_obj_t *refresh = qz_icon_button(toolbar, LV_SYMBOL_REFRESH, qz_compact() ? 40 : 30);
     lv_obj_align(refresh, LV_ALIGN_RIGHT_MID, -8, 0);
     lv_obj_add_event_cb(refresh, refresh_clicked, LV_EVENT_CLICKED, NULL);
 
-    summary_label = qz_text(skill_screen, "--", 12, qz_color(QZ_TEXT));
-    lv_obj_align(summary_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 54);
+    summary_label = qz_text(skill_screen, "--", qz_compact() ? 16 : 12, qz_color(QZ_TEXT));
+    lv_obj_align(summary_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 58);
     service_label = qz_text(skill_screen, "", 10, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(service_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 72);
+    lv_obj_set_width(service_label, CONTENT_W);
+    lv_label_set_long_mode(service_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(service_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 80);
 
     list_card = lv_obj_create(skill_screen);
-    lv_obj_set_size(list_card, CONTENT_W, 176);
-    lv_obj_align(list_card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 90);
+    lv_obj_set_size(list_card, CONTENT_W, 144);
+    lv_obj_align(list_card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 106);
     lv_obj_set_style_radius(list_card, QZ_RADIUS_CARD, 0);
     qz_style_plate(list_card);
     lv_obj_set_style_pad_all(list_card, 0, 0);
@@ -350,6 +404,19 @@ lv_obj_t *qz_skill_page_create(lv_obj_t *apps_screen)
     lv_obj_set_flex_align(list_card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_set_scrollbar_mode(list_card, LV_SCROLLBAR_MODE_OFF);
+    {
+        lv_obj_clear_flag(list_card, LV_OBJ_FLAG_SCROLLABLE);
+        list_previous = qz_button(skill_screen, "上一页", 128, 44);
+        lv_obj_align(list_previous, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 266);
+        lv_obj_add_event_cb(list_previous, list_page_changed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)-1);
+        list_next = qz_button(skill_screen, "下一页", 128, 44);
+        lv_obj_align(list_next, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 266);
+        lv_obj_add_event_cb(list_next, list_page_changed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)1);
+        list_page_label = qz_text(skill_screen, "1 / 1", 16, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_align(list_page_label, LV_ALIGN_TOP_MID, 0, 279);
+    }
 
     /* No fetch here: the page is built while the app starts, and the service
      * is read when the page is actually opened. */

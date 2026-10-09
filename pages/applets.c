@@ -3,8 +3,6 @@
 #include "config.h"
 #include "qzdesk_core.h"
 #include "smarthome.h"
-#include "face_camera.h"
-#include "camera_preview.h"
 #include "web_client.h"
 #include <stdio.h>
 #include <stdint.h>
@@ -22,6 +20,13 @@
 static lv_obj_t *screens[QZ_APPLET_COUNT];
 static lv_obj_t *apps_screen_ref;
 
+static void set_page_button_enabled(lv_obj_t *button, bool enabled)
+{
+    if (!button) return;
+    if (enabled) lv_obj_remove_state(button, LV_STATE_DISABLED);
+    else lv_obj_add_state(button, LV_STATE_DISABLED);
+}
+
 static void go_back(lv_event_t *event)
 {
     (void)event;
@@ -31,15 +36,15 @@ static void go_back(lv_event_t *event)
 static lv_obj_t *make_toolbar(lv_obj_t *screen, const char *title)
 {
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 48);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
-    lv_obj_t *back = qz_icon_button(toolbar, LV_SYMBOL_LEFT, 30);
+    lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, go_back, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *label = qz_text(toolbar, title, 15, qz_color(QZ_TEXT));
+    lv_obj_t *label = qz_text(toolbar, title, qz_compact() ? 18 : 15, qz_color(QZ_TEXT));
     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
     return toolbar;
 }
@@ -69,11 +74,12 @@ static lv_obj_t *stat_card(lv_obj_t *screen, int x, int width, const char *symbo
     lv_obj_t *glyph = qz_symbol(icon, symbol, 15, qz_color(mark));
     lv_obj_center(glyph);
 
-    lv_obj_t *value = qz_text(card, "--", 16, qz_color(QZ_TEXT));
+    lv_obj_t *value = qz_text(card, "--", qz_compact() ? 17 : 16, qz_color(QZ_TEXT));
+    lv_obj_set_width(value, width - CARD_PAD * 2);
     lv_obj_align(value, LV_ALIGN_TOP_LEFT, CARD_PAD, 50);
 
     lv_obj_t *hint = qz_text(card, caption, 10, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, CARD_PAD, 74);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, CARD_PAD, qz_compact() ? 72 : 74);
     return value;
 }
 
@@ -96,8 +102,11 @@ static void status_refresh(void)
         long up = (long)si.uptime;
         if (up < 90 * 60) {
             snprintf(text, sizeof(text), "%ld 分钟", up / 60);
+        } else if (qz_compact() && up >= 24 * 3600) {
+            snprintf(text, sizeof(text), "%ld天%ld时", up / 86400, (up % 86400) / 3600);
         } else {
-            snprintf(text, sizeof(text), "%ld 时 %02ld 分", up / 3600, (up % 3600) / 60);
+            snprintf(text, sizeof(text), qz_compact() ? "%ld时%02ld分" : "%ld 时 %02ld 分",
+                     up / 3600, (up % 3600) / 60);
         }
         lv_label_set_text(status_uptime, text);
         snprintf(text, sizeof(text), "%lu MB",
@@ -151,7 +160,9 @@ static void build_status_screen(void)
     lv_obj_set_style_clip_corner(card, true, 0);
 
     const char *keys[] = { "固件版本", "当前 IP", "LVGL 内存", "界面框架" };
-    const char *values[] = { "1.0.0", NULL, NULL, "LVGL 9 · 480x320" };
+    char framework[32];
+    snprintf(framework, sizeof(framework), "LVGL 9 · %dx%d", (int)qz_panel_w, (int)qz_panel_h);
+    const char *values[] = { "1.0.0", NULL, NULL, framework };
     for (int i = 0; i < 4; i++) {
         lv_obj_t *key = qz_text(card, keys[i], 13, qz_color(QZ_TEXT));
         lv_obj_align(key, LV_ALIGN_TOP_LEFT, CARD_PAD, i * 37 + 12);
@@ -205,6 +216,11 @@ static lv_obj_t *add_overlay;
 static lv_obj_t *add_hour_roller;
 static lv_obj_t *add_minute_roller;
 static lv_obj_t *add_daily_switch;
+static lv_obj_t *reminder_page_label;
+static lv_obj_t *reminder_previous;
+static lv_obj_t *reminder_next;
+static int reminder_page;
+#define COMPACT_REMINDERS_PER_PAGE 2
 
 static void hide_banner(lv_timer_t *timer)
 {
@@ -272,10 +288,28 @@ static bool reminders_reload(void)
 }
 
 static void remove_reminder(lv_event_t *event);
+static void rebuild_reminders(void);
+
+static void reminder_page_changed(lv_event_t *event)
+{
+    reminder_page += (int)(intptr_t)lv_event_get_user_data(event);
+    rebuild_reminders();
+}
 
 static void rebuild_reminders(void)
 {
     lv_obj_clean(reminder_list);
+    int pages = reminder_count > 0 ? (reminder_count + COMPACT_REMINDERS_PER_PAGE - 1) /
+                                     COMPACT_REMINDERS_PER_PAGE : 1;
+    if (reminder_page >= pages) reminder_page = pages - 1;
+    if (reminder_page < 0) reminder_page = 0;
+    if (reminder_page_label) {
+        char text[32];
+        snprintf(text, sizeof(text), "%d / %d", reminder_page + 1, pages);
+        lv_label_set_text(reminder_page_label, text);
+        set_page_button_enabled(reminder_previous, reminder_page > 0);
+        set_page_button_enabled(reminder_next, reminder_page + 1 < pages);
+    }
     if (reminder_count == 0) {
         lv_obj_t *empty = qz_text(reminder_list, "还没有提醒，点击下方按钮添加", 12,
                                   qz_color(QZ_TEXT_TERTIARY));
@@ -283,10 +317,14 @@ static void rebuild_reminders(void)
         return;
     }
 
-    for (int i = 0; i < reminder_count; i++) {
+    int first = reminder_page * COMPACT_REMINDERS_PER_PAGE;
+    int end = first + COMPACT_REMINDERS_PER_PAGE;
+    if (end > reminder_count) end = reminder_count;
+    for (int i = first; i < end; i++) {
         lv_obj_t *row = lv_obj_create(reminder_list);
-        lv_obj_set_size(row, CONTENT_W, 44);
-        lv_obj_align(row, LV_ALIGN_TOP_LEFT, 0, (int32_t)i * 46 + 3);
+        lv_obj_set_size(row, lv_pct(100), 78);
+        lv_obj_align(row, LV_ALIGN_TOP_LEFT, 0,
+                     (int32_t)(i - first) * 80 + 2);
         lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
@@ -294,20 +332,20 @@ static void rebuild_reminders(void)
 
         char clock[16];
         snprintf(clock, sizeof(clock), "%02d:%02d", reminders[i].hour, reminders[i].minute);
-        lv_obj_t *time_label = qz_text(row, clock, 17, qz_color(QZ_TEXT));
+        lv_obj_t *time_label = qz_text(row, clock, qz_compact() ? 20 : 17, qz_color(QZ_TEXT));
         lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 14, 0);
 
         lv_obj_t *name = qz_text(row, reminders[i].label, 12, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_set_width(name, reminders[i].daily ? 74 : 100);
-        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-        lv_obj_align(name, LV_ALIGN_LEFT_MID, 78, 0);
+        lv_obj_set_width(name, CONTENT_W - 166);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, 98, reminders[i].daily ? -9 : 0);
 
         if (reminders[i].daily) {
             lv_obj_t *chip = qz_text(row, "每日", 10, qz_color(QZ_ACCENT_TEXT));
-            lv_obj_align(chip, LV_ALIGN_LEFT_MID, 122, 0);
+            lv_obj_align(chip, LV_ALIGN_LEFT_MID, 98, 22);
         }
 
-        lv_obj_t *remove = qz_icon_button(row, LV_SYMBOL_CLOSE, 28);
+        lv_obj_t *remove = qz_icon_button(row, LV_SYMBOL_CLOSE, qz_compact() ? 40 : 28);
         lv_obj_align(remove, LV_ALIGN_RIGHT_MID, -12, 0);
         /* 删除按核心的 id，而不是这一行的下标：列表随时可能被语音改动过 */
         lv_obj_set_user_data(remove, (void *)(intptr_t)reminders[i].id);
@@ -440,11 +478,11 @@ static void open_add_modal(lv_event_t *event)
     lv_obj_align(daily_caption, LV_ALIGN_TOP_LEFT, 0, 140);
     add_daily_switch = lv_switch_create(panel);
     qz_style_switch(add_daily_switch);
-    lv_obj_set_size(add_daily_switch, 42, 26);
+    lv_obj_set_size(add_daily_switch, qz_compact() ? 60 : 42, qz_compact() ? 32 : 26);
     lv_obj_align(add_daily_switch, LV_ALIGN_TOP_RIGHT, 0, 136);
 
     lv_obj_t *actions = lv_obj_create(panel);
-    lv_obj_set_size(actions, lv_pct(100), 36);
+    lv_obj_set_size(actions, lv_pct(100), qz_compact() ? 44 : 36);
     lv_obj_align(actions, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_opa(actions, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(actions, 0, 0);
@@ -455,10 +493,10 @@ static void open_add_modal(lv_event_t *event)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *cancel = qz_button(actions, "取消", 88, 32);
+    lv_obj_t *cancel = qz_button(actions, "取消", 88, qz_compact() ? 44 : 32);
     lv_obj_add_event_cb(cancel, close_add_modal, LV_EVENT_CLICKED, NULL);
     lv_obj_t *confirm = lv_button_create(actions);
-    lv_obj_set_size(confirm, 96, 32);
+    lv_obj_set_size(confirm, 96, qz_compact() ? 44 : 32);
     qz_style_primary_button(confirm);
     lv_obj_t *caption = qz_text(confirm, "确定", 14, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_center(caption);
@@ -483,8 +521,8 @@ static void build_reminder_screen(void)
     screens[QZ_APPLET_REMINDER] = screen;
     make_toolbar(screen, "定时提醒");
 
-    reminder_list = make_card(screen, 56, 200);
-    reminder_banner = make_card(screen, 56, 38);
+    reminder_list = make_card(screen, 56, 166);
+    reminder_banner = make_card(screen, 56, 64);
     /* A banner is chrome floating over the page, so it is the one surface here
      * that keeps a shadow; the fill itself stays a plain white plate. */
     qz_obj_set_bg_color(reminder_banner, QZ_CARD, 0);
@@ -498,6 +536,8 @@ static void build_reminder_screen(void)
     lv_obj_t *bell = qz_symbol(reminder_banner, LV_SYMBOL_BELL, 15, qz_color(QZ_ACCENT));
     lv_obj_align(bell, LV_ALIGN_LEFT_MID, CARD_PAD, 0);
     reminder_banner_text = qz_text(reminder_banner, "", 12, qz_color(QZ_TEXT));
+    lv_obj_set_width(reminder_banner_text, CONTENT_W - CARD_PAD * 2 - 24);
+    lv_label_set_long_mode(reminder_banner_text, LV_LABEL_LONG_WRAP);
     lv_obj_align(reminder_banner_text, LV_ALIGN_LEFT_MID, CARD_PAD + 24, 0);
 
     lv_obj_t *add = lv_button_create(screen);
@@ -509,6 +549,19 @@ static void build_reminder_screen(void)
     lv_obj_t *plus = qz_symbol(add, LV_SYMBOL_PLUS, 15, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_align(plus, LV_ALIGN_CENTER, -42, 0);
     lv_obj_add_event_cb(add, open_add_modal, LV_EVENT_CLICKED, NULL);
+
+    {
+        reminder_previous = qz_button(screen, "上一页", 116, 40);
+        lv_obj_align(reminder_previous, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 222);
+        lv_obj_add_event_cb(reminder_previous, reminder_page_changed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)-1);
+        reminder_next = qz_button(screen, "下一页", 116, 40);
+        lv_obj_align(reminder_next, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 222);
+        lv_obj_add_event_cb(reminder_next, reminder_page_changed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)1);
+        reminder_page_label = qz_text(screen, "1 / 1", 16, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_align(reminder_page_label, LV_ALIGN_TOP_MID, 0, 233);
+    }
 
     reminder_count = 0;
     /* 建页时先拉一次：核心可能已经装着语音加过的提醒 */
@@ -680,7 +733,7 @@ static void build_pomodoro_screen(void)
     pomo_phase_chip = qz_text(pomo_arc, "专注中", 11, qz_color(QZ_ACCENT_TEXT));
     lv_obj_align(pomo_phase_chip, LV_ALIGN_CENTER, 0, -38);
 
-    pomo_clock = qz_text(pomo_arc, "25:00", 30, qz_color(QZ_TEXT));
+    pomo_clock = qz_text(pomo_arc, "25:00", qz_compact() ? 36 : 30, qz_color(QZ_TEXT));
     lv_obj_align(pomo_clock, LV_ALIGN_CENTER, 0, -4);
 
     pomo_count = qz_text(pomo_arc, "已完成 0 个番茄", 10, qz_color(QZ_TEXT_TERTIARY));
@@ -711,6 +764,14 @@ static lv_obj_t *control_core_value;
 static lv_obj_t *control_hub_chip;
 static lv_obj_t *control_hint;
 static lv_obj_t *control_device_list;
+static lv_obj_t *control_local_card;
+static lv_obj_t *control_hub_card;
+static lv_obj_t *control_local_tab;
+static lv_obj_t *control_devices_tab;
+static lv_obj_t *control_page_label;
+static lv_obj_t *control_previous;
+static lv_obj_t *control_next;
+static int control_page;
 /* Neutral defaults; overwritten with the real values when the page loads. */
 static int control_volume = 65;
 static int control_backlight = 40;
@@ -775,7 +836,7 @@ static void device_row(lv_obj_t *parent, int index, int y)
     char state_text[16];
 
     lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_size(row, lv_pct(100), 46);
+    lv_obj_set_size(row, lv_pct(100), 80);
     lv_obj_align(row, LV_ALIGN_TOP_LEFT, 0, y);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
@@ -796,10 +857,10 @@ static void device_row(lv_obj_t *parent, int index, int y)
     }
     lv_obj_t *name = qz_text(row, device->name, 13, qz_color(QZ_TEXT));
     lv_obj_set_width(name, lv_pct(46));
-    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
     lv_obj_align(name, LV_ALIGN_TOP_LEFT, 50, 7);
     lv_obj_t *hint = qz_text(row, sub, 10, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 50, 26);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 50, 60);
 
     /* 还没上报过状态的设备显示 "--"，而不是假装它是关着的 */
     if (!device->has_state) {
@@ -810,11 +871,11 @@ static void device_row(lv_obj_t *parent, int index, int y)
     lv_obj_t *state = qz_text(row, state_text, 13,
                               qz_color(device->state && device->has_state ? QZ_ACCENT_TEXT
                                                                          : QZ_TEXT_SECONDARY));
-    lv_obj_align(state, LV_ALIGN_RIGHT_MID, -60, 0);
+    lv_obj_align(state, LV_ALIGN_RIGHT_MID, -86, 0);
 
     lv_obj_t *toggle = lv_switch_create(row);
     qz_style_switch(toggle);
-    lv_obj_set_size(toggle, 40, 24);
+    lv_obj_set_size(toggle, 60, 32);
     lv_obj_align(toggle, LV_ALIGN_RIGHT_MID, -10, 0);
     if (device->has_state && device->state) lv_obj_add_state(toggle, LV_STATE_CHECKED);
     lv_obj_set_user_data(toggle, (void *)(intptr_t)index);
@@ -826,8 +887,6 @@ static void control_reload(void)
 {
     qz_hub_status_t hub;
     char text[64];
-    int y = 0;
-
     control_device_count = qz_devices_fetch(control_devices, QZ_DEVICE_MAX, &hub);
 
     if (control_hub_chip) {
@@ -851,7 +910,8 @@ static void control_reload(void)
     if (control_hint) {
         char address[32];
         if (control_device_count < 0) {
-            snprintf(text, sizeof(text), "本地服务未响应，点下方重试");
+            snprintf(text, sizeof(text), qz_compact() ? "核心未响应，点顶部重连"
+                                                     : "本地服务未响应，点下方重试");
             lv_label_set_text(control_hint, text);
             lv_obj_clear_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
         } else if (!hub.enabled || !hub.connected) {
@@ -866,18 +926,25 @@ static void control_reload(void)
 
     if (!control_device_list) return;
     lv_obj_clean(control_device_list);
+    int pages = control_device_count > 0 ? control_device_count : 1;
+    if (control_page >= pages) control_page = pages - 1;
+    if (control_page < 0) control_page = 0;
+    if (control_page_label) {
+        char page_text[32];
+        snprintf(page_text, sizeof(page_text), "%d / %d", control_page + 1, pages);
+        lv_label_set_text(control_page_label, page_text);
+        set_page_button_enabled(control_previous, control_page > 0);
+        set_page_button_enabled(control_next, control_page + 1 < pages);
+    }
     if (control_device_count <= 0) {
         lv_obj_t *empty = qz_text(control_device_list, "还没有局域网设备", 12,
                                   qz_color(QZ_TEXT_TERTIARY));
         lv_obj_align(empty, LV_ALIGN_TOP_LEFT, 12, 10);
-        lv_obj_set_height(control_device_list, 42);
+        lv_obj_set_height(control_device_list, 80);
         return;
     }
-    for (int i = 0; i < control_device_count; i++) {
-        device_row(control_device_list, i, y);
-        y += 48;
-    }
-    lv_obj_set_height(control_device_list, y);
+    device_row(control_device_list, control_page, 0);
+    lv_obj_set_height(control_device_list, 80);
 }
 
 static void hub_refresh_clicked(lv_event_t *event)
@@ -922,160 +989,157 @@ static void reconnect_core(lv_event_t *event)
     control_reload_later();
 }
 
-static void build_control_screen(void)
+static void control_page_changed(lv_event_t *event)
 {
-    lv_obj_t *screen = lv_obj_create(NULL);
-    qz_style_screen(screen);
-    screens[QZ_APPLET_CONTROL] = screen;
-    make_toolbar(screen, "设备控制");
+    control_page += (int)(intptr_t)lv_event_get_user_data(event);
+    control_reload();
+}
 
-    /* 这一页会随局域网设备数量变高（本机开关 + 任意多台设备），所以内容放在
-     * 一个可滚动的列容器里，而不是像别的页面那样按坐标摆死。 */
-    lv_obj_t *page = lv_obj_create(screen);
-    lv_obj_set_size(page, QZ_DESIGN_W, QZ_DESIGN_H - QZ_TOOLBAR_H - 4);
-    lv_obj_align(page, LV_ALIGN_TOP_LEFT, 0, QZ_TOOLBAR_H);
-    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(page, 0, 0);
-    lv_obj_set_style_pad_left(page, QZ_GUTTER, 0);
-    lv_obj_set_style_pad_right(page, QZ_GUTTER, 0);
-    lv_obj_set_style_pad_top(page, 6, 0);
-    lv_obj_set_style_pad_bottom(page, 16, 0);
-    lv_obj_set_style_pad_row(page, 10, 0);
-    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
-    lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_OFF);
+static void control_tab_changed(lv_event_t *event)
+{
+    bool devices = (intptr_t)lv_event_get_user_data(event) != 0;
+    if (devices) {
+        lv_obj_add_flag(control_local_card, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(control_hub_card, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(control_previous, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(control_next, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(control_page_label, LV_OBJ_FLAG_HIDDEN);
+        control_reload();
+    } else {
+        lv_obj_clear_flag(control_local_card, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(control_hub_card, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(control_previous, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(control_next, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(control_page_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    qz_obj_set_bg_color(control_local_tab, devices ? QZ_FILL : QZ_ACCENT_TINT, 0);
+    qz_obj_set_bg_color(control_devices_tab, devices ? QZ_ACCENT_TINT : QZ_FILL, 0);
+}
 
-    /* 声音 / 背光 / 提示音 */
-    lv_obj_t *card = lv_obj_create(page);
-    lv_obj_set_size(card, lv_pct(100), 176);
-    lv_obj_set_style_radius(card, QZ_RADIUS_CARD, 0);
-    qz_style_plate(card);
-    lv_obj_set_style_pad_all(card, 0, 0);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+/* A fixed local view and a paged device view leave room for readable labels
+ * and 30px controls at the minimum panel size. Dynamic device counts never
+ * increase the height of the screen. */
+static void build_compact_control(lv_obj_t *screen, lv_obj_t *toolbar)
+{
+    lv_obj_t *reconnect = qz_icon_button(toolbar, LV_SYMBOL_REFRESH, 40);
+    lv_obj_align(reconnect, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_obj_add_event_cb(reconnect, reconnect_core, LV_EVENT_CLICKED, NULL);
 
+    control_local_tab = qz_button(screen, "本机", 216, 40);
+    lv_obj_align(control_local_tab, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 58);
+    qz_obj_set_bg_color(control_local_tab, QZ_ACCENT_TINT, 0);
+    lv_obj_add_event_cb(control_local_tab, control_tab_changed, LV_EVENT_CLICKED, NULL);
+    control_devices_tab = qz_button(screen, "局域网设备", 216, 40);
+    lv_obj_align(control_devices_tab, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 58);
+    lv_obj_add_event_cb(control_devices_tab, control_tab_changed, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)1);
+
+    control_local_card = make_card(screen, 106, 208);
     struct {
         const char *symbol;
         const char *title;
         int *value;
         bool (*apply)(int);
-    } rows[2] = {
+    } rows[] = {
         { LV_SYMBOL_VOLUME_MAX, "声音", &control_volume, qz_volume_set },
         { LV_SYMBOL_EYE_OPEN, "背光", &control_backlight, qz_backlight_set },
     };
     for (int i = 0; i < 2; i++) {
-        int y = i * 56 + 6;
-        lv_obj_t *icon = qz_squircle(card, 32, QZ_ACCENT);
-        lv_obj_align(icon, LV_ALIGN_TOP_LEFT, CARD_PAD, y + 4);
-        lv_obj_t *glyph = qz_symbol(icon, rows[i].symbol, 15, qz_color(QZ_TEXT_ON_ACCENT));
+        int y = i * 64;
+        lv_obj_t *icon = qz_squircle(control_local_card, 32, QZ_ACCENT);
+        lv_obj_align(icon, LV_ALIGN_TOP_LEFT, CARD_PAD, y + 12);
+        lv_obj_t *glyph = qz_symbol(icon, rows[i].symbol, 16, qz_color(QZ_TEXT_ON_ACCENT));
         lv_obj_center(glyph);
-
-        lv_obj_t *title = qz_text(card, rows[i].title, 13, qz_color(QZ_TEXT));
-        lv_obj_align(title, LV_ALIGN_TOP_LEFT, CARD_PAD + 42, y - 2);
-
-        lv_obj_t *slider = lv_slider_create(card);
-        lv_obj_set_size(slider, CONTENT_W - CARD_PAD * 2 - 96, 26);
-        lv_obj_align(slider, LV_ALIGN_TOP_LEFT, CARD_PAD + 42, y + 16);
+        lv_obj_t *title = qz_text(control_local_card, rows[i].title, 16, qz_color(QZ_TEXT));
+        lv_obj_align(title, LV_ALIGN_TOP_LEFT, 54, y + 8);
+        lv_obj_t *slider = lv_slider_create(control_local_card);
+        lv_obj_set_size(slider, CONTENT_W - 160, 26);
+        lv_obj_align(slider, LV_ALIGN_TOP_LEFT, 54, y + 34);
         qz_style_slider(slider);
+        lv_obj_set_ext_click_area(slider, 5);
         lv_slider_set_range(slider, 0, 100);
         lv_slider_set_value(slider, *rows[i].value, LV_ANIM_OFF);
-
         char text[8];
         snprintf(text, sizeof(text), "%d%%", *rows[i].value);
-        lv_obj_t *value = qz_text(card, text, 12, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_align(value, LV_ALIGN_TOP_RIGHT, -CARD_PAD, y + 20);
+        lv_obj_t *value = qz_text(control_local_card, text, 16, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_align(value, LV_ALIGN_TOP_RIGHT, -CARD_PAD, y + 36);
         control_bindings[i].label = value;
         control_bindings[i].slider = slider;
         control_bindings[i].apply = rows[i].apply;
         lv_obj_set_user_data(slider, &control_bindings[i]);
         lv_obj_add_event_cb(slider, slider_changed, LV_EVENT_VALUE_CHANGED, NULL);
     }
+    lv_obj_t *sep = qz_separator(control_local_card, CONTENT_W - CARD_PAD * 2, false);
+    lv_obj_align(sep, LV_ALIGN_TOP_LEFT, CARD_PAD, 140);
+    lv_obj_t *sound = qz_text(control_local_card, "按键提示音", 16, qz_color(QZ_TEXT));
+    lv_obj_align(sound, LV_ALIGN_TOP_LEFT, CARD_PAD, 154);
+    lv_obj_t *toggle = lv_switch_create(control_local_card);
+    qz_style_switch(toggle);
+    lv_obj_set_size(toggle, 60, 32);
+    lv_obj_align(toggle, LV_ALIGN_TOP_RIGHT, -CARD_PAD, 148);
+    lv_obj_add_state(toggle, LV_STATE_CHECKED);
+    control_core_value = qz_text(control_local_card, "顶部刷新可重新连接核心", 14,
+                                 qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(control_core_value, LV_ALIGN_TOP_LEFT, CARD_PAD, 185);
 
-    lv_obj_t *sep = qz_separator(card, CONTENT_W - 2 * CARD_PAD, false);
-    lv_obj_align(sep, LV_ALIGN_TOP_LEFT, CARD_PAD, 118);
-    lv_obj_t *sound_icon = qz_squircle(card, 32, QZ_ACCENT);
-    lv_obj_align(sound_icon, LV_ALIGN_TOP_LEFT, CARD_PAD, 130);
-    lv_obj_t *sound_glyph = qz_symbol(sound_icon, LV_SYMBOL_BELL, 15, qz_color(QZ_TEXT_ON_ACCENT));
-    lv_obj_center(sound_glyph);
-    lv_obj_t *sound_title = qz_text(card, "按键提示音", 13, qz_color(QZ_TEXT));
-    lv_obj_align(sound_title, LV_ALIGN_TOP_LEFT, CARD_PAD + 42, 138);
-    lv_obj_t *sound_toggle = lv_switch_create(card);
-    qz_style_switch(sound_toggle);
-    lv_obj_set_size(sound_toggle, 42, 26);
-    lv_obj_align(sound_toggle, LV_ALIGN_TOP_RIGHT, -CARD_PAD, 133);
-    lv_obj_add_state(sound_toggle, LV_STATE_CHECKED);
-
-    /* —— 局域网设备：与「本机」并列的第二块，设备多了这页就往下滚 —— */
-    lv_obj_t *hub = lv_obj_create(page);
-    lv_obj_set_size(hub, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_radius(hub, QZ_RADIUS_CARD, 0);
-    qz_style_plate(hub);
-    lv_obj_set_style_pad_all(hub, CARD_PAD, 0);
-    lv_obj_set_style_pad_row(hub, 8, 0);
-    lv_obj_set_flex_flow(hub, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(hub, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
-    lv_obj_clear_flag(hub, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *head = lv_obj_create(hub);
-    lv_obj_set_size(head, lv_pct(100), 30);
+    control_hub_card = make_card(screen, 106, 164);
+    lv_obj_t *head = lv_obj_create(control_hub_card);
+    lv_obj_set_size(head, CONTENT_W - CARD_PAD * 2, 44);
+    lv_obj_align(head, LV_ALIGN_TOP_LEFT, CARD_PAD, 6);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
     lv_obj_clear_flag(head, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *head_title = qz_text(head, "局域网设备", 14, qz_color(QZ_TEXT));
-    lv_obj_align(head_title, LV_ALIGN_LEFT_MID, 2, 0);
-    control_hub_chip = qz_text(head, "读取中", 11, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(control_hub_chip, LV_ALIGN_LEFT_MID, 88, 1);
-    /* 两个次要动作：刷新状态；让网关重报一次设备树（刚配对完新设备时用） */
-    lv_obj_t *discover = qz_icon_button(head, LV_SYMBOL_DOWNLOAD, 28);
-    lv_obj_align(discover, LV_ALIGN_RIGHT_MID, -34, 0);
+    lv_obj_t *head_title = qz_text(head, "网关", 16, qz_color(QZ_TEXT));
+    lv_obj_align(head_title, LV_ALIGN_LEFT_MID, 0, 0);
+    control_hub_chip = qz_text(head, "读取中", 14, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(control_hub_chip, LV_ALIGN_LEFT_MID, 64, 0);
+    lv_obj_t *discover = qz_icon_button(head, LV_SYMBOL_DOWNLOAD, 40);
+    lv_obj_align(discover, LV_ALIGN_RIGHT_MID, -48, 0);
     lv_obj_add_event_cb(discover, hub_discover_clicked, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *refresh = qz_icon_button(head, LV_SYMBOL_REFRESH, 28);
+    lv_obj_t *refresh = qz_icon_button(head, LV_SYMBOL_REFRESH, 40);
     lv_obj_align(refresh, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_add_event_cb(refresh, hub_refresh_clicked, LV_EVENT_CLICKED, NULL);
 
-    control_hint = qz_text(hub, "", 10, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_set_width(control_hint, lv_pct(100));
-    lv_label_set_long_mode(control_hint, LV_LABEL_LONG_WRAP);
-    lv_obj_add_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
-
-    control_device_list = lv_obj_create(hub);
-    lv_obj_set_size(control_device_list, lv_pct(100), 42);
+    control_device_list = lv_obj_create(control_hub_card);
+    lv_obj_set_size(control_device_list, CONTENT_W - CARD_PAD * 2, 80);
+    lv_obj_align(control_device_list, LV_ALIGN_TOP_LEFT, CARD_PAD, 56);
     lv_obj_set_style_bg_opa(control_device_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(control_device_list, 0, 0);
     lv_obj_set_style_pad_all(control_device_list, 0, 0);
     lv_obj_clear_flag(control_device_list, LV_OBJ_FLAG_SCROLLABLE);
+    control_hint = qz_text(control_hub_card, "", 14, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(control_hint, CONTENT_W - CARD_PAD * 2);
+    lv_label_set_long_mode(control_hint, LV_LABEL_LONG_WRAP);
+    lv_obj_align(control_hint, LV_ALIGN_TOP_LEFT, CARD_PAD, 140);
 
-    /* 核心连不上时设备表必然是空的，把"重连"放在这里最顺手 */
-    lv_obj_t *reconnect = lv_obj_create(hub);
-    lv_obj_set_size(reconnect, lv_pct(100), 44);
-    lv_obj_set_style_radius(reconnect, 12, 0);
-    lv_obj_set_style_bg_color(reconnect, qz_color(QZ_FILL), 0);
-    qz_obj_set_bg_color(reconnect, QZ_FILL_PRESSED, LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(reconnect, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(reconnect, 0, 0);
-    lv_obj_set_style_pad_all(reconnect, 0, 0);
-    lv_obj_add_flag(reconnect, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(reconnect, LV_OBJ_FLAG_SCROLLABLE);
-    qz_add_press_feedback(reconnect);
-    qz_add_touch_glint(reconnect);
-    lv_obj_add_event_cb(reconnect, reconnect_core, LV_EVENT_CLICKED, NULL);
-    /* A secondary action, so it takes the neutral tile and an accent glyph
-     * rather than a second hue. */
-    lv_obj_t *icon = qz_squircle(reconnect, 28, QZ_ACCENT_TINT);
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 8, 0);
-    lv_obj_t *glyph = qz_symbol(icon, LV_SYMBOL_REFRESH, 14, qz_color(QZ_ACCENT_DARK));
-    lv_obj_center(glyph);
-    lv_obj_t *title = qz_text(reconnect, "重新连接核心", 13, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 44, 0);
-    control_core_value = qz_text(reconnect, "点按执行", 11, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(control_core_value, LV_ALIGN_RIGHT_MID, -12, 0);
-
+    control_previous = qz_button(screen, "上一台", 116, 40);
+    lv_obj_align(control_previous, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 276);
+    lv_obj_add_event_cb(control_previous, control_page_changed, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)-1);
+    control_next = qz_button(screen, "下一台", 116, 40);
+    lv_obj_align(control_next, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 276);
+    lv_obj_add_event_cb(control_next, control_page_changed, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)1);
+    control_page_label = qz_text(screen, "1 / 1", 16, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(control_page_label, LV_ALIGN_TOP_MID, 0, 286);
+    lv_obj_add_flag(control_hub_card, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(control_previous, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(control_next, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(control_page_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(screen, control_screen_loaded, LV_EVENT_ALL, NULL);
 }
 
+static void build_control_screen(void)
+{
+    lv_obj_t *screen = lv_obj_create(NULL);
+    qz_style_screen(screen);
+    screens[QZ_APPLET_CONTROL] = screen;
+    lv_obj_t *toolbar = make_toolbar(screen, "设备控制");
+    build_compact_control(screen, toolbar);
+}
+
+#if 0  /* 存在检测（摄像头） 已移除（相机不可用） */
 /* ------------------------------------------------------------------------- *
  * 存在检测（摄像头）
  * ------------------------------------------------------------------------- */
@@ -1094,8 +1158,39 @@ static lv_obj_t *face_state_label;
 static lv_obj_t *face_backend_label;
 static lv_obj_t *face_count_label;
 static lv_obj_t *face_action_caption;
+static lv_obj_t *face_detail_overlay;
+static char face_backend_message[144];
 static volatile int face_presence_pending;
 static volatile int face_presence_arrived;
+
+static void face_detail_close(lv_event_t *event)
+{
+    (void)event;
+    if (face_detail_overlay) lv_obj_delete(face_detail_overlay);
+    face_detail_overlay = NULL;
+}
+
+static void face_detail_open(lv_event_t *event)
+{
+    (void)event;
+    if (face_detail_overlay) return;
+    lv_obj_t *panel = lv_obj_create(face_detail_overlay);
+    lv_obj_set_size(panel, CONTENT_W, 288);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
+    qz_style_plate(panel);
+    lv_obj_set_style_pad_all(panel, CARD_PAD, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *title = qz_text(panel, "摄像头状态", 18, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_t *message = qz_text(panel, face_backend_message, 14,
+                                qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(message, lv_pct(100));
+    lv_label_set_long_mode(message, LV_LABEL_LONG_WRAP);
+    lv_obj_align(message, LV_ALIGN_TOP_LEFT, 0, 30);
+    lv_obj_t *close = qz_button(panel, "关闭", 120, 44);
+    lv_obj_align(close, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_add_event_cb(close, face_detail_close, LV_EVENT_CLICKED, NULL);
+}
 
 /** 工作线程：只记标记，不要碰 LVGL 对象。 */
 static void face_presence_event(qz_presence_event_t event, void *user_data)
@@ -1121,8 +1216,9 @@ static void face_refresh(void)
                                    qz_color(here ? QZ_GREEN : QZ_TEXT_SECONDARY), 0);
     }
     if (face_backend_label) {
-        snprintf(text, sizeof(text), "%s · %s", qz_face_camera_backend(),
+        snprintf(face_backend_message, sizeof(face_backend_message), "%s · %s", qz_face_camera_backend(),
                  qz_face_camera_status());
+        snprintf(text, sizeof(text), "%s · 查看状态", qz_face_camera_backend());
         lv_label_set_text(face_backend_label, text);
     }
     if (face_count_label) {
@@ -1178,10 +1274,9 @@ static void build_face_screen(void)
 {
     lv_obj_t *screen = lv_obj_create(NULL);
     qz_style_screen(screen);
-    screens[QZ_APPLET_FACE] = screen;
     make_toolbar(screen, "存在检测");
 
-    lv_obj_t *card = make_card(screen, 64, 140);
+    lv_obj_t *card = make_card(screen, 56, 178);
     lv_obj_t *icon = qz_squircle(card, 42, QZ_ACCENT_TINT);
     lv_obj_align(icon, LV_ALIGN_TOP_LEFT, CARD_PAD, 16);
     lv_obj_t *glyph = qz_symbol(icon, LV_SYMBOL_EYE_OPEN, 19, qz_color(QZ_ACCENT_DARK));
@@ -1193,27 +1288,25 @@ static void build_face_screen(void)
     face_state_label = qz_text(card, "未启动", 12, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(face_state_label, LV_ALIGN_TOP_LEFT, CARD_PAD + 54, 45);
 
-    face_backend_label = qz_text(card, "", 10, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_set_width(face_backend_label, CONTENT_W - CARD_PAD * 2 - 56);
-    lv_label_set_long_mode(face_backend_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(face_backend_label, LV_ALIGN_TOP_LEFT, CARD_PAD + 54, 67);
+    lv_obj_t *details = qz_button(card, "查看摄像头状态", CONTENT_W - CARD_PAD * 2, 44);
+    lv_obj_align(details, LV_ALIGN_TOP_LEFT, CARD_PAD, 70);
+    lv_obj_add_event_cb(details, face_detail_open, LV_EVENT_CLICKED, NULL);
+    face_backend_label = lv_obj_get_child(details, 0);
 
-    lv_obj_t *hint = qz_text(card,
-        "走近时点亮屏幕并让助手打个招呼（5 分钟内只打一次）。检测走摄像头帧差，"
-        "不依赖模型；设备侧接上 RKNN 人脸模型即可升级为识别。",
+    lv_obj_t *hint = qz_text(card, "靠近时自动亮屏并问候。\n每 5 分钟最多问候一次。",
         10, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_set_width(hint, CONTENT_W - CARD_PAD * 2);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, CARD_PAD, 92);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, CARD_PAD, 134);
 
-    lv_obj_t *counter = make_card(screen, 210, 50);
+    lv_obj_t *counter = make_card(screen, 240, 28);
     face_count_label = qz_text(counter, "靠近 0 次 · 最近还没检测到", 12,
                                qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(face_count_label, LV_ALIGN_LEFT_MID, CARD_PAD, 0);
 
     lv_obj_t *action = lv_button_create(screen);
-    lv_obj_set_size(action, CONTENT_W, 40);
-    lv_obj_align(action, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 268);
+    lv_obj_set_size(action, CONTENT_W, 44);
+    lv_obj_align(action, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 272);
     qz_style_primary_button(action);
     face_action_caption = qz_text(action, "启动检测", 14, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_center(face_action_caption);
@@ -1222,6 +1315,8 @@ static void build_face_screen(void)
     face_refresh();
 }
 
+#endif
+#if 0  /* 运动相机 已移除（相机不可用） */
 /* ------------------------------------------------------------------------- *
  * 运动相机（形态参考 Echo-Mate 的相机页）
  *
@@ -1248,6 +1343,37 @@ static uint32_t cam_last_id;
 static int cam_flash_ticks;
 static int cam_slow_ticks;          /**< 低频工作的计数器（时钟/状态 1s 一次） */
 static bool cam_presence_was_running;
+static int cam_wait_ticks;          /**< 等首帧的计数；-1 = 已把失败原因写进提示 */
+static char cam_result[224];
+static lv_obj_t *cam_result_overlay;
+
+static void cam_result_close(lv_event_t *event)
+{
+    (void)event;
+    if (cam_result_overlay) lv_obj_delete(cam_result_overlay);
+    cam_result_overlay = NULL;
+}
+
+static void cam_result_open(lv_event_t *event)
+{
+    (void)event;
+    if (!cam_result[0] || cam_result_overlay) return;
+    lv_obj_t *panel = lv_obj_create(cam_result_overlay);
+    lv_obj_set_size(panel, CONTENT_W, 288);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
+    qz_style_plate(panel);
+    lv_obj_set_style_pad_all(panel, CARD_PAD, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *title = qz_text(panel, "拍摄结果", 18, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_t *result = qz_text(panel, cam_result, 14, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(result, lv_pct(100));
+    lv_label_set_long_mode(result, LV_LABEL_LONG_WRAP);
+    lv_obj_align(result, LV_ALIGN_TOP_LEFT, 0, 30);
+    lv_obj_t *close = qz_button(panel, "关闭", 120, 44);
+    lv_obj_align(close, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_add_event_cb(close, cam_result_close, LV_EVENT_CLICKED, NULL);
+}
 
 #define CAM_TIMER_PERIOD_MS 66      /**< ≈15fps，取景比这更密没有意义 */
 
@@ -1256,6 +1382,7 @@ static bool cam_presence_was_running;
 static lv_obj_t *cam_osd(lv_obj_t *parent, const char *text, int32_t size)
 {
     lv_obj_t *label = qz_text(parent, text, size, qz_color(QZ_TEXT));
+    lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_bg_color(label, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(label, (lv_opa_t)96, 0);
     lv_obj_set_style_radius(label, 6, 0);
@@ -1267,8 +1394,7 @@ static lv_obj_t *cam_osd(lv_obj_t *parent, const char *text, int32_t size)
 static void cam_refresh_state(void)
 {
     bool running = qz_cam_preview_running();
-    lv_label_set_text(cam_state_label,
-                      running ? qz_cam_preview_backend() : qz_cam_preview_status());
+    lv_label_set_text(cam_state_label, running ? "取景中" : "无画面");
     {
         int battery = qz_battery_level();
         char text[12];
@@ -1285,7 +1411,7 @@ static void cam_refresh_state(void)
         lv_label_set_text(cam_clock_label, clock);
     }
     lv_obj_set_style_text_color(cam_state_label,
-                                qz_color(running ? QZ_TEXT : QZ_TEXT_SECONDARY), 0);
+                                lv_color_hex(running ? 0xFFFFFF : 0xDDDDDD), 0);
 }
 
 static void cam_shutter(lv_event_t *event)
@@ -1297,11 +1423,13 @@ static void cam_shutter(lv_event_t *event)
         char photos[24];
         snprintf(photos, sizeof(photos), "照片 %d", qz_cam_preview_photos());
         lv_label_set_text(cam_photo_label, photos);
-        lv_label_set_text(cam_path_label, path);
+        snprintf(cam_result, sizeof(cam_result), "%s", path);
+        lv_label_set_text(cam_path_label, "已保存·查看位置");
         cam_flash_ticks = 5;                       /* 快门白闪 ≈ 0.3s */
         lv_obj_set_style_bg_opa(cam_flash, (lv_opa_t)200, 0);
     } else {
-        lv_label_set_text(cam_path_label, qz_cam_preview_status());
+        snprintf(cam_result, sizeof(cam_result), "%s", qz_cam_preview_status());
+        lv_label_set_text(cam_path_label, "失败·查看原因");
     }
 }
 
@@ -1314,18 +1442,41 @@ static void cam_gesture(lv_event_t *event)
     }
 }
 
+/**
+ * 取景起不来（或起了却一直没画面）时把原因写明。
+ *
+ * 之前只有"出帧才隐藏提示"，于是没摄像头时"正在打开取景…"会永远挂着 ——
+ * 用户看到的就是一个卡死的页面。这里把 qz_cam_preview_status() 的说明摆出来，
+ * 并告诉用户能按返回。
+ */
+static void cam_show_reason(void)
+{
+    const char *status = qz_cam_preview_status();
+
+    /* 不管"根本没启动"还是"启动了没画面"，用户要的是原因 + 出路：第一句说现象，
+     * 第二句直接用采集侧的状态说明（例如"打不开摄像头（… /dev/video0..3）"）。 */
+    lv_label_set_text_fmt(cam_hint, "取景没有画面\n%s\n（点右下角返回）", status ? status : "");
+    lv_obj_set_style_text_color(cam_hint, qz_color(QZ_ORANGE), 0);
+    lv_obj_clear_flag(cam_hint, LV_OBJ_FLAG_HIDDEN);
+    cam_wait_ticks = -1;
+}
+
 /** 取景页主循环：换帧 + 快门闪 + 低频的时钟/状态刷新。 */
 static void cam_tick(lv_timer_t *timer)
 {
     (void)timer;
-    if (lv_screen_active() != screens[QZ_APPLET_CAMERA]) return;
 
     const uint8_t *frame = qz_cam_preview_frame(&cam_last_id);
     if (frame) {
         cam_dsc.data = frame;
         lv_image_set_src(cam_view, &cam_dsc);      /* 换源触发重绘 */
         lv_obj_add_flag(cam_hint, LV_OBJ_FLAG_HIDDEN);
+        cam_wait_ticks = 0;
         if (cam_slow_ticks == 0) cam_refresh_state();  /* 出帧后把状态行换成后端名 */
+    } else if (cam_wait_ticks >= 0 && ++cam_wait_ticks >= 45) {
+        /* ≈3 秒还没第一帧：不再让用户对着"正在打开取景…"干等 */
+        cam_show_reason();
+        cam_refresh_state();
     }
 
     if (cam_flash_ticks > 0 && --cam_flash_ticks == 0) {
@@ -1346,10 +1497,18 @@ static void cam_screen_event(lv_event_t *event)
         /* 同一颗摄像头：先停存在检测，退出时再恢复（记在 cam_presence_was_running） */
         cam_presence_was_running = qz_face_camera_running();
         if (cam_presence_was_running) qz_face_camera_stop();
-        if (!qz_cam_preview_running()) qz_cam_preview_start();
+        /* 每次进来都复位提示：上次进来时写的"取景未能启动"不能留着 */
+        cam_wait_ticks = 0;
+        lv_label_set_text(cam_hint, "正在打开取景…");
+        lv_obj_set_style_text_color(cam_hint, qz_color(QZ_TEXT_SECONDARY), 0);
+        lv_obj_clear_flag(cam_hint, LV_OBJ_FLAG_HIDDEN);
+        if (!qz_cam_preview_running() && !qz_cam_preview_start()) {
+            cam_show_reason();          /* 立刻就知道起不来，不必等 3 秒 */
+        }
         cam_slow_ticks = 0;
         cam_refresh_state();
     } else if (code == LV_EVENT_SCREEN_UNLOADED) {
+        cam_result_close(NULL);
         if (qz_cam_preview_running()) qz_cam_preview_stop();
         if (cam_presence_was_running) {
             qz_face_camera_start(face_presence_event, NULL);
@@ -1361,9 +1520,9 @@ static void cam_screen_event(lv_event_t *event)
 static void build_camera_screen(void)
 {
     lv_obj_t *screen = lv_obj_create(NULL);
+    qz_style_screen(screen);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);   /* 运动相机永远黑底 */
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
-    screens[QZ_APPLET_CAMERA] = screen;
 
     /* 取景层：全屏 image，内容是面板尺寸的 RGB565 缓冲 */
     cam_view = lv_image_create(screen);
@@ -1398,10 +1557,14 @@ static void build_camera_screen(void)
 
     /* 底部一行：照片计数 · 快门 · 返回 */
     cam_photo_label = cam_osd(screen, "照片 0", 11);
-    lv_obj_align(cam_photo_label, LV_ALIGN_BOTTOM_LEFT, QZ_GUTTER, -22);
+    lv_obj_align(cam_photo_label, LV_ALIGN_BOTTOM_LEFT, QZ_GUTTER, -36);
     cam_path_label = cam_osd(screen, "", 8);
     lv_obj_align(cam_path_label, LV_ALIGN_BOTTOM_LEFT, QZ_GUTTER, -8);
-    lv_obj_set_style_text_color(cam_path_label, qz_color(QZ_TEXT_SECONDARY), 0);
+    lv_obj_set_style_text_color(cam_path_label, lv_color_hex(0xDDDDDD), 0);
+    lv_obj_set_width(cam_path_label, 180);
+    lv_obj_add_flag(cam_path_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(cam_path_label, 4);
+    lv_obj_add_event_cb(cam_path_label, cam_result_open, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *shutter = lv_obj_create(screen);
     lv_obj_set_size(shutter, 56, 56);
@@ -1414,13 +1577,16 @@ static void build_camera_screen(void)
     lv_obj_set_style_border_opa(shutter, (lv_opa_t)120, 0);
     lv_obj_add_event_cb(shutter, cam_shutter, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *back = qz_icon_button(screen, LV_SYMBOL_LEFT, 30);
+    lv_obj_t *back = qz_icon_button(screen, LV_SYMBOL_LEFT, qz_compact() ? 44 : 30);
     lv_obj_align(back, LV_ALIGN_BOTTOM_RIGHT, -QZ_GUTTER, -14);
     lv_obj_add_event_cb(back, go_back, LV_EVENT_CLICKED, NULL);
 
     /* 还没出帧（起摄像头慢 / 根本没有）时给一行居中说明 */
     cam_hint = qz_text(screen, "正在打开取景…", 12, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(cam_hint, LV_ALIGN_CENTER, 0, 0);
+    /* 失败时这里要放两行说明（原因可能带节点名与格式），给足宽度并居中换行 */
+    lv_obj_set_width(cam_hint, QZ_DESIGN_W - 2 * QZ_GUTTER);
+    lv_obj_set_style_text_align(cam_hint, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_add_event_cb(screen, cam_screen_event, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_event_cb(screen, cam_screen_event, LV_EVENT_SCREEN_UNLOADED, NULL);
@@ -1429,6 +1595,7 @@ static void build_camera_screen(void)
     cam_frame_timer = lv_timer_create(cam_tick, CAM_TIMER_PERIOD_MS, NULL);
 }
 
+#endif
 /* ------------------------------------------------------------------------- *
  * Public API
  * ------------------------------------------------------------------------- */
@@ -1439,7 +1606,6 @@ static void applet_tick(lv_timer_t *timer)
 
     (void)timer;
     pomo_tick();
-    face_tick();
     /* 提醒列表定期与核心对齐：语音刚加的、或刚响过被撤掉的一次性提醒 */
     if (--reminder_ticks <= 0) {
         reminder_ticks = REMINDER_POLL_TICKS;
@@ -1454,14 +1620,7 @@ void qz_applets_init(lv_obj_t *apps_screen)
     build_reminder_screen();
     build_pomodoro_screen();
     build_control_screen();
-    build_face_screen();
-    build_camera_screen();
-    /* 「有人靠近自动亮屏 + 打招呼」是常驻行为，不要求用户先打开这一页：有可用
-     * 来源就自动开起来；没有（模拟器没指摄像头、板子没接）时静默略过，页面里
-     * 会写明原因。 */
-    if (qz_face_camera_available() && qz_face_camera_start(face_presence_event, NULL)) {
-        face_refresh();
-    }
+    /* 运动相机与存在检测已移除（本板相机链路跑不通，2026-10-09） */
     lv_timer_create(applet_tick, 1000, NULL);
 }
 

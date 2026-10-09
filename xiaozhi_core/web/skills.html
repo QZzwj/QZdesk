@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
     <meta name="theme-color" content="#1246FF">
     <title>QZdesk Skill 控制台</title>
     <style>
@@ -66,7 +66,7 @@
 }
 
 *,*::before,*::after{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth;-webkit-tap-highlight-color:transparent}
 
 body{
   margin:0;min-height:100dvh;
@@ -82,6 +82,9 @@ body{
 }
 ::selection{background:rgba(0,122,255,.22);color:var(--fg)}
 button,select,input,textarea{font:inherit}
+button,a,[role=button],summary{touch-action:manipulation}
+button,[role=button],summary{-webkit-user-select:none;user-select:none}
+@media (pointer:coarse){input,textarea,select{font-size:16px!important}}
 button:focus-visible,select:focus-visible,input:focus-visible,
 textarea:focus-visible,summary:focus-visible{
   outline:2px solid var(--brand);outline-offset:2px;
@@ -444,7 +447,7 @@ body.scrolled::after{opacity:1}
   margin-left:6px;padding:0;border:0;background:none;cursor:pointer;
   color:var(--brand);font-size:12.5px;font-weight:560;
 }
-.desc-toggle:hover{color:var(--brand-dark)}
+@media (hover:hover) and (pointer:fine){.desc-toggle:hover{color:var(--brand-dark)}}
 .skill-foot{
   display:flex;align-items:center;gap:8px;flex-wrap:wrap;
   margin-top:12px;padding-top:11px;border-top:1px solid var(--line);
@@ -464,7 +467,7 @@ body.scrolled::after{opacity:1}
   color:var(--fg);font-size:13.5px;font-weight:620;cursor:pointer;
   transition:background-color .18s ease,color .18s ease,transform .12s var(--ease-out);
 }
-.seg button:hover{background:#fff}
+@media (hover:hover) and (pointer:fine){.seg button:hover{background:#fff}}
 .seg button[aria-pressed="true"]{background:#fff;box-shadow:0 1px 3px rgba(16,24,40,.14)}
 .seg button[aria-pressed="true"][data-role="primary"]{background:var(--brand);color:#fff;box-shadow:0 2px 8px rgba(0,98,204,.28)}
 .seg button[aria-pressed="true"][data-role="secondary"]{background:var(--warn);color:#fff;box-shadow:0 2px 8px rgba(255,149,0,.30)}
@@ -761,14 +764,88 @@ textarea{resize:vertical;line-height:1.6}
 .lg-title{font-weight:650;font-size:13px;letter-spacing:.02em;color:#1c2740}
 .lg-close{background:none;border:0;color:rgba(20,35,70,.55);cursor:pointer;
   font-size:13px;padding:2px 5px;border-radius:6px}
-.lg-close:hover{color:#101a30;background:rgba(15,23,42,.08)}
+@media (hover:hover) and (pointer:fine){.lg-close:hover{color:#101a30;background:rgba(15,23,42,.08)}}
 .lg-clock{font-size:34px;font-weight:700;letter-spacing:-.02em;line-height:1.1;
   font-variant-numeric:tabular-nums;color:#101a30}
 .lg-grid{display:flex;gap:16px;margin-top:auto}
 .lg-grid i{display:block;font-style:normal;font-size:10px;color:rgba(20,35,70,.55);
   letter-spacing:.06em;margin-bottom:2px}
 .lg-grid b{font-size:15px;font-weight:640;color:#1c2740;font-variant-numeric:tabular-nums}
-</style></style></style>
+/* A bounded app window on small screens; each section has its own content area. */
+.compact-nav,.compact-guide-legend{display:none}
+@media (max-width:620px), (max-height:360px){
+  html{height:100%;overflow:hidden;overscroll-behavior:none}
+  body{
+    height:100dvh;min-height:0;overflow:hidden;display:flex;flex-direction:column;
+    gap:6px;padding:6px max(6px,env(safe-area-inset-right))
+      max(6px,env(safe-area-inset-bottom)) max(6px,env(safe-area-inset-left));
+    padding-top:max(6px,env(safe-area-inset-top));font-size:13px;
+  }
+  body::after{display:none}
+  .appbar{position:static;flex:none;width:100%;margin:0}
+  .appbar-inner{padding:4px 8px;gap:4px 8px;border-radius:12px;flex-wrap:wrap}
+  .brand{gap:6px;flex:1}
+  .logo{width:24px;height:24px;border-radius:8px}
+  .logo svg{width:18px;height:18px}
+  .brand-text strong{font-size:15px}
+  .brand-text small{display:none}
+  .pills{display:contents}
+  .pills .pill{display:none}
+  #lgToggle{display:inline-flex;min-height:32px;padding:0 8px;font-size:12px}
+  .compact-nav{display:block;width:100%;min-width:0;min-height:36px;
+    padding:2px 8px;border-radius:8px;font-size:16px;
+    color:var(--fg);background:var(--glass-solid);border:1px solid var(--line)}
+  .wrap{display:block;flex:1;min-height:0;width:100%;padding:0;margin:0;overflow:hidden}
+  .wrap>.col,.sidebar{display:contents}
+  .compact-panel{display:none!important}
+  .compact-panel.compact-active{
+    display:block!important;height:100%;min-height:0;max-height:none;width:100%;
+    position:relative;top:auto;margin:0;overflow:auto;overscroll-behavior:contain;
+    border-radius:12px;overflow-wrap:anywhere;
+  }
+  .compact-active.chat-card{display:flex!important;overflow:hidden}
+  .side-foot{display:none}
+  .side-stats::after{inset:0 0 auto auto;width:120px;height:120px}
+  .side-label,.side-guide li b,.weather-grid dt,.weather-note{font-size:12px}
+  .card-head,.chat-head{padding:8px 10px;flex:none}
+  .eyebrow{display:none}
+  .card-head h2,.chat-head h2{font-size:16px}
+  .legend,.skills{margin:8px 10px}
+  .legend{padding:8px;font-size:12px}
+  .legend li{font-size:12px}
+  .skills-card>.legend{display:none}
+  .compact-guide-legend{display:flex;margin:10px 0}
+  .skill{padding:10px}
+  .skill-top{gap:8px}
+  .skill-name,.skill-id,.s-title{overflow-wrap:anywhere}
+  .skill-foot{gap:6px}
+  .seg{max-width:100%;display:flex;flex-wrap:wrap}
+  .seg button{min-height:36px;padding:0 10px;font-size:13px}
+  .btn,.btn.sm{min-height:36px;padding:0 10px;font-size:13px}
+  .chat-state{padding:4px 8px;max-width:50%;white-space:normal}
+  .chat-messages{height:auto;min-height:0;flex:1;padding:8px;gap:6px}
+  .chat-empty{font-size:13px}
+  .chat-bubble{padding:6px 8px;font-size:13px;flex-shrink:0}
+  .chat-compose{padding:6px 8px;gap:6px;flex:none}
+  .chat-compose textarea{height:36px;min-height:36px;max-height:60px;
+    padding:5px 8px;font-size:16px;line-height:24px}
+  .chat-compose .btn{min-height:36px;font-size:13px;padding:0 10px}
+  .chat-note{display:none}
+  .editor summary{padding:8px 10px;min-height:36px}
+  .editor .field,.editor .actions,.editor .msg,.editor .tip,.editor>p.hint{
+    margin-left:10px;margin-right:10px;min-width:0}
+  .editor>p.hint{padding:0;font-size:13px}
+  input[type=text],textarea,select{min-width:0;max-width:100%;font-size:16px}
+  .dropzone{padding:8px;gap:8px}
+  .dropzone>span:last-of-type{min-width:0;overflow-wrap:anywhere}
+  .weather-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .weather-grid dd,.weather-desc{white-space:normal;overflow-wrap:anywhere}
+  #toast-host{right:6px;left:6px;bottom:6px;max-height:calc(100dvh - 12px);overflow:auto}
+  .toast{min-width:0;width:100%;max-width:100%;flex-shrink:0;overflow-wrap:anywhere;padding:8px 10px}
+  .lg-close{min-width:32px;min-height:32px}
+  .lg-grid i{font-size:12px}
+}
+</style>
 </head>
 
 <body>
@@ -815,6 +892,15 @@ textarea{resize:vertical;line-height:1.6}
                 <span class="pill"><i class="dot live"></i><span>本地服务在线</span></span>
       <span class="pill" id="lgToggle" role="button" tabindex="0" title="显示 / 隐藏液态玻璃快捷卡">玻璃卡</span>
             </div>
+            <select class="compact-nav" id="compactView" aria-label="控制台页面">
+                <option value="skills">技能列表</option>
+                <option value="chat">对话</option>
+                <option value="editor">添加 / 编辑技能</option>
+                <option value="stats">技能统计</option>
+                <option value="weather">天气</option>
+                <option value="performance">性能监控</option>
+                <option value="guide">使用说明</option>
+            </select>
         </div>
     </header>
 
@@ -970,7 +1056,8 @@ textarea{resize:vertical;line-height:1.6}
                     <div class="chat-empty" id="chatEmpty">正在连接 QZdesk，可以直接开始对话。</div>
                 </div>
                 <form class="chat-compose" id="chatForm">
-                    <textarea id="chatInput" rows="1" placeholder="Enter 发送 / Shift+Enter 换行"
+                    <textarea id="chatInput" rows="1" placeholder="输入消息…" enterkeyhint="send"
+                        aria-label="聊天消息" title="Enter 发送 / Shift+Enter 换行"
                         maxlength="4000"></textarea>
                     <button class="btn" id="chatSend" type="submit">发送</button>
                 </form>
@@ -1047,6 +1134,24 @@ textarea{resize:vertical;line-height:1.6}
         let skillCache = [];
 
         const $ = sel => document.querySelector(sel);
+        const compactPanels = {
+            skills: $('.skills-card'), chat: $('.chat-card'), editor: $('.editor-card'),
+            stats: $('.side-stats'), weather: $('#weatherPanel'),
+            performance: $('#performanceCard'), guide: $('.side-guide')
+        };
+        Object.values(compactPanels).forEach(panel => panel.classList.add('compact-panel'));
+        const compactLegend = $('.legend').cloneNode(true);
+        compactLegend.classList.add('compact-guide-legend');
+        compactPanels.guide.appendChild(compactLegend);
+        function showCompactView(name) {
+            if (!compactPanels[name]) return;
+            $('#compactView').value = name;
+            Object.entries(compactPanels).forEach(([key, panel]) => {
+                panel.classList.toggle('compact-active', key === name);
+            });
+        }
+        $('#compactView').addEventListener('change', event => showCompactView(event.target.value));
+        showCompactView('skills');
 
         function setMsg(id, text, ok) {
             const el = $('#' + id);
@@ -1426,6 +1531,7 @@ textarea{resize:vertical;line-height:1.6}
                 $('#uploadBtn').style.display = 'none';
                 $('#cancelEditBtn').style.display = '';
                 editorBox.open = true;
+                showCompactView('editor');
                 editorBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 setMsg('addMsg', '已载入 ' + id + ' 的 SKILL.md');
             } catch (err) {
@@ -2375,13 +2481,15 @@ textarea{resize:vertical;line-height:1.6}
   let floatGlass = null, floatTicker = null;
   function showFloat() {
     if (floatGlass) return;
+    const width = Math.min(280, window.innerWidth - 16);
+    const height = Math.min(176, window.innerHeight - 16);
     floatGlass = new LiquidGlassShader({
-      width: 280, height: 176, radius: 24,
-      fragment: containerFragment(280, 176, 24, 26)
+      width, height, radius: 24,
+      fragment: containerFragment(width, height, 24, 26)
     });
     floatGlass.appendTo(document.body);
-    floatGlass.container.style.left = '24px';
-    floatGlass.container.style.top = Math.max(70, window.innerHeight - 176 - 56) + 'px';
+    floatGlass.container.style.left = Math.min(24, window.innerWidth - width - 8) + 'px';
+    floatGlass.container.style.top = Math.max(8, Math.min(70, window.innerHeight - height - 8)) + 'px';
     floatGlass.container.style.transform = 'none';
     floatGlass.container.style.borderRadius = '24px';
 
@@ -2428,8 +2536,16 @@ textarea{resize:vertical;line-height:1.6}
     if (floatGlass) { floatGlass.destroy(); floatGlass = null; }
   }
   const toggle = document.getElementById('lgToggle');
-  if (toggle) toggle.addEventListener('click', () => { floatGlass ? hideFloat() : showFloat(); });
-  showFloat();
+  if (toggle) {
+    toggle.addEventListener('click', () => { floatGlass ? hideFloat() : showFloat(); });
+    toggle.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        toggle.click();
+      }
+    });
+  }
+  if (!matchMedia('(max-width:620px), (max-height:360px)').matches) showFloat();
 })();
 </script>
 </body>

@@ -112,10 +112,15 @@ lv_obj_t *qz_face_create(lv_obj_t *parent, int32_t design_px)
     lv_obj_add_event_cb(face->root, face_delete, LV_EVENT_DELETE, face);
 
     face->gif = lv_gif_create(face->root);
-    /* 图案与容器都是正方形：居中对齐（档位比容器大时由容器裁掉多出的边） */
-    (lv_obj_set_pos)(face->gif, (box - art) / 2, (box - art) / 2);
     lv_obj_clear_flag(face->gif, LV_OBJ_FLAG_CLICKABLE);
     lv_gif_set_src(face->gif, qz_otto_emoji(face->state, face->size));
+    /* Small containers must show the entire face, including the about icon. */
+    if (art > box) {
+        (lv_obj_set_size)(face->gif, box, box);
+        lv_image_set_inner_align(face->gif, LV_IMAGE_ALIGN_STRETCH);
+        art = box;
+    }
+    (lv_obj_set_pos)(face->gif, (box - art) / 2, (box - art) / 2);
 
     face->vis_timer = lv_timer_create(vis_tick, 500, face);
     vis_tick(face->vis_timer);           /* 初始若不在当前屏就立刻停住 */

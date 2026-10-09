@@ -17,10 +17,10 @@
  * ------------------------------------------------------------------------- */
 
 #ifndef QZ_SCREEN_W
-#define QZ_SCREEN_W 480
+#define QZ_SCREEN_W 320
 #endif
 #ifndef QZ_SCREEN_H
-#define QZ_SCREEN_H 320
+#define QZ_SCREEN_H 240
 #endif
 
 #include "scale.h"
@@ -188,6 +188,25 @@ lv_obj_t *qz_icon_button(lv_obj_t *parent, const char *icon, int size);
 void qz_style_plate(lv_obj_t *obj);
 /** Rounded tappable plate used across the pages: opaque surface, no shadow. */
 lv_obj_t *qz_card_button(lv_obj_t *parent, int width, int height);
+
+/* ---- 小屏触控件 ----------------------------------------------------------
+ * 设计像素在 320×240 面板上会缩到 2/3，所以"30 设计像素"的旧按钮只有 20 实像素，
+ * 手指点不准。下面这几件按"实机也要够大"来定尺寸，各页统一用它们。 */
+/** 返回键：直径 44 设计像素（实机 29px），可点区域再外扩 8。 */
+#define QZ_TOUCH_BACK 44
+lv_obj_t *qz_back_button(lv_obj_t *parent);
+
+/** 可下滑的页面内容区：从 top 一直到底部留白，竖向可滑、溢出自动出滚动条。 */
+lv_obj_t *qz_page_scroll(lv_obj_t *screen, int32_t top);
+
+/** 把已有的内容容器变成竖向可下滑（尺寸不变，只开滚动 + 弹性/惯性）。
+ *  各页把卡片摆死在一个整屏容器里时，调它一行就适配小屏。 */
+void qz_make_scrollable(lv_obj_t *obj);
+
+/** 2 列网格的格子尺寸（宽、高），与 qz_grid_pos 配套。 */
+void qz_grid_metrics(int32_t *tile_w, int32_t *tile_h);
+/** 2 列网格里第 (col,row) 格的左上角坐标（相对内容区）。col/row 从 0 起。 */
+void qz_grid_pos(int32_t col, int32_t row, int32_t *x, int32_t *y);
 /** The floating material: translucent surface, specular rim, neutral shadow.
  * Only for chrome that sits above content (toolbars, composer, overlays). */
 void qz_style_glass(lv_obj_t *obj);

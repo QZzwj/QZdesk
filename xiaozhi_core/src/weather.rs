@@ -11,6 +11,9 @@ const CACHE_FILE: &str = "weather_cache.json";
 const MAX_TIMEOUT_SECS: u64 = 8;
 /// 连续失败后的重试起点（秒），每失败一次翻倍，最多回到正常刷新间隔。
 const RETRY_BASE_SECS: u64 = 15;
+/// 没网时的探测间隔：这段时间内**不发任何请求**，只读一次本地链路状态。
+/// 取 15 秒是折中 —— WiFi 一连上就能很快恢复刷新，而探测本身只是几次文件读。
+const OFFLINE_PROBE: Duration = Duration::from_secs(15);
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 
 /// 经纬度的合法范围，越界即「位置配置错误」。
@@ -273,8 +276,14 @@ async fn run(
     let mut failures = 0_u32;
     refresh_once(&config, &state, &gui, false, &mut failures, None).await;
 
+    // 离线只播报一次（免得每 15 秒推一遍同样的报文）；failure 计数不清零，
+    // 网络回来时该按原来的退避节奏继续。
+    let mut offline_announced = false;
+
     loop {
-        let delay = if failures == 0 {
+        let delay = if !has_usable_link() {
+            OFFLINE_PROBE
+        } else if failures == 0 {
             config.refresh_delay()
         } else {
             backoff(failures, config.refresh_delay())
@@ -283,12 +292,44 @@ async fn run(
             _ = tokio::time::sleep(delay) => None,
             received = rx.recv() => received,
         };
+        // 等完之后再看一眼链路：可能刚好断了，也可能刚好连上（WiFi 连上要立刻刷新）
+        let online = has_usable_link();
+
         match command {
-            // 定时到点（或收件箱关了）：照常刷新
-            None => refresh_once(&config, &state, &gui, false, &mut failures, None).await,
+            // 定时到点：没网就跳过这次请求，只把"未联网"告诉界面一次
+            None if !online => {
+                if !offline_announced {
+                    log::info!(
+                        "未联网，暂停天气刷新（每 {} 秒只探测一次本地链路，不发请求）",
+                        OFFLINE_PROBE.as_secs()
+                    );
+                    apply_offline(&state, &display_city(&config));
+                    push(&gui, &state).await;
+                    offline_announced = true;
+                }
+            }
+            None => {
+                if offline_announced {
+                    log::info!("网络已恢复，天气刷新继续");
+                    offline_announced = false;
+                }
+                refresh_once(&config, &state, &gui, false, &mut failures, None).await;
+            }
             Some(WeatherCommand::Publish) => push(&gui, &state).await,
+            // 手动刷新：没网就直接回"未联网"，别让用户对着转圈等 6 秒超时
             Some(WeatherCommand::Refresh { announce, reply }) => {
-                refresh_once(&config, &state, &gui, announce, &mut failures, reply).await;
+                if online {
+                    offline_announced = false;
+                    refresh_once(&config, &state, &gui, announce, &mut failures, reply).await;
+                } else {
+                    log::info!("手动刷新：当前未联网，直接返回");
+                    apply_offline(&state, &display_city(&config));
+                    push(&gui, &state).await;
+                    offline_announced = true;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(shared(&state).clone());
+                    }
+                }
             }
         }
     }
@@ -620,6 +661,62 @@ async fn save_cache(snapshot: &WeatherSnapshot) {
     }
 }
 
+/// 本机到底有没有"用得上"的网络：存在默认路由，且该网卡处于 up。
+///
+/// 只读 `/proc/net/route` 与 `/sys/class/net/<iface>/operstate`，一个包都不发，
+/// 所以断网时可以放心地每 15 秒调一次 —— 这比"发一次 HTTP 等 6 秒超时"便宜得多，
+/// 也不会在没网时刷屏。读不到路由表就返回 true（不拦着，交给正常刷新去试）。
+fn has_usable_link() -> bool {
+    let Ok(routes) = std::fs::read_to_string("/proc/net/route") else {
+        return true;
+    };
+    route_table_is_online(&routes, |iface| {
+        std::fs::read_to_string(format!("/sys/class/net/{iface}/operstate"))
+            .ok()
+            .map(|text| text.trim().to_string())
+    })
+}
+
+/// 判断路由表内容的纯函数（抽出来是为了能单测：真实断网环境没法在测试里造）。
+///
+/// 规则：存在默认路由（目的地址 0.0.0.0）、且该网卡处于 up／unknown。
+fn route_table_is_online(routes: &str, operstate: impl Fn(&str) -> Option<String>) -> bool {
+    for line in routes.lines().skip(1) {
+        let mut fields = line.split_whitespace();
+        let (Some(iface), Some(destination)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        // 只看默认路由（目的地址 0.0.0.0），回环不算
+        if iface == "lo" || destination != "00000000" {
+            continue;
+        }
+        // 虚拟网卡可能报 unknown，按"可用"处理，免得把能用的网络挡掉
+        match operstate(iface).as_deref() {
+            Some("up") | Some("unknown") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// 没网：保留旧数据，只把状态与说明改成"未联网"。
+///
+/// 与 [`apply_failure`] 的区别在语义：失败是"试过了没成"，离线是"根本没试"。
+/// 文案要说清是没联网，用户才知道该去连 WiFi，而不是以为天气服务坏了。
+fn apply_offline(state: &Shared, city: &str) {
+    let mut snapshot = shared(state);
+    if snapshot.has_data() {
+        // 用独立状态而不是 stale：界面据此把"未联网"明说，而不是只含糊地说
+        // "上次数据" —— 用户才知道该去连 WiFi，而不是以为天气服务挂了。
+        snapshot.status = "offline".to_string();
+        snapshot.message = "未联网，显示上次数据".to_string();
+    } else {
+        snapshot.status = "error".to_string();
+        snapshot.message = "未联网，连上网络后自动刷新".to_string();
+        snapshot.city = city.to_string();
+    }
+}
+
 /// 连续失败后把重试间隔逐次翻倍（15s → 30s → …），最多回到正常刷新间隔。
 fn backoff(failures: u32, normal: Duration) -> Duration {
     let steps = failures.saturating_sub(1).min(6);
@@ -798,6 +895,30 @@ mod tests {
         assert_eq!(backoff(2, normal), Duration::from_secs(30));
         assert_eq!(backoff(3, normal), Duration::from_secs(60));
         assert_eq!(backoff(99, normal), normal);
+    }
+
+    #[test]
+    fn no_default_route_means_offline() {
+        // 只有局域网路由（目的地址不是 0.0.0.0）时不算联网 —— 断 WiFi 后还剩
+        // 169.254 之类的本地路由，不能把它当"有网"
+        let table = "Iface\tDestination\tGateway\nwlan0\t00FFFFFF\t00000000\n";
+        assert!(!route_table_is_online(table, |_| Some("up".to_string())));
+    }
+
+    #[test]
+    fn default_route_counts_only_when_the_interface_is_up() {
+        let table = "Iface\tDestination\tGateway\nwlan0\t00000000\t0101A8C0\n";
+        assert!(route_table_is_online(table, |_| Some("up".to_string())));
+        // 网卡 down（比如 WiFi 断了但路由表没清）时不算联网
+        assert!(!route_table_is_online(table, |_| Some("down".to_string())));
+        // 虚拟网卡报 unknown 时按可用处理，免得误判成离线
+        assert!(route_table_is_online(table, |_| Some("unknown".to_string())));
+    }
+
+    #[test]
+    fn loopback_default_route_is_not_the_internet() {
+        let table = "Iface\tDestination\tGateway\nlo\t00000000\t00000000\n";
+        assert!(!route_table_is_online(table, |_| Some("up".to_string())));
     }
 
     #[test]

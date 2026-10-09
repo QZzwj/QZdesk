@@ -6,10 +6,12 @@
 #include "config.h"
 #include "desktop.h"
 #include "settings.h"
+#include "weather_page.h"
 #include "theme.h"
 #include "qzdesk_core_process.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #if LV_USE_SIMULATOR
 #include <SDL2/SDL.h>
@@ -68,19 +70,52 @@ int main(void)
     qz_apps_set_desktop(desktop);
     qz_apps_set_skill_screen(skills);
     qz_apps_set_performance_screen(performance);
+    qz_apps_set_settings_screen(settings);
     qz_applets_init(apps);
     qz_assistant_set_desktop(desktop);
     qz_settings_set_desktop(desktop);
     lv_screen_load(desktop);
+    /* 开机耗时基线：先强制刷一帧（否则"标记"记的是加载时刻，不是真的出图时刻），
+     * 再打印 uptime。与 S30qzdesk 里那条 "启动 uptime=" 相减，就是界面从被拉起
+     * 到出图的耗时；两者都取自同一个内核时钟，跨进程可比。 */
+    lv_refr_now(NULL);
+    {
+        FILE *fp = fopen("/proc/uptime", "r");
+        if (fp) {
+            double boot = 0.0;
+            if (fscanf(fp, "%lf", &boot) == 1) {
+                fprintf(stderr, "QZdesk: 首帧 uptime=%.2f\n", boot);
+            }
+            fclose(fp);
+        }
+    }
     /* 免触摸调试口：QZDESK_OPEN=camera|pomodoro|apps… 启动后直接打开对应页，
      * 无头截图 / 自动化验证用。取 applet 枚举小写名，桌面/助手页也认。 */
     {
         const char *open = getenv("QZDESK_OPEN");
         if (open && *open) {
-            if (strcmp(open, "camera") == 0) {
-                lv_screen_load(qz_applets_screen(QZ_APPLET_CAMERA));
-            } else if (strcmp(open, "apps") == 0) {
+            if (strcmp(open, "apps") == 0) {
                 lv_screen_load(apps);
+            } else if (strcmp(open, "settings") == 0) {
+                lv_screen_load(settings);
+            } else if (strcmp(open, "performance") == 0) {
+                lv_screen_load(performance);
+            } else if (strcmp(open, "assistant") == 0) {
+                lv_screen_load(assistant);
+            } else if (strcmp(open, "skills") == 0) {
+                lv_screen_load(skills);
+            } else if (strcmp(open, "weather") == 0) {
+                qz_weather_page_open();
+            } else {
+                static const char *names[] = {
+                    "status", "reminder", "pomodoro", "control", "face", "camera"
+                };
+                for (int id = 0; id < QZ_APPLET_COUNT; id++) {
+                    if (strcmp(open, names[id]) == 0) {
+                        lv_screen_load(qz_applets_screen((qz_applet_t)id));
+                        break;
+                    }
+                }
             }
         }
     }

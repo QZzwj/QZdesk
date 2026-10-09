@@ -6,10 +6,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#define KEYBOARD_H 140
-#define CHAT_AREA_H (QZ_DESIGN_H - QZ_TOOLBAR_H)
-#define COMPOSER_H 48
-#define CHAT_LIST_H (CHAT_AREA_H - COMPOSER_H)
+#define KEYBOARD_H 132
+#define CHAT_TOP 60
+#define CHAT_AREA_H (QZ_DESIGN_H - CHAT_TOP)
+#define COMPOSER_H 54
+#define CHAT_LIST_H (QZ_DESIGN_H - CHAT_TOP - COMPOSER_H)
 
 static lv_obj_t *screen;
 static lv_obj_t *chat_view;
@@ -24,6 +25,7 @@ static lv_obj_t *face_caption;
 static lv_obj_t *face_hint;
 static lv_obj_t *mode_button;
 static lv_obj_t *mode_button_text;
+static lv_obj_t *mode_button_icon;
 static lv_obj_t *state_label;
 static lv_obj_t *state_dot;
 static lv_obj_t *desktop_screen;
@@ -96,8 +98,7 @@ static lv_obj_t *add_bubble(const char *text, bool from_user)
 
     lv_obj_t *row = bubble_row(from_user);
     lv_obj_t *bubble = lv_obj_create(row);
-    lv_obj_set_size(bubble, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_width(bubble, lv_pct(84), 0);
+    lv_obj_set_size(bubble, lv_pct(90), LV_SIZE_CONTENT);
     lv_obj_set_style_pad_left(bubble, 11, 0);
     lv_obj_set_style_pad_right(bubble, 11, 0);
     lv_obj_set_style_pad_top(bubble, 8, 0);
@@ -123,8 +124,8 @@ static lv_obj_t *add_bubble(const char *text, bool from_user)
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t *label = qz_text(bubble, text, 13, qz_color(from_user ? QZ_TEXT_ON_ACCENT : QZ_TEXT));
-    lv_obj_set_width(label, LV_SIZE_CONTENT);
+    lv_obj_t *label = qz_text(bubble, text, 17, qz_color(from_user ? QZ_TEXT_ON_ACCENT : QZ_TEXT));
+    lv_obj_set_width(label, lv_pct(100));
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_line_space(label, 4, 0);
     lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
@@ -394,7 +395,11 @@ static void input_event(lv_event_t *event)
         scroll_to_latest();
     } else if (code == LV_EVENT_READY) {
         lv_obj_clear_state(message_input, LV_STATE_FOCUSED);
+        lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(composer, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_set_height(chat_list, CHAT_LIST_H);
         send_message(event);
+        scroll_to_latest();
     }
 }
 
@@ -406,8 +411,10 @@ static void update_mode_button(void)
 {
     if (!mode_button_text) return;
     lv_label_set_text(mode_button_text, face_mode ? "聊天" : "表情");
-    lv_obj_t *icon = lv_obj_get_child(mode_button, 0);
-    if (icon) lv_label_set_text(icon, face_mode ? LV_SYMBOL_KEYBOARD : LV_SYMBOL_IMAGE);
+    if (mode_button_icon) lv_obj_delete(mode_button_icon);
+    mode_button_icon = qz_symbol(mode_button, face_mode ? LV_SYMBOL_KEYBOARD : LV_SYMBOL_IMAGE,
+                                  18, qz_color(QZ_ACCENT_TEXT));
+    lv_obj_align(mode_button_icon, LV_ALIGN_LEFT_MID, 10, 0);
 }
 
 static void show_mode(bool show_face)
@@ -416,7 +423,10 @@ static void show_mode(bool show_face)
     face_mode = show_face;
 
     if (show_face) {
+        lv_obj_remove_state(message_input, LV_STATE_FOCUSED);
         lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(composer, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_set_height(chat_list, CHAT_LIST_H);
         lv_obj_add_flag(chat_view, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(face_view, LV_OBJ_FLAG_HIDDEN);
         qz_animate_pop_in(face_view);
@@ -511,28 +521,28 @@ static lv_obj_t *mic_glyph(lv_obj_t *parent, int32_t size, lv_color_t color)
 static void build_toolbar(void)
 {
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 46);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
-    lv_obj_t *back = qz_icon_button(toolbar, LV_SYMBOL_LEFT, 30);
+    lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, back_to_desktop, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "AI 助手", 15, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_CENTER, -50, 0);
+    lv_obj_t *title = qz_text(toolbar, "AI 助手", 18, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_CENTER, -65, 0);
     state_dot = lv_obj_create(toolbar);
     lv_obj_set_size(state_dot, 6, 6);
-    lv_obj_align(state_dot, LV_ALIGN_CENTER, 4, 0);
+    lv_obj_align(state_dot, LV_ALIGN_CENTER, -10, 0);
     lv_obj_set_style_radius(state_dot, LV_RADIUS_CIRCLE, 0);
     qz_obj_set_bg_color(state_dot, QZ_ORANGE, 0);
     lv_obj_set_style_border_width(state_dot, 0, 0);
     lv_obj_clear_flag(state_dot, LV_OBJ_FLAG_CLICKABLE);
-    state_label = qz_text(toolbar, "连接中", 11, qz_color(QZ_TEXT_SECONDARY));
+    state_label = qz_text(toolbar, "连接中", 16, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(state_label, LV_ALIGN_CENTER, 26, 0);
 
     mode_button = lv_button_create(toolbar);
-    lv_obj_set_size(mode_button, 78, 26);
+    lv_obj_set_size(mode_button, 104, 40);
     lv_obj_align(mode_button, LV_ALIGN_RIGHT_MID, -8, 0);
     lv_obj_set_style_radius(mode_button, LV_RADIUS_CIRCLE, 0);
     /* iOS tinted capsule: soft blue fill, blue glyph + caption. */
@@ -542,20 +552,16 @@ static void build_toolbar(void)
     lv_obj_set_style_pad_all(mode_button, 0, 0);
     qz_add_press_feedback(mode_button);
     qz_add_press_scale(mode_button, 96);
-    lv_obj_t *icon = qz_symbol(mode_button, LV_SYMBOL_IMAGE, 12, qz_color(QZ_ACCENT_TEXT));
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
-    mode_button_text = qz_text(mode_button, "表情", 12, qz_color(QZ_ACCENT_TEXT));
-    lv_obj_align(mode_button_text, LV_ALIGN_LEFT_MID, 27, 0);
+    mode_button_icon = qz_symbol(mode_button, LV_SYMBOL_IMAGE, 18, qz_color(QZ_ACCENT_TEXT));
+    lv_obj_align(mode_button_icon, LV_ALIGN_LEFT_MID, 10, 0);
+    mode_button_text = qz_text(mode_button, "表情", 17, qz_color(QZ_ACCENT_TEXT));
+    lv_obj_align(mode_button_text, LV_ALIGN_LEFT_MID, 38, 0);
     lv_obj_add_event_cb(mode_button, toggle_mode, LV_EVENT_CLICKED, NULL);
 }
 
 static void build_chat_view(void)
 {
-    /* The list runs the full height and is padded clear of the bar and the
-     * composer, so content passes *underneath* both: that is what turns the
-     * translucent material into glass — a translucent fill over nothing reads as
-     * flat grey. build_toolbar() runs first and is moved to the foreground in
-     * qz_assistant_create() so the bar stays on top of it. */
+    /* 聊天记录在固定的内容窗口内滚动；键盘打开时只缩短这块窗口。 */
     chat_view = lv_obj_create(screen);
     lv_obj_set_size(chat_view, lv_pct(100), QZ_DESIGN_H);
     lv_obj_align(chat_view, LV_ALIGN_TOP_MID, 0, 0);
@@ -565,19 +571,20 @@ static void build_chat_view(void)
     lv_obj_clear_flag(chat_view, LV_OBJ_FLAG_SCROLLABLE);
 
     chat_list = lv_obj_create(chat_view);
-    lv_obj_set_size(chat_list, lv_pct(100), QZ_DESIGN_H);
-    lv_obj_align(chat_list, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_size(chat_list, lv_pct(100), CHAT_LIST_H);
+    lv_obj_align(chat_list, LV_ALIGN_TOP_MID, 0, CHAT_TOP);
     lv_obj_set_style_bg_opa(chat_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(chat_list, 0, 0);
     lv_obj_set_style_pad_left(chat_list, 12, 0);
     lv_obj_set_style_pad_right(chat_list, 12, 0);
-    lv_obj_set_style_pad_top(chat_list, QZ_TOOLBAR_H + 12, 0);
-    lv_obj_set_style_pad_bottom(chat_list, COMPOSER_H + 12, 0);
+    lv_obj_set_style_pad_top(chat_list, 6, 0);
+    lv_obj_set_style_pad_bottom(chat_list, 6, 0);
     lv_obj_set_style_pad_row(chat_list, 8, 0);
     lv_obj_set_flex_flow(chat_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(chat_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_add_flag(chat_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(chat_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(chat_list, LV_SCROLLBAR_MODE_OFF);
 
     composer = lv_obj_create(chat_view);
@@ -599,7 +606,7 @@ static void build_chat_view(void)
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
     message_input = lv_textarea_create(bar);
-    lv_obj_set_size(message_input, 358, 34);
+    lv_obj_set_size(message_input, 318, 44);
     lv_obj_align(message_input, LV_ALIGN_LEFT_MID, 8, 0);
     lv_textarea_set_one_line(message_input, true);
     lv_textarea_set_placeholder_text(message_input, "输入消息…");
@@ -607,8 +614,8 @@ static void build_chat_view(void)
     lv_obj_add_event_cb(message_input, input_event, LV_EVENT_ALL, NULL);
 
     lv_obj_t *mic = lv_button_create(bar);
-    lv_obj_set_size(mic, 34, 34);
-    lv_obj_align(mic, LV_ALIGN_RIGHT_MID, -50, 0);
+    lv_obj_set_size(mic, 44, 44);
+    lv_obj_align(mic, LV_ALIGN_RIGHT_MID, -62, 0);
     lv_obj_set_style_radius(mic, LV_RADIUS_CIRCLE, 0);
     qz_obj_set_bg_color(mic, QZ_FILL, 0);
     qz_obj_set_bg_color(mic, QZ_FILL_PRESSED, LV_STATE_PRESSED);
@@ -620,13 +627,14 @@ static void build_chat_view(void)
     lv_obj_center(mic_box);
     lv_obj_add_event_cb(mic, talk_pressed, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(mic, talk_released, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(mic, talk_released, LV_EVENT_PRESS_LOST, NULL);
 
     send_button = lv_button_create(bar);
-    lv_obj_set_size(send_button, 34, 34);
+    lv_obj_set_size(send_button, 44, 44);
     lv_obj_align(send_button, LV_ALIGN_RIGHT_MID, -8, 0);
     qz_style_primary_button(send_button);
     qz_add_press_scale(send_button, 94);
-    lv_obj_t *arrow = qz_symbol(send_button, LV_SYMBOL_UP, 15, qz_color(QZ_TEXT_ON_ACCENT));
+    lv_obj_t *arrow = qz_symbol(send_button, LV_SYMBOL_UP, 20, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_center(arrow);
     lv_obj_add_event_cb(send_button, send_message, LV_EVENT_CLICKED, NULL);
 
@@ -642,25 +650,27 @@ static void build_face_view(void)
 {
     face_view = lv_obj_create(screen);
     lv_obj_set_size(face_view, lv_pct(100), CHAT_AREA_H);
-    lv_obj_align(face_view, LV_ALIGN_TOP_MID, 0, QZ_TOOLBAR_H);
+    lv_obj_align(face_view, LV_ALIGN_TOP_MID, 0, CHAT_TOP);
     lv_obj_set_style_bg_opa(face_view, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(face_view, 0, 0);
     lv_obj_set_style_pad_all(face_view, 0, 0);
     lv_obj_clear_flag(face_view, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(face_view, LV_OBJ_FLAG_HIDDEN);
 
-    big_face = qz_face_create(face_view, 164);
-    lv_obj_align(big_face, LV_ALIGN_LEFT_MID, 30, 0);
+    big_face = qz_face_create(face_view, 160);
+    lv_obj_align(big_face, LV_ALIGN_LEFT_MID, 24, -12);
 
-    face_caption = qz_text(face_view, qz_face_state_text(QZ_FACE_IDLE), 17, qz_color(QZ_TEXT));
-    lv_obj_align(face_caption, LV_ALIGN_TOP_LEFT, 200, 88);
+    face_caption = qz_text(face_view, qz_face_state_text(QZ_FACE_IDLE), 20, qz_color(QZ_TEXT));
+    lv_obj_align(face_caption, LV_ALIGN_TOP_LEFT, 210, 60);
+    lv_obj_set_width(face_caption, 240);
+    lv_label_set_long_mode(face_caption, LV_LABEL_LONG_WRAP);
 
-    face_hint = qz_text(face_view, "右上角可切回聊天", 11, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(face_hint, LV_ALIGN_TOP_LEFT, 200, 116);
+    face_hint = qz_text(face_view, "右上角切回聊天", 16, qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_align(face_hint, LV_ALIGN_TOP_LEFT, 210, 102);
 
     lv_obj_t *talk = lv_button_create(face_view);
-    lv_obj_set_size(talk, 240, 48);
-    lv_obj_align(talk, LV_ALIGN_TOP_LEFT, 200, 156);
+    lv_obj_set_size(talk, 240, 52);
+    lv_obj_align(talk, LV_ALIGN_TOP_LEFT, 210, 156);
     lv_obj_set_style_radius(talk, LV_RADIUS_CIRCLE, 0);
     qz_obj_set_bg_color(talk, QZ_ACCENT, 0);
     lv_obj_set_style_bg_grad_dir(talk, LV_GRAD_DIR_NONE, 0);
@@ -672,7 +682,7 @@ static void build_face_view(void)
     qz_add_press_feedback(talk);
     qz_add_press_scale(talk, 97);
     mic_glyph(talk, 21, qz_color(QZ_TEXT_ON_ACCENT));
-    lv_obj_t *talk_text = qz_text(talk, "长按说话", 15, qz_color(QZ_TEXT_ON_ACCENT));
+    lv_obj_t *talk_text = qz_text(talk, "长按说话", 17, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_align(talk_text, LV_ALIGN_CENTER, 14, 0);
     lv_obj_t *mic_box = lv_obj_get_child(talk, 0);
     lv_obj_align(mic_box, LV_ALIGN_CENTER, -46, 0);

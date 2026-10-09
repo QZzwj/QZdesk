@@ -1,7 +1,22 @@
 /**
- * Performance monitor with fixed-height sections. Each section fits the
- * 320x240 minimum panel; tabs keep the full set of readings available without
- * shrinking text or extending the page below the display.
+ * Performance monitor page —— 按真机面板 **320×240** 标定。
+ *
+ * 面板比 480×320 的设计稿小，缩放统一在 scale.h 里做（设计稿 ×0.75 铺满实屏）。
+ * 所以本文件里每个数字都按「真机想要的实像素 × 4/3」写：设计 24 的大数字在真机
+ * 上是 18px、设计 16 的卡片标题是 12px、设计 15 的明细行是 11px（小屏字号下限）。
+ *
+ * 竖向预算（设计像素，内容区正好 264 = QZ_DESIGN_H - CONTENT_TOP - 4，一屏装完、
+ * 不需要滑动）：
+ *
+ *   ┌ 概览 50       CPU / 内存 / 磁盘 / 温度 四格并排：名称 + 等级、大数字、量级条
+ *   ├ CPU  52       大数字 + 量级条 + 最近 60 点曲线（右侧 210×44）
+ *   ├ 各核心 28     一行 5 列，每列「标签在上、细条在下」（11px 的数字并排塞不进格子）
+ *   ├ 内存 | 存储 50 数字 + 一行明细（量级条在概览里已经有了，不重复画）
+ *   └ 状态 | 进程 60 左右各三行明细；小屏不设卡片标题，行本身自解释
+ *   合计 50+6+52+6+28+6+50+6+60 = 264
+ *
+ * 小屏放不下时先砍次要、不砍数字：各核心只铺一行（数字超过 5 个就在标题上标"前5"）、
+ * CPU 只留 1 分钟负载、设备状态的服务压成一句「服务正常 / 服务 音频已停止」。
  *
  * All numbers come from the core's 2-second sample (`QZDESK_CORE_EVENT_PERFORMANCE`),
  * so the device and the web console show the same data and nothing is sampled on
@@ -14,21 +29,64 @@
 #include <string.h>
 #include <time.h>
 
-#define CARD_W (QZ_DESIGN_W - 2 * QZ_GUTTER) /* 452 */
-#define CONTENT_TOP 102
-#define CONTENT_H 208
-#define CORE_COLUMNS 4
-#define MAX_CORE_ROWS 4
-#define STATUS_LINES 4
-#define PROCESS_LINES 4
-#define CHART_POINTS QZDESK_PERFORMANCE_HISTORY
+/* ------------------------------------------------------------------------- *
+ * 画布与字号（设计像素；面板 320×240 上 ×0.75 = 真机像素）
+ * ------------------------------------------------------------------------- */
 
-#define SECTION_COUNT 5
+#define CARD_W (QZ_DESIGN_W - 2 * QZ_GUTTER)      /* 452 */
+#define CONTENT_TOP (QZ_TOOLBAR_H + 8)            /* 52 */
+#define CONTENT_H (QZ_DESIGN_H - CONTENT_TOP - 4) /* 264：一屏的竖向预算 */
+
+#define FS_TITLE 19   /**< 工具栏标题（真机 14） */
+#define FS_UPDATE 15  /**< 工具栏右侧更新时间（真机 11） */
+#define FS_CAPTION 16 /**< 卡片标题（真机 12） */
+#define FS_NAME 15    /**< 概览四格的名称与等级（真机 11） */
+#define FS_VALUE 24   /**< 概览与 CPU 的大数字（真机 18） */
+#define FS_VALUE_S 20 /**< 内存 / 存储的数字（真机 15） */
+#define FS_LINE 15    /**< 明细行（真机 11） */
+
+/* 明细行的高度：锁成一行，LONG_DOT 才会打点而不是折行（LVGL 是"先换行、再打点"，
+ * 字变大以后不锁高度就会折出第二行、叠在下一行文字上）。22 设计 = 16.5 实机，
+ * 比 11px 的字行高（~15px）宽一点，也不会顶到下一行。 */
+#define LINE_BOX 22
+
+/* 五条带的高度与纵向位置：合计正好等于 CONTENT_H，多出来的话小屏就要下滑了。 */
+#define ROW_GAP 6
+#define ROW1_Y 0
+#define ROW1_H 50 /* 概览 */
+#define ROW2_Y (ROW1_Y + ROW1_H + ROW_GAP)
+#define ROW2_H 52 /* CPU + 曲线 */
+#define ROW3_Y (ROW2_Y + ROW2_H + ROW_GAP)
+#define ROW3_H 28 /* 各核心（一行） */
+#define ROW4_Y (ROW3_Y + ROW3_H + ROW_GAP)
+#define ROW4_H 50 /* 内存 | 存储 */
+#define ROW5_Y (ROW4_Y + ROW4_H + ROW_GAP)
+#define ROW5_H 60 /* 设备状态 | 进程 */
+
 #define HALF_W ((CARD_W - 10) / 2)
 
 /* 卡片不设内边距（那会把可用高度吃掉 24px，曲线会被裁掉），
  * 内部一律用这个内缩量自己留边，坐标就是卡片左上角起算，心里有数。 */
 #define INSET 12
+
+/* 概览：四格并排，每格自带名称 / 等级 / 数字 / 量级条 */
+#define OVERVIEW_CELLS 4
+#define OVERVIEW_CELL ((CARD_W - 2 * INSET) / OVERVIEW_CELLS)
+
+/* 各核心：一行 5 列（小屏放不下两行 10 个）；标题给「前5」留位置 */
+#define CORE_COLUMNS 5
+#define MAX_CORE_ROWS 1
+#define CORE_CAPTION_W 66
+
+/* 状态与进程各三行：小屏上「卡片标题 + 两行」和「三行」一样高，
+ * 三行数据更有用，所以标题不要了，行本身自解释。 */
+#define STATUS_LINES 3
+#define PROCESS_LINES 3
+#define LINE_PITCH 19 /* 明细行的行距（设计像素） */
+
+#define CHART_POINTS QZDESK_PERFORMANCE_HISTORY
+#define CHART_W 210
+#define CHART_H 44
 
 static lv_obj_t *screen;
 static lv_obj_t *apps_screen_ref;
@@ -36,33 +94,30 @@ static lv_obj_t *update_label;
 static bool visible;
 /** 曲线是否已经用核心给的历史填满过（之后每次只追加一个点）。 */
 static bool chart_seeded;
-static lv_obj_t *sections[SECTION_COUNT];
-static lv_obj_t *section_buttons[SECTION_COUNT];
 
 /* 概览：CPU / 内存 / 磁盘 / 温度 */
-static lv_obj_t *overview_bar[4];
-static lv_obj_t *overview_value[4];
-static lv_obj_t *overview_note[4];
-static const char *overview_title[4] = {"CPU", "内存", "磁盘", "温度"};
+static lv_obj_t *overview_value[OVERVIEW_CELLS];
+static lv_obj_t *overview_note[OVERVIEW_CELLS];
+static lv_obj_t *overview_bar[OVERVIEW_CELLS];
+static const char *overview_title[OVERVIEW_CELLS] = {"CPU", "内存", "磁盘", "温度"};
 
 /* CPU */
 static lv_obj_t *cpu_value;
-static lv_obj_t *cpu_note;
+static lv_obj_t *cpu_load;
 static lv_obj_t *cpu_bar;
 static lv_obj_t *cpu_chart;
 static lv_chart_series_t *cpu_series;
 
 /* 各核心 */
+static lv_obj_t *cores_caption;
 static lv_obj_t *core_bar[QZDESK_PERFORMANCE_CORES];
 static lv_obj_t *core_label[QZDESK_PERFORMANCE_CORES];
 
 /* 内存 / 存储 */
 static lv_obj_t *memory_value;
 static lv_obj_t *memory_detail;
-static lv_obj_t *memory_bar;
 static lv_obj_t *storage_value;
 static lv_obj_t *storage_detail;
-static lv_obj_t *storage_bar;
 
 /* 状态 / 进程 */
 static lv_obj_t *status_line[STATUS_LINES];
@@ -93,14 +148,30 @@ static const char *level_caption(qzdesk_level_t level)
     }
 }
 
-static const char *service_caption(qzdesk_service_t service)
+/**
+ * 三个服务压成一句：全在跑就是「服务正常」，否则点名第一个不对的。
+ *
+ * 480×320 上那行是逐服务列出（"服务 运行中 · 运行中 · 运行中"，29 个字），小屏
+ * 一行只有 ~100px，塞不下；压成一句既留住了"有没有服务挂了"这个诊断信息，
+ * 又不会把 Wi-Fi / 延迟挤掉。
+ */
+static void write_services(char *buffer, size_t size, const qzdesk_core_performance_t *data)
 {
-    switch (service) {
-    case QZDESK_SERVICE_RUNNING: return "运行中";
-    case QZDESK_SERVICE_STOPPED: return "已停止";
-    case QZDESK_SERVICE_DISABLED: return "已关闭";
-    default: return "未知";
+    static const char *const NAMES[3] = {"核心", "界面", "音频"};
+    const qzdesk_service_t states[3] = {data->core_service, data->ui_service,
+                                        data->audio_service};
+    int index;
+
+    if (!buffer || size == 0) return;
+    for (index = 0; index < 3; index++) {
+        if (states[index] == QZDESK_SERVICE_RUNNING) continue;
+        snprintf(buffer, size, "服务 %s%s", NAMES[index],
+                 states[index] == QZDESK_SERVICE_STOPPED
+                     ? "已停止"
+                     : (states[index] == QZDESK_SERVICE_DISABLED ? "已关闭" : "未知"));
+        return;
     }
+    snprintf(buffer, size, "服务正常");
 }
 
 /* ------------------------------------------------------------------------- *
@@ -204,20 +275,59 @@ static lv_obj_t *card(lv_obj_t *parent, int x, int y, int width, int height)
     return plate;
 }
 
-static lv_obj_t *caption(lv_obj_t *parent, const char *text)
+/** 一块透明的定位/排版容器（不画背景、不吃内边距、不滚动） */
+static lv_obj_t *plain_box(lv_obj_t *parent, int x, int y, int width, int height)
 {
-    lv_obj_t *label = qz_text(parent, text, 17, qz_color(QZ_TEXT));
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, INSET, 6);
-    return label;
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_shadow_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    if (width == 0 && height == 0) {
+        /* 排版容器（flex 行）：尺寸交给内容 */
+        lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    } else {
+        lv_obj_set_size(box, width, height);
+    }
+    lv_obj_set_pos(box, x, y);
+    return box;
 }
 
-/** 明细允许换行，各分区预留足够行高，长文本不以省略号截断。 */
+/**
+ * 「名称 + 大数字（+ 副标签）」同排。
+ *
+ * 小屏一行只有 240px，"标题一行、数字一行"太浪费高度；并排后数字照样大、还省下
+ * 一行。标签宽度不定（12.4% / 100.0% / 不可用），用 flex 自动贴在一起，
+ * 免得给大数字写死一个宽度。
+ */
+static lv_obj_t *flex_row(lv_obj_t *parent, int x, int y)
+{
+    lv_obj_t *row = plain_box(parent, x, y, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    return row;
+}
+
+/** flex 行里的一个标签；返回它，方便之后只改文字/颜色 */
+static lv_obj_t *row_label(lv_obj_t *row, const char *text, int32_t px,
+                           qz_color_token_t token)
+{
+    return qz_text(row, text, px, qz_color(token));
+}
+
+/**
+ * 单行文本：固定宽度 + 省略号，装不下就点掉，绝不换行把卡片撑高。
+ */
 static lv_obj_t *line(lv_obj_t *parent, int x, int y, int width, qz_color_token_t token)
 {
-    lv_obj_t *label = qz_text(parent, "", 16, qz_color(token));
+    lv_obj_t *label = qz_text(parent, "", FS_LINE, qz_color(token));
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, x, y);
     lv_obj_set_width(label, width);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(label, LINE_BOX);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     return label;
 }
 
@@ -257,32 +367,43 @@ static void bar_set(lv_obj_t *bar, int value_x10, qz_color_token_t color, bool a
 
 static void build_overview(lv_obj_t *content)
 {
-    lv_obj_t *plate = card(content, QZ_GUTTER, 0, CARD_W, 96);
-    int cell = (CARD_W - 2 * INSET) / 4;
-    for (int index = 0; index < 4; index++) {
-        int x = INSET + index * cell;
-        lv_obj_t *name = qz_text(plate, overview_title[index], 16, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_align(name, LV_ALIGN_TOP_LEFT, x, 6);
-        overview_value[index] = qz_text(plate, "--", 22, qz_color(QZ_TEXT));
-        lv_obj_align(overview_value[index], LV_ALIGN_TOP_LEFT, x, 30);
-        overview_note[index] = qz_text(plate, "", 16, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_align(overview_note[index], LV_ALIGN_TOP_LEFT, x, 61);
-        overview_bar[index] = metric_bar(plate, x, 86, cell - 12, 5);
+    /* 概览是全页重点：名称与等级一行、18px 的数字一行、量级条收尾。 */
+    lv_obj_t *plate = card(content, QZ_GUTTER, ROW1_Y, CARD_W, ROW1_H);
+    for (int index = 0; index < OVERVIEW_CELLS; index++) {
+        lv_obj_t *cell = plain_box(plate, INSET + index * OVERVIEW_CELL, 0, OVERVIEW_CELL,
+                                   ROW1_H);
+        lv_obj_t *name = qz_text(cell, overview_title[index], FS_NAME,
+                                 qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 0, 2);
+
+        /* 等级说明靠右：数字最长是 "100.0%"，真到那一步两者会挨得很近，
+         * 但说明是后画的，仍读得出来 —— 比把说明整行砍掉强。 */
+        overview_note[index] = qz_text(cell, "", FS_NAME, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_align(overview_note[index], LV_ALIGN_TOP_RIGHT, -2, 3);
+
+        overview_value[index] = qz_text(cell, "--", FS_VALUE, qz_color(QZ_TEXT));
+        lv_obj_align(overview_value[index], LV_ALIGN_TOP_LEFT, 0, 14);
+
+        overview_bar[index] = metric_bar(cell, 0, 42, OVERVIEW_CELL - 10, 5);
     }
 }
 
 static void build_cpu(lv_obj_t *content)
 {
-    lv_obj_t *plate = card(content, QZ_GUTTER, 104, CARD_W, 104);
-    caption(plate, "CPU / 负载");
-    cpu_value = qz_text(plate, "--", 22, qz_color(QZ_TEXT));
-    lv_obj_align(cpu_value, LV_ALIGN_TOP_LEFT, INSET, 28);
-    cpu_bar = metric_bar(plate, INSET, 58, 174, 5);
-    cpu_note = line(plate, INSET, 63, 186, QZ_TEXT_SECONDARY);
+    lv_obj_t *plate = card(content, QZ_GUTTER, ROW2_Y, CARD_W, ROW2_H);
 
+    /* 左列：CPU + 使用率 + 1 分钟负载（同排）、量级条 */
+    lv_obj_t *row = flex_row(plate, INSET, 4);
+    row_label(row, "CPU", FS_CAPTION, QZ_TEXT);
+    cpu_value = row_label(row, "--", FS_VALUE, QZ_TEXT);
+    cpu_load = row_label(row, "", FS_LINE, QZ_TEXT_SECONDARY);
+    cpu_bar = metric_bar(plate, INSET, 38, 190, 8);
+
+    /* 右列：最近两分钟的曲线 */
     cpu_chart = lv_chart_create(plate);
-    lv_obj_set_size(cpu_chart, 232, 88);
-    lv_obj_align(cpu_chart, LV_ALIGN_TOP_RIGHT, -INSET, 8);
+    lv_obj_set_size(cpu_chart, CHART_W, CHART_H);
+    lv_obj_align(cpu_chart, LV_ALIGN_TOP_RIGHT, -INSET, 4);
+    /* 固定 60 个点：曲线只滚动显示最近两分钟，不随采样增长 */
     lv_chart_set_type(cpu_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(cpu_chart, CHART_POINTS);
     lv_chart_set_range(cpu_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
@@ -298,67 +419,55 @@ static void build_cpu(lv_obj_t *content)
 
 static void build_cores(lv_obj_t *content)
 {
-    lv_obj_t *plate = card(content, QZ_GUTTER, 0, CARD_W, CONTENT_H);
-    caption(plate, "各核心使用率");
-    int gap = 10;
-    int cell_w = (CARD_W - 2 * INSET - (CORE_COLUMNS - 1) * gap) / CORE_COLUMNS;
+    lv_obj_t *plate = card(content, QZ_GUTTER, ROW3_Y, CARD_W, ROW3_H);
+    cores_caption = qz_text(plate, "各核心", FS_CAPTION, qz_color(QZ_TEXT));
+    lv_obj_align(cores_caption, LV_ALIGN_TOP_LEFT, INSET, 2);
+
+    /* 一行 5 列：每列"标签在上、细条在下"。格子 72 设计像素（实机 54px），
+     * 11px 的"12 100%"约 40px，够用；并排写法会挤掉进度条，所以上下叠。 */
+    int gap = 6;
+    int start = INSET + CORE_CAPTION_W;
+    int cell_w = (CARD_W - INSET - start - (CORE_COLUMNS - 1) * gap) / CORE_COLUMNS;
     for (int index = 0; index < QZDESK_PERFORMANCE_CORES; index++) {
         int column = index % CORE_COLUMNS;
-        int row = index / CORE_COLUMNS;
-        int x = INSET + column * (cell_w + gap);
-        int y = 36 + row * 42;
-        core_label[index] = qz_text(plate, "", 16, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_align(core_label[index], LV_ALIGN_TOP_LEFT, x, y);
-        core_bar[index] = metric_bar(plate, x, y + 25, cell_w - 8, 5);
+        int x = start + column * (cell_w + gap);
+        core_label[index] = qz_text(plate, "", FS_NAME, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_align(core_label[index], LV_ALIGN_TOP_LEFT, x, 2);
+        core_bar[index] = metric_bar(plate, x, 19, cell_w - 6, 5);
+        /* 默认隐藏：核心数少时不要留一串空条 */
         lv_obj_add_flag(core_label[index], LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(core_bar[index], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
-static void build_half(lv_obj_t *content, int x, int y, const char *title, lv_obj_t **value,
-                       lv_obj_t **detail, lv_obj_t **bar)
+/** 内存、存储共用的一格：名称 + 数字同排，下面是明细行（量级条在概览里） */
+static void build_half(lv_obj_t *content, int x, const char *title, lv_obj_t **value,
+                       lv_obj_t **detail)
 {
-    lv_obj_t *plate = card(content, x, y, HALF_W, CONTENT_H);
-    caption(plate, title);
-    *value = qz_text(plate, "--", 22, qz_color(QZ_TEXT));
-    lv_obj_align(*value, LV_ALIGN_TOP_LEFT, INSET, 44);
-    *detail = line(plate, INSET, 89, HALF_W - 2 * INSET, QZ_TEXT_SECONDARY);
-    lv_obj_set_style_text_line_space(*detail, 8, 0);
-    *bar = metric_bar(plate, INSET, 184, HALF_W - 2 * INSET, 8);
+    lv_obj_t *plate = card(content, x, ROW4_Y, HALF_W, ROW4_H);
+    lv_obj_t *row = flex_row(plate, INSET, 8);
+    row_label(row, title, FS_CAPTION, QZ_TEXT);
+    *value = row_label(row, "--", FS_VALUE_S, QZ_TEXT);
+    *detail = line(plate, INSET, 32, HALF_W - 2 * INSET, QZ_TEXT_SECONDARY);
 }
 
+/** 左下的「设备状态」：三行明细，不设卡片标题（行本身自解释） */
 static void build_status(lv_obj_t *content)
 {
-    lv_obj_t *plate = card(content, QZ_GUTTER, 0, CARD_W, CONTENT_H);
-    caption(plate, "设备状态");
+    lv_obj_t *plate = card(content, QZ_GUTTER, ROW5_Y, HALF_W, ROW5_H);
     for (int index = 0; index < STATUS_LINES; index++) {
-        status_line[index] = line(plate, INSET, 38 + index * 42, CARD_W - 2 * INSET,
-                                  QZ_TEXT_SECONDARY);
+        status_line[index] = line(plate, INSET, 3 + index * LINE_PITCH,
+                                  HALF_W - 2 * INSET, QZ_TEXT_SECONDARY);
     }
 }
 
+/** 右下的「进程」：核心 / 界面 / 占用最高，各一行 */
 static void build_processes(lv_obj_t *content)
 {
-    lv_obj_t *plate = card(content, QZ_GUTTER, 0, CARD_W, CONTENT_H);
-    caption(plate, "进程");
+    lv_obj_t *plate = card(content, QZ_GUTTER + HALF_W + 10, ROW5_Y, HALF_W, ROW5_H);
     for (int index = 0; index < PROCESS_LINES; index++) {
-        process_line[index] = line(plate, INSET, 38 + index * 42, CARD_W - 2 * INSET,
-                                   QZ_TEXT_SECONDARY);
-    }
-}
-
-static void select_section(lv_event_t *event)
-{
-    unsigned selected = (unsigned)(uintptr_t)lv_event_get_user_data(event);
-    if (selected >= SECTION_COUNT) return;
-    for (unsigned index = 0; index < SECTION_COUNT; index++) {
-        if (index == selected) {
-            lv_obj_clear_flag(sections[index], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_state(section_buttons[index], LV_STATE_CHECKED);
-        } else {
-            lv_obj_add_flag(sections[index], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_state(section_buttons[index], LV_STATE_CHECKED);
-        }
+        process_line[index] = line(plate, INSET, 3 + index * LINE_PITCH,
+                                   HALF_W - 2 * INSET, QZ_TEXT_SECONDARY);
     }
 }
 
@@ -377,6 +486,7 @@ static void apply(const qzdesk_core_performance_t *data)
     char uptime[32];
     char temperature[16];
     char latency[16];
+    char services[24];
     char text[96];
 
     /* —— 概览四指标 —— */
@@ -386,7 +496,7 @@ static void apply(const qzdesk_core_performance_t *data)
                                 data->temperature_level};
     bool available[4] = {true, true, true, data->has_temperature};
 
-    for (int index = 0; index < 4; index++) {
+    for (int index = 0; index < OVERVIEW_CELLS; index++) {
         if (!available[index]) {
             lv_label_set_text(overview_value[index], "不可用");
             lv_obj_set_style_text_color(overview_value[index], qz_color(QZ_TEXT_TERTIARY), 0);
@@ -401,16 +511,15 @@ static void apply(const qzdesk_core_performance_t *data)
         bar_set(overview_bar[index], values[index], level_color(levels[index]), available[index]);
     }
 
-    /* —— CPU：使用率 + 负载 + 曲线 —— */
+    /* —— CPU：使用率 + 1 分钟负载 + 曲线 —— */
     format_x10(percent, sizeof(percent), data->cpu_x10, "%");
     lv_label_set_text(cpu_value, percent);
     lv_obj_set_style_text_color(cpu_value, qz_color(level_color(data->cpu_level)), 0);
     bar_set(cpu_bar, data->cpu_x10, level_color(data->cpu_level), true);
-    snprintf(text, sizeof(text), "%d.%02d / %d.%02d / %d.%02d",
-             data->load_x100[0] / 100, data->load_x100[0] % 100,
-             data->load_x100[1] / 100, data->load_x100[1] % 100,
-             data->load_x100[2] / 100, data->load_x100[2] % 100);
-    lv_label_set_text(cpu_note, text);
+    /* 小屏一行放不下三段负载，只留 1 分钟那个 —— 5/15 分钟看趋势，页面上有曲线 */
+    snprintf(text, sizeof(text), "负载 %d.%02d", data->load_x100[0] / 100,
+             data->load_x100[0] % 100);
+    lv_label_set_text(cpu_load, text);
 
     /* 曲线：第一次用核心给的历史填满，之后每次只追加最新一点 */
     if (data->history_count > 0) {
@@ -425,7 +534,12 @@ static void apply(const qzdesk_core_performance_t *data)
         }
     }
 
-    /* —— 各核心：最多 16 核，四列四行 —— */
+    /* —— 各核心：一行 5 列，放不下的在标题上说明 —— */
+    if (cores_caption) {
+        lv_label_set_text(cores_caption, data->core_count > CORE_COLUMNS * MAX_CORE_ROWS
+                                             ? "各核心 前5"
+                                             : "各核心");
+    }
     for (int index = 0; index < QZDESK_PERFORMANCE_CORES; index++) {
         bool show = index < data->core_count && (index / CORE_COLUMNS) < MAX_CORE_ROWS;
         if (!show) {
@@ -445,48 +559,41 @@ static void apply(const qzdesk_core_performance_t *data)
         format_size(used, sizeof(used), data->memory_used_kb);
         format_size(total, sizeof(total), data->memory_total_kb);
         format_x10(percent, sizeof(percent), data->memory_x10, "%");
-        snprintf(text, sizeof(text), "内存 %s", percent);
-        lv_label_set_text(memory_value, text);
+        lv_label_set_text(memory_value, percent);
         lv_obj_set_style_text_color(memory_value, qz_color(level_color(data->memory_level)), 0);
         if (data->swap_total_kb > 0) {
             format_size(swap, sizeof(swap), data->swap_used_kb);
-            snprintf(text, sizeof(text), "已用 %s / %s\nSwap %s", used, total, swap);
+            snprintf(text, sizeof(text), "已用 %s / %s · Swap %s", used, total, swap);
         } else {
-            snprintf(text, sizeof(text), "已用 %s / %s\nSwap 未启用", used, total);
+            snprintf(text, sizeof(text), "已用 %s / %s", used, total);
         }
         lv_label_set_text(memory_detail, text);
-        bar_set(memory_bar, data->memory_x10, level_color(data->memory_level), true);
     } else {
-        lv_label_set_text(memory_value, "内存 不可用");
+        lv_label_set_text(memory_value, "不可用");
         lv_obj_set_style_text_color(memory_value, qz_color(QZ_TEXT_TERTIARY), 0);
         lv_label_set_text(memory_detail, "");
-        bar_set(memory_bar, 0, QZ_TEXT_TERTIARY, false);
     }
 
     if (data->storage_total_kb > 0) {
         format_size(used, sizeof(used), data->storage_used_kb);
         format_size(total, sizeof(total), data->storage_total_kb);
         format_x10(percent, sizeof(percent), data->storage_x10, "%");
-        snprintf(text, sizeof(text), "磁盘 %s", percent);
-        lv_label_set_text(storage_value, text);
+        lv_label_set_text(storage_value, percent);
         lv_obj_set_style_text_color(storage_value, qz_color(level_color(data->storage_level)), 0);
-        snprintf(text, sizeof(text), "已用 %s / %s\n%s", used, total,
+        snprintf(text, sizeof(text), "已用 %s / %s · %s", used, total,
                  level_caption(data->storage_level));
         lv_label_set_text(storage_detail, text);
-        bar_set(storage_bar, data->storage_x10, level_color(data->storage_level), true);
     } else {
-        lv_label_set_text(storage_value, "磁盘 不可用");
+        lv_label_set_text(storage_value, "不可用");
         lv_obj_set_style_text_color(storage_value, qz_color(QZ_TEXT_TERTIARY), 0);
         lv_label_set_text(storage_detail, "");
-        bar_set(storage_bar, 0, QZ_TEXT_TERTIARY, false);
     }
 
-    /* —— 设备状态：四行，一行一件事 —— */
+    /* —— 设备状态：三行，一行一件事（小屏不设卡片标题） —— */
     format_duration(uptime, sizeof(uptime), data->uptime_secs);
     snprintf(text, sizeof(text), "运行 %s", uptime);
     lv_label_set_text(status_line[0], text);
 
-    /* 温度与 Wi-Fi 常用一行：都不可用时就直接写文案，省得两行空占位置 */
     if (data->has_temperature) {
         format_x10(temperature, sizeof(temperature), data->temperature_x10, "°C");
         if (data->has_wifi) {
@@ -501,18 +608,14 @@ static void apply(const qzdesk_core_performance_t *data)
     }
     lv_label_set_text(status_line[1], text);
 
+    write_services(services, sizeof(services), data);
     if (data->has_latency) {
         format_x10(latency, sizeof(latency), data->latency_x10, " ms");
-        snprintf(text, sizeof(text), "延迟 %s", latency);
+        snprintf(text, sizeof(text), "延迟 %s · %s", latency, services);
     } else {
-        snprintf(text, sizeof(text), "延迟 不可用");
+        snprintf(text, sizeof(text), "延迟 不可用 · %s", services);
     }
     lv_label_set_text(status_line[2], text);
-
-    snprintf(text, sizeof(text), "核心 %s · 界面 %s\n音频 %s",
-             service_caption(data->core_service), service_caption(data->ui_service),
-             service_caption(data->audio_service));
-    lv_label_set_text(status_line[3], text);
 
     /* —— 进程：核心 / 界面 / 占用最高 —— */
     for (int index = 0; index < PROCESS_LINES; index++) {
@@ -528,7 +631,7 @@ static void apply(const qzdesk_core_performance_t *data)
         time_t seconds = (time_t)data->timestamp;
         struct tm local_time;
         localtime_r(&seconds, &local_time);
-        snprintf(text, sizeof(text), "%02d:%02d:%02d",
+        snprintf(text, sizeof(text), "实时 · %02d:%02d:%02d",
                  local_time.tm_hour, local_time.tm_min, local_time.tm_sec);
     } else {
         snprintf(text, sizeof(text), "等待核心数据");
@@ -581,9 +684,9 @@ lv_obj_t *qz_performance_create(lv_obj_t *apps_screen)
     lv_obj_add_event_cb(screen, on_screen_event, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_event_cb(screen, on_screen_event, LV_EVENT_SCREEN_UNLOADED, NULL);
 
-    /* 顶部：返回 + 标题 + 刷新状态与最近更新时间 */
+    /* 顶部：返回 + 标题 + 最近更新时间 */
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 46);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
@@ -591,43 +694,29 @@ lv_obj_t *qz_performance_create(lv_obj_t *apps_screen)
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, back_to_apps, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "性能监控", 18, qz_color(QZ_TEXT));
+    lv_obj_t *title = qz_text(toolbar, "性能监控", FS_TITLE, qz_color(QZ_TEXT));
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
 
-    update_label = qz_text(toolbar, "等待核心数据", 16, qz_color(QZ_TEXT_SECONDARY));
+    update_label = qz_text(toolbar, "等待核心数据", FS_UPDATE, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(update_label, LV_ALIGN_RIGHT_MID, -10, 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, -24, 0);
 
-    static const char *const names[SECTION_COUNT] = {"概览", "核心", "资源", "状态", "进程"};
-    const int tab_gap = 6;
-    const int tab_w = (CARD_W - (SECTION_COUNT - 1) * tab_gap) / SECTION_COUNT;
-    for (unsigned index = 0; index < SECTION_COUNT; index++) {
-        section_buttons[index] = qz_card_button(screen, tab_w, 36);
-        lv_obj_align(section_buttons[index], LV_ALIGN_TOP_LEFT,
-                     QZ_GUTTER + index * (tab_w + tab_gap), 58);
-        qz_obj_set_bg_color(section_buttons[index], QZ_ACCENT_TINT, LV_STATE_CHECKED);
-        lv_obj_t *label = qz_text(section_buttons[index], names[index], 17, qz_color(QZ_TEXT));
-        lv_obj_center(label);
-        lv_obj_add_event_cb(section_buttons[index], select_section, LV_EVENT_CLICKED,
-                            (void *)(uintptr_t)index);
-        sections[index] = lv_obj_create(screen);
-        lv_obj_set_size(sections[index], QZ_DESIGN_W, CONTENT_H);
-        lv_obj_align(sections[index], LV_ALIGN_TOP_LEFT, 0, CONTENT_TOP);
-        lv_obj_set_style_bg_opa(sections[index], LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(sections[index], 0, 0);
-        lv_obj_set_style_pad_all(sections[index], 0, 0);
-        lv_obj_clear_flag(sections[index], LV_OBJ_FLAG_SCROLLABLE);
-        if (index > 0) lv_obj_add_flag(sections[index], LV_OBJ_FLAG_HIDDEN);
-    }
-    lv_obj_add_state(section_buttons[0], LV_STATE_CHECKED);
-    build_overview(sections[0]);
-    build_cpu(sections[0]);
-    build_cores(sections[1]);
-    build_half(sections[2], QZ_GUTTER, 0, "内存", &memory_value, &memory_detail, &memory_bar);
-    build_half(sections[2], QZ_GUTTER + HALF_W + 10, 0, "存储", &storage_value,
-               &storage_detail, &storage_bar);
-    build_status(sections[3]);
-    build_processes(sections[4]);
+    /* 内容：固定位置的一条条带。高度就是 CONTENT_H，五条带正好收在底部；
+     * 可下滑只是兜底（换面板、换字体时不会被切掉）。 */
+    lv_obj_t *content = qz_page_scroll(screen, CONTENT_TOP);
+    lv_obj_set_size(content, QZ_DESIGN_W, CONTENT_H);
+    lv_obj_align(content, LV_ALIGN_TOP_LEFT, 0, CONTENT_TOP);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, 0, 0);
+    lv_obj_set_scroll_dir(content, LV_DIR_VER);
+
+    build_overview(content);
+    build_cpu(content);
+    build_cores(content);
+    build_half(content, QZ_GUTTER, "内存", &memory_value, &memory_detail);
+    build_half(content, QZ_GUTTER + HALF_W + 10, "存储", &storage_value, &storage_detail);
+    build_status(content);
+    build_processes(content);
 
     /* 订阅核心事件：助手页拿着轮询，这里只加一条订阅 */
     qzdesk_core_subscribe(core_event, NULL);

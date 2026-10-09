@@ -4,7 +4,7 @@
 
 <h1 align="center">QZdesk</h1>
 
-<p align="center">A 480×320 landscape embedded AI desktop terminal: local LVGL UI + Rust voice core + importable skills</p>
+<p align="center">An embedded AI desktop terminal for 320×240 and larger landscape screens: local LVGL UI + Rust voice core + importable skills</p>
 
 <p align="center">
 🇨🇳 <a href="./README.md">简体中文</a> | 🇺🇸 <a href="./README.en.md">English</a>
@@ -16,7 +16,7 @@
 
 QZdesk is an AI desktop terminal running on an embedded Linux board. It consists of two processes that talk over local UDP (the UI spawns the core):
 
-- **`qzdesk_screen`** (C + LVGL) — the 480×320 landscape UI that owns the touch panel, fbdev, Wi-Fi, backlight and volume;
+- **`qzdesk_screen`** (C + LVGL) — the landscape UI with a 320×240 minimum baseline that owns the touch panel, fbdev, Wi-Fi, backlight and volume;
 - **`xiaozhi_linux_rs`** (Rust) — the voice core: real-time speech through the XiaoZhi cloud, plus an MCP gateway, local skills, smart-home control, weather, performance monitoring and a web console.
 
 A skill is a directory with a `SKILL.md`, imported from the web console; once imported it changes the assistant's persona, tone and output format with **no code change and no reflash** — a complete, trimmable solution for "a desktop assistant that talks", with swappable personas and local device control.
@@ -32,7 +32,7 @@ A skill is a directory with a `SKILL.md`, imported from the web console; once im
 | Text chat | The GUI input box and the web console share one path: text is synthesized locally and sent upstream in exactly the same frames as the microphone |
 | Web console | A single-page console served by the device (default `:8080`): skills, live chat, weather, performance, smart home |
 | Device data | Weather comes straight from Open-Meteo (no API key) and performance samples `/proc` and `statvfs` every 2 seconds; the device UI and the web page read the same snapshot |
-| Board-free development | The same code runs on a PC through the LVGL SDL simulator (480×320 window); Wi-Fi / backlight / volume / timezone use the real interfaces and can all be overridden by environment variables |
+| Board-free development | The same code runs on a PC through the LVGL SDL simulator (default 320×240 window); Wi-Fi / backlight / volume / timezone use the real interfaces and can all be overridden by environment variables |
 | Presence detection | Frame differencing on the camera decides "someone is here": it wakes the screen and has the assistant say hello (5-minute cooldown); plug in an RKNN model to turn it into face recognition |
 | Reminders & pomodoro | Stored in the core: voice, device UI and the web page read and write one copy, and a restart does not lose it; when a reminder fires it lands in the chat record |
 | Core logs | The last few hundred lines stay in memory; the web `logs` card and the device read the same source, so no ssh needed to debug |
@@ -69,7 +69,7 @@ Requirements: CMake ≥ 3.12.4, a C/C++ and a Rust toolchain (the core uses edit
 ### Run on a PC (simulator)
 
 ```bash
-./run.sh      # 480×320 window, mouse acts as touch
+./run.sh      # Default 320×240 window, mouse acts as touch
 ```
 
 `run.sh` only drives the simulator and builds for the host (its output is an x86 binary, useless on the device). It frees TCP 8080 from any previous service, configures and builds `qzdesk_screen` plus the Rust core, then starts them under a small supervisor loop. Useful switches:
@@ -80,7 +80,7 @@ Requirements: CMake ≥ 3.12.4, a C/C++ and a Rust toolchain (the core uses edit
 | `QZDESK_BUILD_DIR=...` | Build directory (default `build`) |
 | `QZDESK_JOBS=N` | Number of parallel build jobs |
 | `QZDESK_REPLACE_PORT_8080=0` | Do not kill the process holding port 8080 |
-| `QZDESK_PANEL=320x240` | Build and run for a different panel size (default `480x320`) |
+| `QZDESK_PANEL=480x320` | Select a larger panel at launch (default `320x240`, no rebuild needed) |
 
 ### Building the device image (RV1106)
 
@@ -226,13 +226,16 @@ Transports, execution modes (`sync` / `background`) and timeouts for external to
 
 The UI follows Apple's light-mode HIG. All design tokens live in `include/theme.h`, and animation curves and durations are collected there too; the full story — palette, material opacity, mascot bitmap baking, memory and rendering trade-offs, performance tuning — is in [`docs/UI与设计.md`](./docs/UI与设计.md) (Chinese). A few constraints worth knowing up front:
 
-- 480×320 at 16-bit colour depth; `LV_MEM_SIZE` in `lv_conf.h` is 2MB;
+- A 320×240 minimum baseline at 16-bit colour depth; `LV_MEM_SIZE` in `lv_conf.h` is 2MB;
 - Do not animate scale or rotation on large objects (LVGL allocates a full ARGB layer for them, which easily fails on the embedded heap);
 - The UI is laid out for a **480×320 design** and `include/scale.h` scales it to the **actual panel**
   horizontally and vertically by their own ratios (the screen is filled, no letterbox): the device
   reads the size from `/dev/fb0`, while the simulator picks a screen at launch with
-  `QZDESK_PANEL=320x240 ./run.sh`. One binary therefore fits any panel ratio without rebuilding —
-  **do not edit theme.h**.
+  `QZDESK_PANEL=320x240 ./run.sh`. Compact layouts activate when either dimension is below the design.
+  Text stays at least 12px, apps show a 2×2 grid with vertical scrolling, and long lists and details use pagination.
+  The web console uses a view selector and bounded content areas on small screens.
+
+Run `tools/check_layout.sh` after a simulator build to check real LVGL geometry and text and render PPM screenshots into `build/layout-check/`. Set `QZ_LAYOUT_PANELS="320x240 480x320 320x320 480x240"` to check additional aspect ratios. With Node.js, Playwright and its Chromium browser installed, `node tools/check_web_layout.cjs` checks the web console and saves screenshots to `build/web-layout-check/`. Both checks use local fixtures and do not change device settings.
 
 ## Troubleshooting
 
@@ -254,5 +257,4 @@ The UI follows Apple's light-mode HIG. All design tokens live in `include/theme.
 - Add new skills as standalone directories with a `SKILL.md` instead of modifying core code.
 
 ## License
-
-This project and the bundled voice core in `xiaozhi_core/` are released under the **MIT** license; see [`LICENSE`](./LICENSE) and [`xiaozhi_core/LICENSE`](./xiaozhi_core/LICENSE) (Copyright © 2025 Hyrsoft).
+MIT

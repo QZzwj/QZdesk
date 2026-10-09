@@ -10,26 +10,19 @@
 #include <string.h>
 
 #define CARD_W (QZ_DESIGN_W - 2 * QZ_GUTTER) /* 452 */
-#define HERO_Y (QZ_TOOLBAR_H + 8)            /* 52 */
-#define HERO_H 146
-#define GRID_Y (HERO_Y + HERO_H + 8)         /* 206 */
-#define GRID_H 96                            /* 到 302，底下留 18px 余量 */
-#define INSET 14
-#define ICON_SIZE 96
-#define SPINNER_SIZE 28
-#define TEXT_X (INSET + ICON_SIZE + 14)
-#define TEXT_W 172
-/* 主卡右侧的小信息区：降水 / 紫外线 / 日出 / 日落，把剩余宽度用真实数据填满 */
-#define MINI_COLS 2
-#define MINI_X (TEXT_X + TEXT_W + 16)
-#define MINI_W (CARD_W - MINI_X - INSET)
-#define MINI_COL_W (MINI_W / MINI_COLS)
-#define MINI_TILES 4
-
-#define TILE_COLS 3
+#define HERO_Y 60
+#define HERO_H 140
+#define GRID_Y 208
+#define GRID_H 104
+#define INSET 12
+#define ICON_SIZE 72
+#define SPINNER_SIZE 30
+#define TEXT_X 96
+#define TEXT_W (CARD_W - TEXT_X - INSET)
+#define TILE_COLS 5
 #define TILE_ROWS 2
-#define TILE_PAD_X 14
-#define TILE_PAD_Y 10
+#define TILE_PAD_X 10
+#define TILE_PAD_Y 8
 #define TILE_W ((CARD_W - 2 * TILE_PAD_X) / TILE_COLS)
 #define TILE_H ((GRID_H - 2 * TILE_PAD_Y) / TILE_ROWS)
 #define TILES (TILE_COLS * TILE_ROWS)
@@ -41,15 +34,14 @@ static lv_obj_t *spinner;
 static lv_obj_t *city_label;
 static lv_obj_t *temp_label;
 static lv_obj_t *desc_label;
-static lv_obj_t *feels_label;
 static lv_obj_t *updated_label;
 static lv_obj_t *refresh_button;
 static lv_obj_t *tile_caption[TILES];
 static lv_obj_t *tile_value[TILES];
-static lv_obj_t *mini_value[MINI_TILES];
 
 static const char *const TILE_CAPTION_TEXT[TILES] = {
-    "湿度", "风速", "体感", "最高", "最低", "更新",
+    "湿度", "风速", "体感", "最高", "最低",
+    "降水", "紫外线", "日出", "日落", "更新",
 };
 
 /* 两个处理器在工具栏里接线，定义在后面 */
@@ -86,18 +78,18 @@ static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int width, int height
 static void build_toolbar(void)
 {
     lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H - 4);
+    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 46);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
 
-    lv_obj_t *back = qz_icon_button(toolbar, LV_SYMBOL_LEFT, 30);
+    lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, on_back, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "天气", 15, qz_color(QZ_TEXT));
+    lv_obj_t *title = qz_text(toolbar, "天气", 18, qz_color(QZ_TEXT));
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
 
-    refresh_button = qz_icon_button(toolbar, LV_SYMBOL_REFRESH, 30);
+    refresh_button = qz_icon_button(toolbar, LV_SYMBOL_REFRESH, 40);
     lv_obj_align(refresh_button, LV_ALIGN_RIGHT_MID, -8, 0);
     lv_obj_add_event_cb(refresh_button, on_refresh, LV_EVENT_CLICKED, NULL);
 }
@@ -120,50 +112,31 @@ static void build_hero(void)
     lv_obj_clear_flag(spinner, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
 
-    city_label = qz_text(hero, "未设置位置", 13, qz_color(QZ_TEXT_SECONDARY));
+    city_label = qz_text(hero, "未设置位置", 16, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(city_label, LV_ALIGN_TOP_LEFT, TEXT_X, 8);
     lv_obj_set_width(city_label, TEXT_W);
-    lv_label_set_long_mode(city_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(city_label, LV_LABEL_LONG_WRAP);
 
     /* 温度与描述同排：温度大、描述小，字宽变化时自动贴在一起 */
     lv_obj_t *temp_row = lv_obj_create(hero);
-    lv_obj_set_size(temp_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_align(temp_row, LV_ALIGN_TOP_LEFT, TEXT_X, 30);
+    lv_obj_set_size(temp_row, TEXT_W, LV_SIZE_CONTENT);
+    lv_obj_align(temp_row, LV_ALIGN_TOP_LEFT, TEXT_X, 52);
     make_plain(temp_row);
     lv_obj_set_flex_flow(temp_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(temp_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
     lv_obj_set_style_pad_column(temp_row, 7, 0);
 
-    temp_label = qz_text(temp_row, "--°", 34, qz_color(QZ_TEXT));
-    desc_label = qz_text(temp_row, "", 15, qz_color(QZ_TEXT_SECONDARY));
+    temp_label = qz_text(temp_row, "--°", 36, qz_color(QZ_TEXT));
+    desc_label = qz_text(temp_row, "", 17, qz_color(QZ_TEXT_SECONDARY));
 
-    feels_label = qz_text(hero, "", 12, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(feels_label, LV_ALIGN_TOP_LEFT, TEXT_X, 84);
-    lv_obj_set_width(feels_label, TEXT_W);
-    lv_label_set_long_mode(feels_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_flex_grow(desc_label, 1);
+    lv_label_set_long_mode(desc_label, LV_LABEL_LONG_WRAP);
 
-    updated_label = qz_text(hero, "", 11, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(updated_label, LV_ALIGN_TOP_LEFT, TEXT_X, 108);
+    updated_label = qz_text(hero, "", 16, qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_align(updated_label, LV_ALIGN_TOP_LEFT, TEXT_X, 114);
     lv_obj_set_width(updated_label, TEXT_W);
-    lv_label_set_long_mode(updated_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(updated_label, LV_LABEL_LONG_WRAP);
 
-    /* 右侧 2×2 小信息区：降水 / 紫外线 / 日出 / 日落（与温度同一个请求取回） */
-    static const char *const MINI_CAPTION[MINI_TILES] = {"降水", "紫外线", "日出", "日落"};
-    lv_obj_t *mini = lv_obj_create(hero);
-    lv_obj_set_size(mini, MINI_W, HERO_H - 2 * INSET);
-    lv_obj_align(mini, LV_ALIGN_TOP_LEFT, MINI_X, INSET);
-    make_plain(mini);
-    {
-        int index;
-        for (index = 0; index < MINI_TILES; index++) {
-            int column = index % MINI_COLS;
-            int row = index / MINI_COLS;
-            lv_obj_t *caption = qz_text(mini, MINI_CAPTION[index], 10, qz_color(QZ_TEXT_TERTIARY));
-            lv_obj_align(caption, LV_ALIGN_TOP_LEFT, column * MINI_COL_W, row * 62);
-            mini_value[index] = qz_text(mini, "—", 13, qz_color(QZ_TEXT));
-            lv_obj_align(mini_value[index], LV_ALIGN_TOP_LEFT, column * MINI_COL_W, row * 62 + 18);
-        }
-    }
 }
 
 static void build_grid(void)
@@ -178,12 +151,12 @@ static void build_grid(void)
         int center = TILE_PAD_X + column * TILE_W + TILE_W / 2 - CARD_W / 2;
         int y = TILE_PAD_Y + row * TILE_H;
 
-        tile_caption[index] = qz_text(grid, TILE_CAPTION_TEXT[index], 11,
+        tile_caption[index] = qz_text(grid, TILE_CAPTION_TEXT[index], 16,
                                       qz_color(QZ_TEXT_TERTIARY));
         lv_obj_align(tile_caption[index], LV_ALIGN_TOP_MID, center, y);
 
-        tile_value[index] = qz_text(grid, "—", 15, qz_color(QZ_TEXT));
-        lv_obj_align(tile_value[index], LV_ALIGN_TOP_MID, center, y + TILE_H - 22);
+        tile_value[index] = qz_text(grid, "—", 17, qz_color(QZ_TEXT));
+        lv_obj_align(tile_value[index], LV_ALIGN_TOP_MID, center, y + 22);
     }
 }
 
@@ -203,7 +176,7 @@ static void set_tiles(const qzdesk_core_weather_t *weather)
             break;
         case 1:
             if (weather->wind_x10 != 0) {
-                snprintf(text, sizeof(text), "%d.%d m/s", weather->wind_x10 / 10,
+                snprintf(text, sizeof(text), "%d.%dm/s", weather->wind_x10 / 10,
                          weather->wind_x10 % 10);
             } else {
                 snprintf(text, sizeof(text), "—");
@@ -217,6 +190,21 @@ static void set_tiles(const qzdesk_core_weather_t *weather)
             break;
         case 4:
             snprintf(text, sizeof(text), "%d°", weather->low);
+            break;
+        case 5:
+            if (weather->precipitation >= 0) snprintf(text, sizeof(text), "%d%%", weather->precipitation);
+            else snprintf(text, sizeof(text), "—");
+            break;
+        case 6:
+            if (weather->uv_x10 >= 0) snprintf(text, sizeof(text), "%d.%d", weather->uv_x10 / 10,
+                                              weather->uv_x10 % 10);
+            else snprintf(text, sizeof(text), "—");
+            break;
+        case 7:
+            snprintf(text, sizeof(text), "%s", weather->sunrise[0] ? weather->sunrise : "—");
+            break;
+        case 8:
+            snprintf(text, sizeof(text), "%s", weather->sunset[0] ? weather->sunset : "—");
             break;
         default:
             if (weather->updated[0] && strcmp(weather->updated, "--:--") != 0) {
@@ -234,34 +222,6 @@ static void clear_tiles(void)
 {
     int index;
     for (index = 0; index < TILES; index++) lv_label_set_text(tile_value[index], "—");
-    for (index = 0; index < MINI_TILES; index++) lv_label_set_text(mini_value[index], "—");
-}
-
-/* 主卡右侧的小信息区：四个值都来自与温度同一次请求 */
-static void set_minis(const qzdesk_core_weather_t *weather)
-{
-    char text[24];
-
-    if (weather->precipitation >= 0) {
-        snprintf(text, sizeof(text), "%d%%", weather->precipitation);
-    } else {
-        snprintf(text, sizeof(text), "—");
-    }
-    lv_label_set_text(mini_value[0], text);
-
-    if (weather->uv_x10 >= 0) {
-        if (weather->uv_x10 % 10) {
-            snprintf(text, sizeof(text), "%d.%d", weather->uv_x10 / 10, weather->uv_x10 % 10);
-        } else {
-            snprintf(text, sizeof(text), "%d", weather->uv_x10 / 10);
-        }
-    } else {
-        snprintf(text, sizeof(text), "—");
-    }
-    lv_label_set_text(mini_value[1], text);
-
-    lv_label_set_text(mini_value[2], weather->sunrise[0] ? weather->sunrise : "—");
-    lv_label_set_text(mini_value[3], weather->sunset[0] ? weather->sunset : "—");
 }
 
 static void apply(const qzdesk_core_weather_t *weather)
@@ -294,17 +254,18 @@ static void apply(const qzdesk_core_weather_t *weather)
         const char *message = weather->message[0] ? weather->message : "天气暂不可用";
         lv_label_set_text(city_label, weather->city[0] ? weather->city : "未设置位置");
         lv_label_set_text(temp_label, "");
-        lv_obj_set_style_text_font(desc_label, qz_font_size(14), 0);
+        lv_obj_add_flag(temp_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_font(desc_label, qz_font_size(16), 0);
         qz_obj_set_text_color(desc_label, QZ_ORANGE, 0);
         lv_label_set_text(desc_label, message);
-        lv_label_set_text(feels_label, "");
         qz_obj_set_text_color(updated_label, QZ_TEXT_TERTIARY, 0);
         lv_label_set_text(updated_label, loading ? "正在刷新…" : "点右上角刷新重试");
         clear_tiles();
         return;
     }
 
-    lv_obj_set_style_text_font(desc_label, qz_font_size(15), 0);
+    lv_obj_clear_flag(temp_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_text_font(desc_label, qz_font_size(17), 0);
     qz_obj_set_text_color(desc_label, QZ_TEXT_SECONDARY, 0);
     lv_label_set_text(city_label, weather->city);
 
@@ -312,20 +273,21 @@ static void apply(const qzdesk_core_weather_t *weather)
     lv_label_set_text(temp_label, text);
     lv_label_set_text(desc_label, weather->text[0] ? weather->text : "—");
 
-    snprintf(text, sizeof(text), "体感 %d°", weather->apparent);
-    lv_label_set_text(feels_label, text);
-
-    if (weather->updated[0] != '\0' && strcmp(weather->updated, "--:--") != 0) {
+    if (strcmp(weather->status, "offline") == 0) {
+        /* 未联网：核心已停止请求（不会再重试），这里如实说明 */
+        snprintf(text, sizeof(text), "未联网 · %s", weather->updated);
+    } else if (weather->updated[0] != '\0' && strcmp(weather->updated, "--:--") != 0) {
         snprintf(text, sizeof(text), stale ? "上次数据 · %s" : "更新于 %s", weather->updated);
     } else {
         snprintf(text, sizeof(text), "%s", stale ? "上次数据" : "");
     }
     lv_label_set_text(updated_label, text);
     /* 沿用上一次的数据时时间行转橙：不吵，但看得出这不是刚取的 */
-    qz_obj_set_text_color(updated_label, stale ? QZ_ORANGE : QZ_TEXT_TERTIARY, 0);
+    qz_obj_set_text_color(updated_label, (stale || strcmp(weather->status, "offline") == 0)
+                                             ? QZ_ORANGE
+                                             : QZ_TEXT_TERTIARY, 0);
 
     set_tiles(weather);
-    set_minis(weather);
 }
 
 /* ------------------------------------------------------------------------- *
