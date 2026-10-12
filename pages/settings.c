@@ -3,6 +3,8 @@
 #include "config.h"
 #include "theme.h"
 #include "wifi.h"
+#include "qzdesk_core.h"
+#include "notifications.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -15,6 +17,8 @@
 
 static lv_obj_t *desktop_screen;
 static lv_obj_t *settings_screen;
+static lv_obj_t *settings_return;
+static lv_obj_t *wlan_return;
 static lv_obj_t *wlan_screen;
 static lv_obj_t *general_screen;
 static lv_obj_t *about_screen;
@@ -73,7 +77,12 @@ static void slider_sync(slider_binding_t *binding, int value);
 static void go_back(lv_event_t *event)
 {
     lv_obj_t *target = (lv_obj_t *)lv_event_get_user_data(event);
-    qz_screen_load(target ? target : desktop_screen, LV_SCR_LOAD_ANIM_MOVE_RIGHT, QZ_DUR_SCREEN);
+    if (lv_screen_active() == wlan_screen && wlan_return) {
+        target = wlan_return;
+        wlan_return = NULL;
+    }
+    if (!target) target = settings_return ? settings_return : desktop_screen;
+    qz_screen_load(target, LV_SCR_LOAD_ANIM_MOVE_RIGHT, QZ_DUR_SCREEN);
 }
 
 static lv_obj_t *page_toolbar(lv_obj_t *screen, const char *title, lv_obj_t *back_target)
@@ -1022,7 +1031,13 @@ static void slider_changed(lv_event_t *event)
         snprintf(text, sizeof(text), "%d%%", value);
         lv_label_set_text(binding->label, text);
     }
-    if (binding->apply) binding->apply(value);
+    if (binding->apply &&
+        (binding == &material_binding || lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED)) {
+        bool applied = binding->apply(value);
+        if (binding->label && !applied) lv_label_set_text(binding->label, "失败");
+        else if (binding->label && binding != &material_binding)
+            lv_label_set_text(binding->label, "本次生效");
+    }
 }
 
 /** Re-read the hardware and move the slider without firing the hook again. */
@@ -1064,6 +1079,8 @@ static void slider_row(lv_obj_t *card, int y, const char *glyph, int initial,
         binding->label = value;
         binding->slider = slider;
         lv_obj_add_event_cb(slider, slider_changed, LV_EVENT_VALUE_CHANGED, binding);
+        lv_obj_add_event_cb(slider, slider_changed, LV_EVENT_RELEASED, binding);
+        lv_obj_add_event_cb(slider, slider_changed, LV_EVENT_PRESS_LOST, binding);
     }
     lv_slider_set_value(slider, initial, LV_ANIM_OFF);
 
@@ -1179,14 +1196,31 @@ static lv_obj_t *timezone_next;
 static lv_obj_t *timezone_page_value;
 static int timezone_page;
 
+static bool timezone_waiting;
+static bool timezone_saved;
+
+static void timezone_ack(const qzdesk_core_event_t *event, void *data)
+{
+    (void)data;
+    if (!timezone_waiting || event->type != QZDESK_CORE_EVENT_ACK ||
+        strcmp(event->command, "timezone") != 0) return;
+    timezone_waiting = false;
+    if (timezone_value) lv_label_set_text(timezone_value,
+        !event->ok ? "核心同步失败" : timezone_saved ? "已保存·已同步" : "已同步·本次生效");
+}
+
 static void timezone_confirm(lv_event_t *event)
 {
     const timezone_entry_t *zone = (const timezone_entry_t *)lv_event_get_user_data(event);
     if (zone) {
-        if (timezone_value) lv_label_set_text(timezone_value, zone->label);
-        qz_timezone_apply(zone->tz);
+        bool saved = qz_timezone_apply(zone->tz);
+        bool sent = qzdesk_core_set_timezone(zone->tz);
+        timezone_waiting = sent;
+        timezone_saved = saved;
+        if (timezone_value) lv_label_set_text(timezone_value,
+            !saved ? "本次生效·未保存" : !sent ? "已保存·核心未同步" : "已保存·等待核心确认");
+        if (saved && sent) close_modal(event);
     }
-    close_modal(event);
 }
 
 static void timezone_rebuild(void *unused)
@@ -1287,8 +1321,8 @@ static void toggle_dark_mode(lv_event_t *event)
     (void)event;
     bool dark = lv_obj_has_state(dark_mode_switch, LV_STATE_CHECKED);
     qz_theme_set_dark(dark);
-    qz_appearance_save(dark);
-    if (dark_mode_value) lv_label_set_text(dark_mode_value, dark ? "开" : "关");
+    bool saved = qz_appearance_save(dark);
+    if (dark_mode_value) lv_label_set_text(dark_mode_value, saved ? (dark ? "开" : "关") : "未保存");
 }
 
 static void build_general_screen(void)
@@ -1491,8 +1525,17 @@ static void open_about(lv_event_t *event)
     qz_screen_load(about_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, QZ_DUR_SCREEN);
 }
 
+static void toggle_dnd(lv_event_t *event)
+{
+    lv_obj_t *button = lv_event_get_target(event);
+    if (qz_notifications_set_dnd(!qz_notifications_dnd())) {
+        lv_label_set_text(lv_obj_get_child(button, 0), qz_notifications_dnd() ? "免打扰：开" : "免打扰：关");
+    } else lv_label_set_text(lv_obj_get_child(button, 0), "保存失败");
+}
+
 lv_obj_t *qz_settings_create(void)
 {
+    qzdesk_core_subscribe(timezone_ack, NULL);
     settings_screen = lv_obj_create(NULL);
     qz_style_screen(settings_screen);
     page_toolbar(settings_screen, "设置", NULL);
@@ -1522,10 +1565,16 @@ lv_obj_t *qz_settings_create(void)
         lv_obj_center(glyph);
     }
 
-    lv_obj_t *footer = qz_text(settings_screen, "QZdesk 桌面助手 · 界面演示版", 10,
-                               qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, qz_compact() ? -4 : -16);
+    lv_obj_t *dnd_button = qz_button(settings_screen, qz_notifications_dnd() ? "免打扰：开" : "免打扰：关", 154, 28);
+    lv_obj_align(dnd_button, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_event_cb(dnd_button, toggle_dnd, LV_EVENT_CLICKED, NULL);
     return settings_screen;
 }
 
 void qz_settings_set_desktop(lv_obj_t *desktop) { desktop_screen = desktop; }
+void qz_settings_set_return(lv_obj_t *screen) { settings_return = screen; }
+void qz_settings_open_wlan(lv_obj_t *return_screen)
+{
+    wlan_return = return_screen;
+    if (wlan_screen) qz_screen_load(wlan_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, QZ_DUR_SCREEN);
+}

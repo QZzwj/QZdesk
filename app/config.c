@@ -223,15 +223,16 @@ bool qz_timezone_apply(const char *posix_tz)
     }
 
     file = fopen(path, replaced || content[0] == '\0' ? "w" : "a");
-    if (!file) return true;   /* read only rootfs: the running process is set */
+    if (!file) return false;
     if (replaced) {
         fputs(content, file);
     } else {
         if (content[0] != '\0' && content[strlen(content) - 1] != '\n') fputc('\n', file);
         fprintf(file, "export TZ=%s\n", posix_tz);
     }
-    fclose(file);
-    return true;
+    bool ok = !ferror(file);
+    if (fclose(file) != 0) ok = false;
+    return ok;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -282,8 +283,8 @@ bool qz_appearance_save(bool dark)
 
     const char *path = appearance_path();
     FILE *file = fopen(path, "w");
-    if (!file) return true;   /* read-only fs: the running process is still set */
-    fprintf(file, "QZDESK_DARK=%s\n", dark ? "1" : "0");
-    fclose(file);
-    return dark;
+    if (!file) return false;
+    bool ok = fprintf(file, "QZDESK_DARK=%s\n", dark ? "1" : "0") >= 0;
+    if (fclose(file) != 0) ok = false;
+    return ok;
 }

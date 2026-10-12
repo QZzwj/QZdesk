@@ -287,7 +287,7 @@ static lv_obj_t *text_line(lv_obj_t *parent, int y, qz_color_token_t token)
 lv_obj_t *qz_weather_card_create(lv_obj_t *parent, int x, int y, int width, int height)
 {
     card_width = width;
-    card_is_narrow = width < height * 2;
+    card_is_narrow = width < 340;
     card = qz_card_button(parent, width, height);
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, y);
     lv_obj_add_event_cb(card, weather_tapped, LV_EVENT_CLICKED, NULL);

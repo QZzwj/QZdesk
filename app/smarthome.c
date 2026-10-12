@@ -42,13 +42,18 @@ static bool json_escape(const char *input, char *output, size_t output_size)
 int qz_devices_fetch(qz_device_t *output, int max_count, qz_hub_status_t *status)
 {
     static char body[RESPONSE_MAX];
+    if (!qz_web_request("GET", "/api/devices", NULL, body, sizeof(body))) return -1;
+    return qz_devices_parse(body, output, max_count, status);
+}
+
+int qz_devices_parse(const char *body, qz_device_t *output, int max_count, qz_hub_status_t *status)
+{
     const char *hub;
     int count = 0;
     int declared = 0;
 
     if (status) memset(status, 0, sizeof(*status));
-    if (!output || max_count <= 0) return -1;
-    if (!qz_web_request("GET", "/api/devices", NULL, body, sizeof(body))) return -1;
+    if (!body || !output || max_count <= 0) return -1;
 
     hub = qz_json_value(body, "hub");
     if (status && hub) {

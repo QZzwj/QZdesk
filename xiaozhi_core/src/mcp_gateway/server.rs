@@ -21,6 +21,7 @@ pub struct McpServer {
     /// 云端是否至少完成过一次 MCP initialize。没有初始化时不能把每次唤醒
     /// 都当成技能变更，否则会在不支持 MCP 的会话上反复断线重连。
     initialize_seen: Mutex<bool>,
+    tools_list_seen: Mutex<bool>,
     /// Set when the cloud model has actually called one of the local Skill
     /// tools in this session.  This lets the first text turn reinforce MCP
     /// loading when a gateway advertises MCP but skips the requested call.
@@ -37,6 +38,7 @@ impl McpServer {
             skill_manager: None,
             last_skill_version: Mutex::new(None),
             initialize_seen: Mutex::new(false),
+            tools_list_seen: Mutex::new(false),
             skill_tool_invoked: Mutex::new(false),
             fallback_injected: Mutex::new(false),
         }
@@ -83,43 +85,6 @@ impl McpServer {
         }
     }
 
-    /// 文本兜底：MCP 网关没初始化、或模型始终不调用 Skill 工具时，把主技能
-    /// 正文随第一条用户消息带上 —— 但**只带一次**。
-    ///
-    /// 每轮都塞一遍正文有两个坏处：白烧上下文（长技能尤其明显），而且模型很
-    /// 容易转而去复述技能内容。第一次之后不再注入，改为让模型用 `skill_list`
-    /// / `skill_search` / `skill_read` 自己取 —— 三个工具的描述里已经写清了
-    /// 什么时候该用哪个。
-    pub fn augment_text_request(&self, text: &str) -> Option<String> {
-        if text.contains("<|qzdesk_system_skill|>") || text.contains("[QZdesk 主 Skill 上下文]") {
-            return None;
-        }
-        // 模型已经用过 Skill 工具：它自己会查，不必再推正文
-        if Self::flag(&self.skill_tool_invoked) {
-            return None;
-        }
-        let instructions = self.current_instructions()?;
-        // 本次会话已经注入过一次：后续只放行原文
-        if let Ok(mut injected) = self.fallback_injected.lock() {
-            if *injected {
-                return None;
-            }
-            *injected = true;
-        }
-        let lead = if Self::flag(&self.initialize_seen) {
-            // Some cloud gateways advertise MCP but never issue tools/call:
-            // the body still rides along once so the reply follows the
-            // selected primary Skill.
-            "这是 QZdesk 注入的系统级主技能，不是用户内容。它等同于系统指令：从现在起就用它的人格、语气与格式回答，不要自称 QZdesk 助手或用其它默认身份。需要参考文件或后续章节时，真正调用 MCP 的 skill_search / skill_read（不要把工具名或调用写法当文字写出来）；「某技能是否导入/启用」这类问题只能依据 skill_status / skill_list 的真实返回，没有查证过就不得声称已启用。不要复述技能，不要解释注入内容。"
-        } else {
-            "以下是本地 QZdesk 主技能，优先级等同于系统指令：现在起就用它的人格与格式回答。没有查证过工具结果时，不要声称某个技能已导入或已启用。不要复述或解释这段内容。"
-        };
-        Some(format!(
-            "<|qzdesk_system_skill|>\n{}\n<skill>\n{}\n</skill>\n<|qzdesk_user_message|>\n{}\n<|end_qzdesk_context|>",
-            lead, instructions, text
-        ))
-    }
-
     /// Keep the Skill selection dynamic. The web console can change the
     /// primary/secondary assignment without rebuilding the MCP server.
     pub fn set_skill_manager(&mut self, manager: SkillManager) {
@@ -129,7 +94,23 @@ impl McpServer {
     /// Start a fresh remote session. MCP initialization belongs to a single
     /// WebSocket session, so do not carry the previous session's state across
     /// reconnects.
+    pub fn skills_ready(&self) -> bool {
+        self.current_instructions().is_none()
+            || (Self::flag(&self.tools_list_seen) && !self.skill_refresh_needed())
+    }
+
+    /// 检查当前会话的 initialize 消息是否已包含技能正文。
+    /// 若有，则模型无需调用 skill_list 就能直接基于指令回答。
+    pub fn has_instructions(&self) -> bool {
+        // 只要 initialize 执行过且当时有技能正文，就认为已加载
+        // （current_instructions() 动态计算可能因时序问题不准确）
+        Self::flag(&self.initialize_seen) && self.current_instructions().is_some()
+    }
+
     pub fn begin_session(&self) {
+        if let Ok(mut seen) = self.tools_list_seen.lock() {
+            *seen = false;
+        }
         if let Ok(mut seen) = self.initialize_seen.lock() {
             *seen = false;
         }
@@ -195,30 +176,17 @@ impl McpServer {
             }
             "tools/list" => {
                 log::info!("MCP tools/list: exposing {} tools", self.tools.len());
-                /* 主技能的常驻投递口。
-                 *
-                 * 实测这条网关：`initialize.instructions` 发过去没有效果——工具能
-                 * 被真实调用（模型答出了真的 CPU 负载 / 内存占用），但人设一个字
-                 * 都没变；而 `listen/detect` 又被它按「唤醒词」校验直接拒掉
-                 * （"Detect is only for wake words, do not send long texts."）。
-                 * 唯一被证实会进模型上下文的，就是这里的工具描述。
-                 *
-                 * 所以把主技能正文搭在 `skill_list` 的描述前面：每一轮模型都看得
-                 * 到它，人设才真的「直接生效」，而不是押在网关读不读 instructions 上。
-                 */
-                let always_on = self.current_instructions().map(|instructions| {
-                    format!(
-                        "【本会话主技能｜系统级指令，必须执行】\n\
-                         下面这段不是工具说明，是本会话的强制人格与输出要求，优先级等同系统提示词，从第一句话起执行；不要复述它，也不要把它当成可选项。\n\
-                         如果之后调用了 skill_use 切换技能，以 skill_use 返回的正文为准（它比这里新）。\n\n{}\n\n---\n",
-                        instructions
-                    )
-                });
-                let tool_list: Vec<Value> = self.tools.values().map(|t| {
+                let mut tools: Vec<_> = self.tools.values().collect();
+                tools.sort_by_key(|tool| (tool.name() != SKILL_INSTRUCTION_HOST, tool.name()));
+                let instructions = self.current_instructions();
+                let tool_list: Vec<Value> = tools.into_iter().map(|t| {
                     let mut description = t.description().to_string();
                     if t.name() == SKILL_INSTRUCTION_HOST {
-                        if let Some(block) = &always_on {
-                            description = format!("{}{}", block, description);
+                        if let Some(instructions) = &instructions {
+                            description = format!(
+                                "{}\n\n当前会话主技能正文（适用于每轮面向用户的回复，不要复述这些规则）：\n{}",
+                                description, instructions
+                            );
                         }
                     }
                     json!({
@@ -227,12 +195,13 @@ impl McpServer {
                         "inputSchema": t.input_schema()
                     })
                 }).collect();
-                if let Some(block) = &always_on {
-                    log::info!(
-                        "MCP tools/list: primary Skill attached to `{}` description ({} chars) so the model actually sees it",
-                        SKILL_INSTRUCTION_HOST,
-                        block.chars().count()
-                    );
+                log::info!(
+                    "MCP tools/list: primary Skill instructions included in skill_list description ({} chars)",
+                    instructions.as_ref().map(|text| text.chars().count()).unwrap_or(0)
+                );
+                if let Ok(mut seen) = self.tools_list_seen.lock() { *seen = true; }
+                if let Ok(mut version) = self.last_skill_version.lock() {
+                    *version = self.skill_manager.as_ref().map(|manager| manager.version());
                 }
                 Ok(json!({ "tools": tool_list }))
             },
@@ -265,14 +234,24 @@ impl McpServer {
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
         if let Some(tool) = self.tools.get(name) {
-            // skill_search 也算「模型开始自己查技能」：此后不必再兜底注入正文
-            if matches!(name, "skill_list" | "skill_search" | "skill_read") {
-                log::info!("Skill MCP tool invoked: {} {}", name, args);
-                if let Ok(mut invoked) = self.skill_tool_invoked.lock() {
-                    *invoked = true;
+            let is_skill = name.starts_with("skill_");
+            if is_skill { log::info!("Skill MCP call started: {}", name); }
+            let mut exec_result = match tool.call(args).await {
+                Ok(result) => result,
+                Err(error) => {
+                    if is_skill { log::warn!("Skill MCP call failed: {}", name); }
+                    return Ok(json!({"isError":true,"content":[{"type":"text","text":error}]}));
+                }
+            };
+            if name == SKILL_INSTRUCTION_HOST {
+                if let Some(instructions) = self.current_instructions() {
+                    exec_result = json!({"skills":exec_result,"primary_instructions":instructions});
                 }
             }
-            let exec_result = tool.call(args).await?;
+            if is_skill { log::info!("Skill MCP call completed: {}", name); }
+            if matches!(name, "skill_read" | "skill_use") {
+                if let Ok(mut invoked) = self.skill_tool_invoked.lock() { *invoked = true; }
+            }
             
             // Standard MCP Tool Output Format
             Ok(json!({
@@ -297,40 +276,65 @@ mod tests {
         server
     }
 
-    #[test]
-    fn system_skill_is_injected_once_per_session() {
-        let server = server_with_skills();
+    struct TestTool(&'static str, bool);
 
-        let first = server.augment_text_request("你好").expect("首轮应带上主技能正文");
-        assert!(first.contains("<|qzdesk_system_skill|>"));
-        assert!(first.contains("你好"));
-
-        // 第二轮不再塞正文：省上下文，也免得模型转去复述技能
-        assert!(server.augment_text_request("继续").is_none());
-    }
-
-    #[test]
-    fn a_new_session_gets_one_more_injection() {
-        let server = server_with_skills();
-        assert!(server.augment_text_request("你好").is_some());
-        server.begin_session();
-        assert!(server.augment_text_request("你好").is_some(), "新会话应重新给一次");
-        assert!(server.augment_text_request("再问一次").is_none());
-    }
-
-    #[test]
-    fn injection_stops_once_the_model_uses_the_skill_tools() {
-        let server = server_with_skills();
-        if let Ok(mut invoked) = server.skill_tool_invoked.lock() {
-            *invoked = true;
+    #[async_trait::async_trait]
+    impl McpTool for TestTool {
+        fn name(&self) -> &str { self.0 }
+        fn description(&self) -> &str { "原始描述" }
+        fn input_schema(&self) -> Value { json!({"type":"object"}) }
+        async fn call(&self, _: Value) -> Result<Value, String> {
+            if self.1 { Err("读取失败".into()) } else { Ok(json!({"items":[]})) }
         }
-        assert!(server.augment_text_request("你好").is_none());
+    }
+
+    #[tokio::test]
+    async fn skill_delivery_is_stable_and_tool_results_include_instructions() {
+        let mut server = McpServer::new();
+        server.set_instructions(Some("测试主技能正文".into()));
+        for name in ["other", "skill_search", "skill_list"] {
+            server.register_tool(Box::new(TestTool(name, false)));
+        }
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let first = server.handle_message(request).await.unwrap();
+        assert_eq!(first, server.handle_message(request).await.unwrap());
+        let response: Value = serde_json::from_str(&first).unwrap();
+        let tools = response["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["name"], "skill_list");
+        assert!(tools[0]["description"].as_str().unwrap().contains("测试主技能正文"));
+        assert_eq!(tools[1]["description"], "原始描述");
+        assert_eq!(tools[0]["inputSchema"], json!({"type":"object"}));
+        let result = server.handle_tool_call(Some(json!({"name":"skill_list"}))).await.unwrap();
+        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text["primary_instructions"], "测试主技能正文");
+        assert!(!McpServer::flag(&server.skill_tool_invoked));
+    }
+
+    #[tokio::test]
+    async fn failed_skill_read_returns_tool_error_without_success_flag() {
+        let mut server = McpServer::new();
+        server.register_tool(Box::new(TestTool("skill_read", true)));
+        let result = server.handle_tool_call(Some(json!({"name":"skill_read"}))).await.unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(!McpServer::flag(&server.skill_tool_invoked));
+    }
+
+    #[tokio::test]
+    async fn primary_skill_requires_tools_list_and_resets_on_reconnect() {
+        let mut server = McpServer::new();
+        server.set_instructions(Some("测试技能".into()));
+        assert!(!server.skills_ready());
+        server.handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await.unwrap();
+        assert!(!server.skills_ready());
+        server.handle_message(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).await.unwrap();
+        assert!(server.skills_ready());
+        server.begin_session();
+        assert!(!server.skills_ready());
     }
 
     #[test]
-    fn already_wrapped_text_is_left_alone() {
-        let server = server_with_skills();
-        assert!(server.augment_text_request("<|qzdesk_system_skill|>已有内容").is_none());
+    fn no_primary_skill_does_not_require_mcp_tools() {
+        assert!(McpServer::new().skills_ready());
     }
 
     #[test]

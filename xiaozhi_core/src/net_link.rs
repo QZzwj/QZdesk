@@ -15,6 +15,8 @@ pub enum NetEvent {
     Text(String),
     Binary(Vec<u8>),
     Connected,
+    Ready,
+    SkillRequired,
     Disconnected,
 }
 
@@ -27,9 +29,30 @@ pub enum NetCommand {
     Reconnect,
     /// 唤醒（开始说话）时调用：只有主技能确实变了才重建会话，避免每次唤醒都断连
     RefreshSkillsIfChanged,
+    EnsureSkillsReady(tokio::sync::oneshot::Sender<Result<(), String>>),
 }
 
 // 音频参数结构体
+fn confirms_primary_skill(request: &Value, response: &Value) -> bool {
+    if request.get("method").and_then(Value::as_str) != Some("tools/call")
+        || request.get("params").and_then(|p| p.get("name")).and_then(Value::as_str) != Some("skill_list")
+        || response.get("error").is_some()
+    {
+        return false;
+    }
+    let Some(text) = response
+        .get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.iter().find_map(|item| item.get("text").and_then(Value::as_str)))
+    else { return false; };
+    let Ok(value) = serde_json::from_str::<Value>(text) else { return false; };
+    value.get("primary_instructions")
+        .and_then(Value::as_str)
+        .map(|instructions| !instructions.trim().is_empty())
+        .unwrap_or(false)
+}
+
 #[derive(Serialize)]
 struct AudioParams {
     format: String,
@@ -62,6 +85,7 @@ pub struct NetLink {
     tx: mpsc::Sender<NetEvent>,
     rx_cmd: mpsc::Receiver<NetCommand>,
     mcp_server: Arc<McpServer>,
+    ready_waiters: Vec<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
 impl NetLink {
@@ -71,7 +95,7 @@ impl NetLink {
         rx_cmd: mpsc::Receiver<NetCommand>,
         mcp_server: Arc<McpServer>,
     ) -> Self {
-        Self { config, tx, rx_cmd, mcp_server }
+        Self { config, tx, rx_cmd, mcp_server, ready_waiters: Vec::new() }
     }
 
     // 如果发生错误断开连接，5秒后重连
@@ -84,12 +108,11 @@ impl NetLink {
                 let _ = self.tx.send(NetEvent::Disconnected).await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay)).await;
                 retry_delay = std::cmp::min(retry_delay * 2, 60);
-            } else {
-                // 如果连接和主循环正常退出，重置重试延迟
-                // If it returns Ok, it might mean clean exit or just a disconnect that wasn't caught as Err?
-                // In our case, connect_and_loop returns Err on disconnect.
-                // If it returns Ok, it means we are shutting down (rx_cmd closed).
+            } else if self.rx_cmd.is_closed() {
                 break;
+            } else {
+                retry_delay = 1;
+                let _ = self.tx.send(NetEvent::Disconnected).await;
             }
         }
     }
@@ -162,9 +185,30 @@ impl NetLink {
         log::info!("Sending Hello: {}", hello_json);
         write.send(Message::Text(hello_json.into())).await?;
 
-        // 主循环，处理读取和写入
+        let mut hello_seen = false;
+        let mut ready_sent = false;
+        let mut skill_fetched = self.mcp_server.has_instructions();
+        let mut turn_waiting = false;
+        let mut turn_failed = false;
+        let mut skill_deadline = tokio::time::Instant::now();
+        let mut ready_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
         loop {
             tokio::select! {
+                _ = ready_tick.tick() => {
+                    self.ready_waiters.retain(|waiter| !waiter.is_closed());
+                    if turn_waiting && !skill_fetched && !turn_failed && tokio::time::Instant::now() >= skill_deadline {
+                        turn_failed = true;
+                        let _ = self.tx.send(NetEvent::SkillRequired).await;
+                        log::warn!("Blocking turn after MCP Skill fetch timeout");
+                    }
+                    if hello_seen && self.mcp_server.skills_ready() {
+                        if !ready_sent {
+                            self.tx.send(NetEvent::Ready).await?;
+                            ready_sent = true;
+                        }
+                        for waiter in self.ready_waiters.drain(..) { let _ = waiter.send(Ok(())); }
+                    }
+                }
                 msg = read.next() => {
                     match msg {
                         Some(Ok(msg)) => {
@@ -174,6 +218,9 @@ impl NetLink {
                                     // 部分网关会把 payload 编成 JSON 字符串，或直接发
                                     // JSON-RPC。三种形态都接受，避免主 Skill 因封装差异失效。
                                     let parsed = serde_json::from_str::<Value>(&text).ok();
+                                    if parsed.as_ref().and_then(|value| value.get("type")).and_then(Value::as_str) == Some("hello") {
+                                        hello_seen = true;
+                                    }
                                     let (payload, session_id, wrapped) = match parsed.as_ref() {
                                         Some(value) if value.get("type").and_then(Value::as_str) == Some("mcp") => {
                                             let payload = value.get("payload").and_then(|item| {
@@ -196,14 +243,24 @@ impl NetLink {
                                                 true
                                             } else {
                                                 let response_payload = serde_json::from_str::<Value>(&mcp_response).unwrap_or(Value::Null);
+                                                let fetched = turn_waiting && !turn_failed && confirms_primary_skill(&payload, &response_payload);
                                                 let response = if wrapped {
                                                     json!({"type": "mcp", "session_id": session_id, "payload": response_payload})
                                                 } else {
                                                     response_payload
                                                 };
                                                 let response_text = serde_json::to_string(&response).unwrap();
-                                                log::info!("MCP Response: {}", response_text);
                                                 write.send(Message::Text(response_text.into())).await?;
+                                                if fetched {
+                                                    skill_fetched = true;
+                                                    log::info!("MCP skill_list returned primary skill for current turn");
+                                                }
+                                                if payload.get("method").and_then(Value::as_str) == Some("initialize")
+                                                    && self.mcp_server.has_instructions()
+                                                {
+                                                    skill_fetched = true;
+                                                    log::info!("MCP initialize sent skill instructions; session reply gate ready");
+                                                }
                                                 true
                                             }
                                         } else {
@@ -214,6 +271,20 @@ impl NetLink {
                                     };
 
                                     if !handled {
+                                        let reply_type = parsed.as_ref().and_then(|value| value.get("type")).and_then(Value::as_str);
+                                        let is_reply = matches!(reply_type, Some("llm") | Some("tts"));
+                                        if is_reply && !skill_fetched {
+                                            if !turn_failed {
+                                                turn_failed = true;
+                                                let _ = self.tx.send(NetEvent::SkillRequired).await;
+                                                log::warn!("Blocking cloud reply: current turn did not fetch primary Skill through MCP");
+                                            }
+                                            continue;
+                                        }
+                                        if reply_type == Some("tts") && parsed.as_ref().and_then(|value| value.get("state")).and_then(Value::as_str) == Some("stop") {
+                                            turn_waiting = false;
+                                            skill_fetched = self.mcp_server.has_instructions();
+                                        }
                                         // 正常信令通道处理。聊天记录由 controller
                                         // 按消息语义（用户 / 助手 / 系统）统一写入，
                                         // 这里不再广播原文，免得同一句话被记两遍。
@@ -222,6 +293,13 @@ impl NetLink {
                                     }
                                 }
                                 Message::Binary(data) => {
+                                    if !skill_fetched {
+                                        if !turn_failed {
+                                            turn_failed = true;
+                                            self.tx.send(NetEvent::SkillRequired).await?;
+                                        }
+                                        continue;
+                                    }
                                     self.tx.send(NetEvent::Binary(data.to_vec())).await?;
                                 }
                                 Message::Close(frame) => {
@@ -238,40 +316,36 @@ impl NetLink {
                 Some(cmd) = self.rx_cmd.recv() => {
                     match cmd {
                         NetCommand::SendText(text) => {
-                            let outgoing = if let Ok(mut value) = serde_json::from_str::<Value>(&text) {
-                                let is_detect = value.get("type").and_then(Value::as_str) == Some("listen")
-                                    && value.get("state").and_then(Value::as_str) == Some("detect");
-                                if is_detect {
-                                    if let Some(user_text) = value.get("text").and_then(Value::as_str) {
-                                        if let Some(augmented) = self.mcp_server.augment_text_request(user_text) {
-                                            log::warn!("Primary Skill was not delivered by MCP initialize; injecting it into this text turn");
-                                            value["text"] = Value::String(augmented);
-                                            serde_json::to_string(&value)?
-                                        } else {
-                                            text.clone()
-                                        }
-                                    } else {
-                                        text.clone()
-                                    }
-                                } else {
-                                    text.clone()
+                            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                                if value.get("type").and_then(Value::as_str) == Some("listen")
+                                    && matches!(value.get("state").and_then(Value::as_str), Some("start") | Some("detect")) {
+                                    if turn_waiting { return Err(anyhow::anyhow!("Previous reply is still pending; reconnecting to isolate turns")); }
+                                    skill_fetched = self.mcp_server.has_instructions();
+                                    turn_failed = false;
+                                    turn_waiting = true;
+                                    skill_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
                                 }
-                            } else {
-                                text.clone()
-                            };
-                            write.send(Message::Text(outgoing.into())).await?;
+                            }
+                            write.send(Message::Text(text.into())).await?;
                         }
                         NetCommand::SendBinary(data) => {
                             write.send(Message::Binary(data.into())).await?;
                         }
+                        NetCommand::EnsureSkillsReady(waiter) => {
+                            self.ready_waiters.push(waiter);
+                            if self.mcp_server.skill_refresh_needed() {
+                                log::info!("Skill changed: waiting for fresh MCP tools before audio upload");
+                                return Ok(());
+                            }
+                        }
                         NetCommand::Reconnect => {
-                            return Err(anyhow::anyhow!("Reconnect requested"));
+                            return Ok(());
                         }
                         NetCommand::RefreshSkillsIfChanged => {
                             // 唤醒时把主技能对齐：内容没变就什么都不做，不打扰这一轮对话
                             if self.mcp_server.skill_refresh_needed() {
                                 log::info!("Primary Skill changed since last MCP initialize, recreating session");
-                                return Err(anyhow::anyhow!("Skill changed, reconnect requested"));
+                                return Ok(());
                             }
                         }
                     }

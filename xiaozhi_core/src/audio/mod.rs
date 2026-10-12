@@ -6,6 +6,8 @@
 
 mod alsa_device;
 mod audio_system;
+/// 采集到的 PCM 旁路给唤醒词进程（见模块内的说明）。
+pub mod kws_tap;
 mod opus_codec;
 mod play;
 mod record;

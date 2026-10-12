@@ -8,32 +8,19 @@
 #include "weather_card.h"
 #include "weather_page.h"
 #include "icon_assets.h"
+#include "qzdesk_core.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
-/* Home composition: one tall AI card on the left, weather/settings/apps stacked
- * on the right. Both columns run all the way to the bottom gutter — the device
- * address moved up into the status bar and the page indicator is gone, so the
- * cards take over that space. The weather card leads the right column (top of
- * the home screen, clear of the status bar) and the two entry cards fill the
- * rest.
- *
- * 高度都从设计稿推出来，不写死：两列必须正好收尾在 QZ_BOTTOM 这条线上。 */
-/* 主页只有三块，按"两行"排：
- *     状态栏 / 上半 AI 助手 / 下半 左天气 右应用
- * 设置不再占首页格子，改为应用页里的一个入口（pages/apps.c）。
- *
- * 尺寸按"真机 320×240 上想要的实际像素 ×4/3"写：缩放层会把设计稿缩 2/3
- * （实机 = 设计 × 2/3），所以设计 30 的标题在真机上是 20px、设计 132 的高是 88px。
- * 竖向预算：状态栏 35 / 主卡 43..175 / 下半 183..304 / 底部留白 16。 */
-#define HOME_STATUS_H 35
-#define HOME_HERO_Y   43
-#define HOME_HERO_H   132
-#define HOME_ROW_Y    183
-#define HOME_ROW_H    121
-#define HOME_TILE_GAP 14
-#define HOME_TILE_W   ((QZ_DESIGN_W - 2 * QZ_GUTTER - HOME_TILE_GAP) / 2)
+#define HOME_STATUS_H 40
+#define HOME_HERO_Y   48
+#define HOME_HERO_H   128
+#define HOME_ROW_Y    188
+#define HOME_ROW_H    116
+#define HOME_TILE_GAP 12
+#define HOME_WEATHER_W 274
+#define HOME_TILE_W   (QZ_DESIGN_W - 2 * QZ_GUTTER - HOME_TILE_GAP - HOME_WEATHER_W)
 
 static lv_obj_t *assistant_screen;
 static lv_obj_t *apps_screen;
@@ -47,6 +34,26 @@ static lv_obj_t *battery_label;
 static lv_obj_t *hero_badge;
 static lv_obj_t *hero_badge_dot;
 static lv_obj_t *hero_badge_text;
+static int core_state = -1;
+static uint32_t core_seen_at;
+
+static void core_status(const qzdesk_core_event_t *event, void *data)
+{
+    (void)data;
+    if (event->type == QZDESK_CORE_EVENT_STATUS) {
+        core_state = event->state;
+        core_seen_at = lv_tick_get();
+    } else if (event->type == QZDESK_CORE_EVENT_ACTIVATION) {
+        core_state = 2;
+        core_seen_at = lv_tick_get();
+    }
+}
+
+static void wifi_clicked(lv_event_t *event)
+{
+    (void)event;
+    qz_settings_open_wlan(desktop_screen);
+}
 
 /* ------------------------------------------------------------------------- *
  * Page transitions
@@ -122,12 +129,17 @@ static void update_status(void)
     }
 
     if (hero_badge && hero_badge_text) {
-        lv_obj_set_style_bg_opa(hero_badge, connected ? LV_OPA_COVER : (lv_opa_t)190, 0);
-        lv_label_set_text(hero_badge_text, connected ? "在线" : "离线");
+        bool fresh = core_state >= 0 && lv_tick_elaps(core_seen_at) < 15000;
+        bool ready = fresh && (core_state == 3 || core_state == 5 || core_state == 6);
+        const char *label = !fresh ? "失联" : core_state == 2 ? "激活" :
+                            core_state == 5 ? "聆听" : core_state == 6 ? "播报" :
+                            ready ? "在线" : "连接";
+        lv_obj_set_style_bg_opa(hero_badge, ready ? LV_OPA_COVER : (lv_opa_t)190, 0);
+        lv_label_set_text(hero_badge_text, label);
         qz_obj_set_text_color(hero_badge_text, QZ_ACCENT_DARK, 0);
         if (hero_badge_dot) {
             lv_obj_set_style_bg_color(hero_badge_dot,
-                                      qz_color(connected ? QZ_GREEN : QZ_ORANGE), 0);
+                                      qz_color(ready ? QZ_GREEN : QZ_ORANGE), 0);
         }
     }
 }
@@ -160,9 +172,9 @@ static void hero_card(lv_obj_t *parent)
     qz_face_set_state(face, QZ_FACE_IDLE);
 
     lv_obj_t *title = qz_text(card, "AI 助手", 30, qz_color(QZ_TEXT));       /* 实机 20 */
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 152, -22);
-    lv_obj_t *hint = qz_text(card, "点击开始对话", 20, qz_color(QZ_TEXT_SECONDARY));  /* 实机 15 */
-    lv_obj_align(hint, LV_ALIGN_LEFT_MID, 152, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 148, 28);
+    lv_obj_t *hint = qz_text(card, "点击开始对话", 20, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 148, 72);
 
     /* 唯一的一处强调色，同时暗示"点进去" */
     lv_obj_t *go = qz_chevron(card, qz_color(QZ_ACCENT), 22);
@@ -200,13 +212,15 @@ static lv_obj_t *home_tile(lv_obj_t *parent, int x, const char *symbol, const ch
     lv_obj_t *card = qz_card_button(parent, HOME_TILE_W, HOME_ROW_H);
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, HOME_ROW_Y);
 
-    lv_obj_t *icon = qz_squircle(card, 60, tile);            /* 实机 40 */
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 14);
-    lv_obj_t *glyph = qz_symbol(icon, symbol, 34, qz_color(mark));   /* 实机 23 */
+    lv_obj_t *icon = qz_squircle(card, 46, tile);
+    lv_obj_align(icon, LV_ALIGN_TOP_LEFT, 16, 12);
+    lv_obj_t *glyph = qz_symbol(icon, symbol, 28, qz_color(mark));
     lv_obj_center(glyph);
 
-    lv_obj_t *name = qz_text(card, title, 30, qz_color(QZ_TEXT));    /* 实机 20 */
-    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 82);
+    lv_obj_t *name = qz_text(card, title, 24, qz_color(QZ_TEXT));
+    lv_obj_align(name, LV_ALIGN_TOP_LEFT, 16, 66);
+    lv_obj_t *go = qz_chevron(card, qz_color(QZ_ACCENT), 18);
+    lv_obj_align(go, LV_ALIGN_RIGHT_MID, -14, 0);
     return card;
 }
 
@@ -244,6 +258,9 @@ lv_obj_t *qz_desktop_create(const char *server)
     lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, -QZ_GUTTER - 36, 0);
     wifi_icon = qz_icon_image(status, QZ_ICON_WIFI, 26, qz_color(QZ_TEXT));
     lv_obj_align(wifi_icon, LV_ALIGN_RIGHT_MID, -QZ_GUTTER - 100, 0);
+    lv_obj_add_flag(wifi_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(wifi_icon, 10);
+    lv_obj_add_event_cb(wifi_icon, wifi_clicked, LV_EVENT_CLICKED, NULL);
 
     /* 设备地址：原来单独占底部一行（连那条指示条一起删掉了），现在放在状态栏
      * 中间 —— 左边是时间、右边是无线与电量，中间正好空着。 */
@@ -258,17 +275,18 @@ lv_obj_t *qz_desktop_create(const char *server)
     /* 下半左：天气。数据由核心异步取好、缓存好后推过来，这里只负责显示；点一下
      * 进天气详情页（刷新按钮在详情页里），网络请求都不在 UI 线程里。 */
     lv_obj_t *weather = qz_weather_card_create(desktop_screen, QZ_GUTTER, HOME_ROW_Y,
-                                               HOME_TILE_W, HOME_ROW_H);
+                                               HOME_WEATHER_W, HOME_ROW_H);
     qz_weather_page_init(desktop_screen);
 
     /* 下半右：应用（设置已经收进应用页里）。 */
-    lv_obj_t *apps = home_tile(desktop_screen, QZ_GUTTER + HOME_TILE_W + HOME_TILE_GAP,
+    lv_obj_t *apps = home_tile(desktop_screen, QZ_GUTTER + HOME_WEATHER_W + HOME_TILE_GAP,
                                LV_SYMBOL_LIST, "应用", QZ_ACCENT_TINT, QZ_ACCENT_DARK);
     lv_obj_add_event_cb(apps, show_apps, LV_EVENT_CLICKED, NULL);
 
     qz_animate_entrance(weather, 70);
     qz_animate_entrance(apps, 130);
 
+    qzdesk_core_subscribe(core_status, NULL);
     update_status();
     lv_timer_create(status_timer, 1000, NULL);
     return desktop_screen;

@@ -34,6 +34,14 @@ static lv_obj_t *screen;
 static lv_obj_t *apps_screen_ref;
 static lv_obj_t *update_label;
 static bool visible;
+static uint32_t last_sample_at;
+
+static void freshness_watch(lv_timer_t *timer)
+{
+    (void)timer;
+    if (visible && update_label && lv_tick_elaps(last_sample_at) > 10000)
+        lv_label_set_text(update_label, "数据未同步");
+}
 /** 曲线是否已经用核心给的历史填满过（之后每次只追加一个点）。 */
 static bool chart_seeded;
 static lv_obj_t *sections[SECTION_COUNT];
@@ -546,6 +554,7 @@ static void core_event(const qzdesk_core_event_t *event, void *user_data)
     /* 不在最前面显示时完全不碰控件：隐藏的页面不该有任何刷新开销 */
     if (!visible || !screen) return;
     if (event->type != QZDESK_CORE_EVENT_PERFORMANCE) return;
+    last_sample_at = lv_tick_get();
     apply(&event->performance);
 }
 
@@ -631,5 +640,6 @@ lv_obj_t *qz_performance_create(lv_obj_t *apps_screen)
 
     /* 订阅核心事件：助手页拿着轮询，这里只加一条订阅 */
     qzdesk_core_subscribe(core_event, NULL);
+    lv_timer_create(freshness_watch, 1000, NULL);
     return screen;
 }

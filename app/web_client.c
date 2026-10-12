@@ -4,6 +4,7 @@
  * 设备表要走同一个服务、同一套扫描逻辑，于是抽出来共用，而不是再抄一遍 ——
  * 抄一遍的代价是两个地方各修一遍 bug。 */
 #include "web_client.h"
+
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <netinet/in.h>
@@ -72,9 +73,14 @@ bool qz_web_request(const char *method, const char *path, const char *body,
         close(socket_fd);
         return false;
     }
-    if (send(socket_fd, request, (size_t)length, 0) != length) {
-        close(socket_fd);
-        return false;
+    size_t sent = 0;
+    while (sent < (size_t)length) {
+        ssize_t count = send(socket_fd, request + sent, (size_t)length - sent, MSG_NOSIGNAL);
+        if (count <= 0) {
+            close(socket_fd);
+            return false;
+        }
+        sent += (size_t)count;
     }
 
     while (used + 1 < sizeof(response) &&
@@ -88,16 +94,36 @@ bool qz_web_request(const char *method, const char *path, const char *body,
     if (!header_end) return false;
     if (strncmp(response, "HTTP/1.", 7) != 0) return false;
     status = atoi(response + 9);
-    if (status < 200 || status >= 300) return false;
+    size_t body_size = used - (size_t)(header_end + 4 - response);
+    if (body_size >= output_size) return false;
+    memcpy(output, header_end + 4, body_size);
+    output[body_size] = '\0';
+    return status >= 200 && status < 300;
+}
 
-    /* 只要响应体；列表被截断也比什么都没有强 */
-    snprintf(output, output_size, "%s", header_end + 4);
+bool qz_json_quote(const char *input, char *output, size_t size)
+{
+    if (!input || !output || size < 3) return false;
+    size_t used = 0;
+    output[used++] = '"';
+    for (const unsigned char *p = (const unsigned char *)input; *p; p++) {
+        if (*p < 32) {
+            if (used + 8 > size) return false;
+            used += (size_t)snprintf(output + used, size - used, "\\u%04x", *p);
+        } else {
+            if (used + 4 > size) return false;
+            if (*p == '"' || *p == '\\') output[used++] = '\\';
+            output[used++] = (char)*p;
+        }
+    }
+    output[used++] = '"';
+    output[used] = '\0';
     return true;
 }
 
 const char *qz_json_value(const char *json, const char *key)
 {
-    static char needle[64];
+    char needle[64];
     const char *value;
     if (!json || !key) return NULL;
     snprintf(needle, sizeof(needle), "\"%s\"", key);

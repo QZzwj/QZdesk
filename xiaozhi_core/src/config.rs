@@ -475,6 +475,33 @@ impl Config {
         config
     }
 
+    /// 把编译期烘焙的默认 MCP 工具补进运行时配置。
+    ///
+    /// 设备上 `xiaozhi_config.json` 一旦生成（第一次开机由核心写出），它的优先级就高于
+    /// 烘焙值 —— 于是"往 config.toml 加工具 + 重编核心 + 重刷固件"在老设备上没有任何
+    /// 效果，看起来像没编进去。这里按**名字**补差集：只补缺的，同名的原样留着
+    /// （用户在网页控制台改过的属性不会被覆盖）。
+    ///
+    /// 想彻底关掉这个行为：环境变量 `QZDESK_MCP_KEEP_RUNTIME_TOOLS=1`。
+    fn merge_default_tools(&mut self) -> usize {
+        if std::env::var("QZDESK_MCP_KEEP_RUNTIME_TOOLS").as_deref() == Ok("1") {
+            return 0;
+        }
+        let baked: McpConfig = match serde_json::from_str(env!("MCP_CONFIG_JSON")) {
+            Ok(config) => config,
+            Err(_) => return 0,
+        };
+        let mut added = 0;
+        for tool in baked.tools {
+            if self.mcp.tools.iter().any(|existing| existing.name == tool.name) {
+                continue;
+            }
+            self.mcp.tools.push(tool);
+            added += 1;
+        }
+        added
+    }
+
     /// 加载现有配置或使用默认值创建新文件
     pub fn load_or_create() -> anyhow::Result<Self> {
         let path = Self::config_path();
@@ -484,8 +511,21 @@ impl Config {
             let mut config: Config = serde_json::from_str(&content)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
 
+            let mut dirty = false;
             if config.client_id.trim().is_empty() || config.client_id == "unknown-client" {
                 config.client_id = Uuid::new_v4().to_string();
+                dirty = true;
+            }
+            let added = config.merge_default_tools();
+            if added > 0 {
+                log::info!(
+                    "已把 {} 个内置 MCP 工具补进 {}（旧配置里没有）",
+                    added,
+                    CONFIG_FILE_NAME
+                );
+                dirty = true;
+            }
+            if dirty {
                 config.save()?;
             }
 

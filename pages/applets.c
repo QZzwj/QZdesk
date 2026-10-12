@@ -5,6 +5,7 @@
 #include "smarthome.h"
 #include "web_client.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
@@ -200,7 +201,9 @@ typedef struct {
     int hour;
     int minute;
     bool daily;
-    char label[32];
+    bool enabled;
+    char label[80];
+    char date[16];
 } reminder_t;
 
 #define REMINDER_MAX 8   /* 与核心的 MAX_REMINDERS 一致 */
@@ -216,6 +219,11 @@ static lv_obj_t *add_overlay;
 static lv_obj_t *add_hour_roller;
 static lv_obj_t *add_minute_roller;
 static lv_obj_t *add_daily_switch;
+static lv_obj_t *add_name_input;
+static lv_obj_t *add_date_input;
+static lv_obj_t *add_enabled_switch;
+static int reminder_edit_id;
+static reminder_t reminder_edit_value;
 static lv_obj_t *reminder_page_label;
 static lv_obj_t *reminder_previous;
 static lv_obj_t *reminder_next;
@@ -239,29 +247,15 @@ static void show_banner(const char *text)
     lv_timer_set_repeat_count(banner_timer, 1);
 }
 
-/** 发一次请求。成功返回 true；失败时把服务端的错误文案（若有）写进 `error`。 */
-static bool reminder_request(const char *method, const char *path, const char *body,
-                             char *error, size_t error_size)
-{
-    static char response[8192];
+static void rebuild_reminders(void);
+static bool reminders_loading;
 
-    response[0] = '\0';
-    if (error && error_size > 0) error[0] = '\0';
-    if (qz_web_request(method, path, body, response, sizeof(response))) return true;
-    if (error && error_size > 0 &&
-        !qz_json_string(response, "error", error, error_size)) {
-        snprintf(error, error_size, "本地服务未连接");
-    }
-    return false;
-}
-
-/** 拉一次提醒列表，覆盖本地副本。返回 false 表示核心不可达（保留原列表）。 */
-static bool reminders_reload(void)
+static void reminders_loaded(bool ok, const char *body, void *data)
 {
-    static char body[8192];
+    (void)data;
+    reminders_loading = false;
+    if (!ok) { show_banner("提醒列表未同步，保留上次内容"); return; }
     int count = 0;
-
-    if (!qz_web_request("GET", "/api/timers", NULL, body, sizeof(body))) return false;
 
     for (int i = 0; i < REMINDER_MAX; i++) {
         const char *object = qz_json_item(body, "timers", i);
@@ -277,6 +271,9 @@ static bool reminders_reload(void)
         if (!qz_json_int(object, "minute", &value)) continue;
         r->minute = value;
         qz_json_bool(object, "daily", &r->daily);
+        r->enabled = true;
+        qz_json_bool(object, "enabled", &r->enabled);
+        qz_json_string(object, "date", r->date, sizeof(r->date));
         if (!qz_json_string(object, "label", r->label, sizeof(r->label)) ||
             r->label[0] == '\0') {
             snprintf(r->label, sizeof(r->label), "提醒");
@@ -284,11 +281,31 @@ static bool reminders_reload(void)
         count++;
     }
     reminder_count = count;
-    return true;
+    rebuild_reminders();
+}
+
+static bool reminders_reload(void)
+{
+    if (reminders_loading) return true;
+    reminders_loading = qz_web_request_async("GET", "/api/timers", NULL, reminders_loaded, NULL);
+    return reminders_loading;
 }
 
 static void remove_reminder(lv_event_t *event);
-static void rebuild_reminders(void);
+static void open_add_modal(lv_event_t *event);
+static void edit_reminder(lv_event_t *event)
+{
+    if (add_overlay) return;
+    reminder_edit_id = (int)(intptr_t)lv_event_get_user_data(event);
+    for (int i = 0; i < reminder_count; i++) {
+        if (reminders[i].id == reminder_edit_id) {
+            reminder_edit_value = reminders[i];
+            open_add_modal(event);
+            return;
+        }
+    }
+    reminder_edit_id = 0;
+}
 
 static void reminder_page_changed(lv_event_t *event)
 {
@@ -334,6 +351,9 @@ static void rebuild_reminders(void)
         snprintf(clock, sizeof(clock), "%02d:%02d", reminders[i].hour, reminders[i].minute);
         lv_obj_t *time_label = qz_text(row, clock, qz_compact() ? 20 : 17, qz_color(QZ_TEXT));
         lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 14, 0);
+        lv_obj_add_flag(time_label, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(time_label, edit_reminder, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)reminders[i].id);
 
         lv_obj_t *name = qz_text(row, reminders[i].label, 12, qz_color(QZ_TEXT_SECONDARY));
         lv_obj_set_width(name, CONTENT_W - 166);
@@ -341,7 +361,8 @@ static void rebuild_reminders(void)
         lv_obj_align(name, LV_ALIGN_LEFT_MID, 98, reminders[i].daily ? -9 : 0);
 
         if (reminders[i].daily) {
-            lv_obj_t *chip = qz_text(row, "每日", 10, qz_color(QZ_ACCENT_TEXT));
+            lv_obj_t *chip = qz_text(row, reminders[i].enabled ? "每日·点时间编辑" : "已关闭", 10,
+                                      qz_color(QZ_ACCENT_TEXT));
             lv_obj_align(chip, LV_ALIGN_LEFT_MID, 98, 22);
         }
 
@@ -353,21 +374,55 @@ static void rebuild_reminders(void)
     }
 }
 
+static int delete_confirm_id;
+static uint32_t delete_confirm_at;
+
+static bool reminder_deleting;
+
+static void reminder_deleted(bool ok, const char *body, void *data)
+{
+    (void)data;
+    reminder_deleting = false;
+    if (ok) { reminders_reload(); show_banner("提醒已删除"); }
+    else {
+        char error[96];
+        if (!qz_json_string(body, "error", error, sizeof(error)))
+            snprintf(error, sizeof(error), "删除失败，请重试");
+        show_banner(error);
+    }
+}
+
 static void remove_reminder(lv_event_t *event)
 {
+    if (reminder_deleting) return;
     int id = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(event));
     char path[48];
     if (id <= 0) return;
+    if (delete_confirm_id != id || lv_tick_elaps(delete_confirm_at) > 5000) {
+        delete_confirm_id = id;
+        delete_confirm_at = lv_tick_get();
+        show_banner("再点一次删除可确认（5秒内）");
+        return;
+    }
+    delete_confirm_id = 0;
     snprintf(path, sizeof(path), "/api/timers/%d", id);
-    reminder_request("DELETE", path, NULL, NULL, 0);
-    if (reminders_reload()) rebuild_reminders();
+    reminder_deleting = true;
+    show_banner("删除中，请稍候");
+    if (!qz_web_request_async("DELETE", path, NULL, reminder_deleted, NULL)) {
+        reminder_deleting = false;
+        show_banner("无法发起删除，请重试");
+    }
 }
+
+static bool reminder_saving;
 
 static void close_add_modal(lv_event_t *event)
 {
     (void)event;
+    if (reminder_saving) return;
     if (add_overlay) lv_obj_delete(add_overlay);
     add_overlay = NULL;
+    reminder_edit_id = 0;
 }
 
 static void add_modal_dismissed(lv_event_t *event)
@@ -376,10 +431,33 @@ static void add_modal_dismissed(lv_event_t *event)
     close_add_modal(event);
 }
 
+static void reminder_saved(bool ok, const char *response, void *user_data)
+{
+    (void)user_data;
+    reminder_saving = false;
+    if (!ok) {
+        char error[112];
+        if (!qz_json_string(response, "error", error, sizeof(error)))
+            snprintf(error, sizeof(error), "保存失败，请重试；内容已保留");
+        show_banner(error);
+        return;
+    }
+    close_add_modal(NULL);
+    if (reminders_reload()) rebuild_reminders();
+    show_banner("提醒已保存");
+}
+
 static void add_confirm(lv_event_t *event)
 {
-    char body[128];
-    char error[96];
+    char body[768];
+    char label[512];
+    if (reminder_saving) return;
+    char date[96];
+    if (!qz_json_quote(lv_textarea_get_text(add_name_input), label, sizeof(label)) ||
+        !qz_json_quote(lv_textarea_get_text(add_date_input), date, sizeof(date))) {
+        show_banner("提醒内容过长，请修改后重试");
+        return;
+    }
 
     if (!add_hour_roller || !add_minute_roller) {
         close_add_modal(event);
@@ -388,19 +466,21 @@ static void add_confirm(lv_event_t *event)
     /* 直接交给核心：语音、网页控制台与这里用的是同一份提醒表，
      * 重复或超上限时也由核心给出原因。 */
     snprintf(body, sizeof(body),
-             "{\"hour\":%d,\"minute\":%d,\"daily\":%s,\"label\":\"提醒\"}",
+             "{\"hour\":%d,\"minute\":%d,\"daily\":%s,\"label\":%s,\"date\":%s,\"enabled\":%s}",
              lv_roller_get_selected(add_hour_roller),
-             lv_roller_get_selected(add_minute_roller) * 5,
-             lv_obj_has_state(add_daily_switch, LV_STATE_CHECKED) ? "true" : "false");
+             lv_roller_get_selected(add_minute_roller),
+             lv_obj_has_state(add_daily_switch, LV_STATE_CHECKED) ? "true" : "false",
+             label, date, lv_obj_has_state(add_enabled_switch, LV_STATE_CHECKED) ? "true" : "false");
 
-    if (reminder_request("POST", "/api/timers", body, error, sizeof(error))) {
-        if (reminders_reload()) rebuild_reminders();
-    } else {
-        char text[112];
-        snprintf(text, sizeof(text), "%s", error[0] ? error : "保存失败");
-        show_banner(text);
+    char path[64] = "/api/timers";
+    if (reminder_edit_id) snprintf(path, sizeof(path), "/api/timers/%d", reminder_edit_id);
+    reminder_saving = true;
+    show_banner("保存中，请稍候");
+    if (!qz_web_request_async(reminder_edit_id ? "PUT" : "POST", path, body,
+                              reminder_saved, NULL)) {
+        reminder_saving = false;
+        show_banner("无法启动保存，请重试；内容已保留");
     }
-    close_add_modal(event);
 }
 
 static void style_roller(lv_obj_t *roller)
@@ -419,6 +499,23 @@ static void style_roller(lv_obj_t *roller)
     lv_obj_set_style_text_font(roller, qz_font_size(17), LV_PART_SELECTED);
 }
 
+static void reminder_keyboard_close(lv_event_t *event)
+{
+    lv_obj_delete(lv_event_get_current_target(event));
+}
+
+static void reminder_input_focus(lv_event_t *event)
+{
+    if (!add_overlay) return;
+    lv_obj_t *keyboard = lv_keyboard_create(add_overlay);
+    lv_obj_set_size(keyboard, lv_pct(100), 136);
+    lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    qz_style_keyboard(keyboard);
+    lv_keyboard_set_textarea(keyboard, lv_event_get_target(event));
+    lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_CANCEL, NULL);
+}
+
 static void open_add_modal(lv_event_t *event)
 {
     (void)event;
@@ -428,8 +525,8 @@ static void open_add_modal(lv_event_t *event)
     lv_obj_add_event_cb(add_overlay, add_modal_dismissed, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *panel = lv_obj_create(add_overlay);
-    lv_obj_set_size(panel, QZ_DESIGN_W - 40, 236);
-    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 16);
+    lv_obj_set_size(panel, QZ_DESIGN_W - 40, 316);
+    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 2);
     lv_obj_set_style_radius(panel, QZ_RADIUS_CARD, 0);
     qz_obj_set_bg_color(panel, QZ_CARD, 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
@@ -447,10 +544,10 @@ static void open_add_modal(lv_event_t *event)
         snprintf(hours + strlen(hours), 5, "%02d\n", i);
     }
     hours[strlen(hours) - 1] = '\0';
-    static char minutes[12 * 4];
+    static char minutes[60 * 4];
     minutes[0] = '\0';
-    for (int i = 0; i < 12; i++) {
-        snprintf(minutes + strlen(minutes), 5, "%02d\n", i * 5);
+    for (int i = 0; i < 60; i++) {
+        snprintf(minutes + strlen(minutes), 5, "%02d\n", i);
     }
     minutes[strlen(minutes) - 1] = '\0';
 
@@ -472,7 +569,7 @@ static void open_add_modal(lv_event_t *event)
     lv_obj_set_size(add_minute_roller, 84, 104);
     lv_obj_align(add_minute_roller, LV_ALIGN_TOP_MID, 52, 26);
     style_roller(add_minute_roller);
-    lv_roller_set_selected(add_minute_roller, (uint32_t)(local_now.tm_min / 5), LV_ANIM_OFF);
+    lv_roller_set_selected(add_minute_roller, (uint32_t)local_now.tm_min, LV_ANIM_OFF);
 
     lv_obj_t *daily_caption = qz_text(panel, "每日重复", 13, qz_color(QZ_TEXT));
     lv_obj_align(daily_caption, LV_ALIGN_TOP_LEFT, 0, 140);
@@ -480,6 +577,40 @@ static void open_add_modal(lv_event_t *event)
     qz_style_switch(add_daily_switch);
     lv_obj_set_size(add_daily_switch, qz_compact() ? 60 : 42, qz_compact() ? 32 : 26);
     lv_obj_align(add_daily_switch, LV_ALIGN_TOP_RIGHT, 0, 136);
+
+    add_name_input = lv_textarea_create(panel);
+    lv_textarea_set_one_line(add_name_input, true);
+    lv_obj_add_event_cb(add_name_input, reminder_input_focus, LV_EVENT_FOCUSED, NULL);
+    lv_textarea_set_placeholder_text(add_name_input, "提醒内容");
+    lv_obj_set_size(add_name_input, lv_pct(100), 32);
+    lv_obj_set_style_text_font(add_name_input, qz_font_size(12), 0);
+    lv_textarea_set_max_length(add_name_input, 24);
+    lv_obj_align(add_name_input, LV_ALIGN_TOP_LEFT, 0, 168);
+    lv_textarea_set_text(add_name_input, reminder_edit_id ? reminder_edit_value.label : "提醒");
+
+    add_date_input = lv_textarea_create(panel);
+    lv_textarea_set_one_line(add_date_input, true);
+    lv_obj_add_event_cb(add_date_input, reminder_input_focus, LV_EVENT_FOCUSED, NULL);
+    lv_textarea_set_placeholder_text(add_date_input, "日期 YYYY-MM-DD（可选）");
+    lv_obj_set_size(add_date_input, lv_pct(100), 32);
+    lv_obj_set_style_text_font(add_date_input, qz_font_size(12), 0);
+    lv_textarea_set_max_length(add_date_input, 10);
+    lv_obj_align(add_date_input, LV_ALIGN_TOP_LEFT, 0, 202);
+    lv_textarea_set_text(add_date_input, reminder_edit_id ? reminder_edit_value.date : "");
+
+    lv_obj_t *enabled_caption = qz_text(panel, "启用提醒", 12, qz_color(QZ_TEXT));
+    lv_obj_align(enabled_caption, LV_ALIGN_TOP_LEFT, 0, 240);
+    add_enabled_switch = lv_switch_create(panel);
+    qz_style_switch(add_enabled_switch);
+    lv_obj_set_size(add_enabled_switch, 42, 24);
+    lv_obj_align(add_enabled_switch, LV_ALIGN_TOP_RIGHT, 0, 236);
+    if (!reminder_edit_id || reminder_edit_value.enabled) lv_obj_add_state(add_enabled_switch, LV_STATE_CHECKED);
+
+    if (reminder_edit_id) {
+        lv_roller_set_selected(add_hour_roller, (uint32_t)reminder_edit_value.hour, LV_ANIM_OFF);
+        lv_roller_set_selected(add_minute_roller, (uint32_t)reminder_edit_value.minute, LV_ANIM_OFF);
+        if (reminder_edit_value.daily) lv_obj_add_state(add_daily_switch, LV_STATE_CHECKED);
+    }
 
     lv_obj_t *actions = lv_obj_create(panel);
     lv_obj_set_size(actions, lv_pct(100), qz_compact() ? 44 : 36);
@@ -510,7 +641,7 @@ static void open_add_modal(lv_event_t *event)
  *  屏幕上。 */
 static void reminder_poll(void)
 {
-    if (lv_screen_active() != screens[QZ_APPLET_REMINDER]) return;
+    if (lv_screen_active() != screens[QZ_APPLET_REMINDER] || add_overlay) return;
     if (reminders_reload()) rebuild_reminders();
 }
 
@@ -591,6 +722,16 @@ static int pomo_remaining;
 static int pomo_phase_total = 25 * 60;
 static int pomo_done;
 static int pomo_cycles = 4;
+static int pomo_preset;
+static int pomo_next_focus = 25;
+static int pomo_next_break = 5;
+static int pomo_next_cycles = 4;
+static lv_obj_t *pomo_custom_overlay;
+static lv_obj_t *pomo_custom_inputs[3];
+static lv_obj_t *pomo_auto_switch;
+static bool pomo_next_auto_break = true;
+static lv_obj_t *pomo_preset_caption;
+static const int pomo_presets[][3] = {{25, 5, 4}, {45, 10, 2}, {15, 5, 4}};
 /** 番茄钟页每这么多拍（秒）与核心对一次表。 */
 #define POMO_POLL_TICKS 5
 
@@ -612,7 +753,7 @@ static bool pomo_sync(const char *json)
     if (qz_json_string(json, "phase", phase, sizeof(phase))) {
         pomo_break = strcmp(phase, "break") == 0;
     }
-    if (qz_json_int(json, "remaining_seconds", &value)) pomo_remaining = value;
+    if (qz_json_int(json, "remaining_seconds", &value)) pomo_remaining = value < 0 ? 0 : value;
     if (qz_json_int(json, "completed_cycles", &value)) pomo_done = value;
     if (qz_json_int(json, "total_cycles", &value) && value > 0) pomo_cycles = value;
     qz_json_int(json, "focus_minutes", &focus_minutes);
@@ -622,23 +763,56 @@ static bool pomo_sync(const char *json)
     return true;
 }
 
+static bool pomo_loading;
+
+static void pomo_loaded(bool ok, const char *body, void *data)
+{
+    (void)data;
+    pomo_loading = false;
+    if (ok && pomo_sync(body)) pomo_refresh();
+    else if (pomo_phase_chip) lv_label_set_text(pomo_phase_chip, "未同步，请检查服务");
+}
+
 static bool pomo_reload(void)
 {
-    static char body[2048];
-
-    if (!qz_web_request("GET", "/api/pomodoro", NULL, body, sizeof(body))) return false;
-    return pomo_sync(body);
+    if (pomo_loading) return true;
+    pomo_loading = qz_web_request_async("GET", "/api/pomodoro", NULL, pomo_loaded, NULL);
+    return pomo_loading;
 }
 
 /** 给核心发一个动作，成功后用核心返回的状态刷新界面。 */
+static bool pomo_busy;
+
+static void pomo_request_done(bool ok, const char *body, void *user_data)
+{
+    (void)user_data;
+    pomo_busy = false;
+    if (!ok) {
+        char error[96];
+        if (!qz_json_string(body, "error", error, sizeof(error)))
+            snprintf(error, sizeof(error), "操作失败，请重试");
+        lv_label_set_text(pomo_phase_chip, error);
+        return;
+    }
+    if (pomo_sync(body)) pomo_refresh();
+}
+
 static void pomo_send(const char *action)
 {
-    static char body[2048];
-    char payload[48];
+    if (pomo_busy) return;
+    char payload[160];
 
-    snprintf(payload, sizeof(payload), "{\"action\":\"%s\"}", action);
-    if (!qz_web_request("POST", "/api/pomodoro", payload, body, sizeof(body))) return;
-    if (pomo_sync(body)) pomo_refresh();
+    if (strcmp(action, "start") == 0) {
+        snprintf(payload, sizeof(payload),
+            "{\"action\":\"start\",\"focus_minutes\":%d,\"break_minutes\":%d,\"cycles\":%d,\"auto_break\":%s}",
+            pomo_next_focus, pomo_next_break, pomo_next_cycles, pomo_next_auto_break ? "true" : "false");
+    } else snprintf(payload, sizeof(payload), "{\"action\":\"%s\"}", action);
+    pomo_busy = true;
+    lv_label_set_text(pomo_phase_chip, "执行中，请稍候");
+    if (!qz_web_request_async("POST", "/api/pomodoro", payload, pomo_request_done, NULL)) {
+        pomo_busy = false;
+        lv_label_set_text(pomo_phase_chip, "无法发起操作，请重试");
+    }
 }
 
 static void pomo_refresh(void)
@@ -677,13 +851,10 @@ static void pomo_tick(void)
 {
     static int since_sync;
 
-    if (lv_screen_active() != screens[QZ_APPLET_POMODORO]) {
-        since_sync = 0;
-        return;
-    }
     if (since_sync <= 0) {
         since_sync = POMO_POLL_TICKS;
-        if (pomo_reload()) pomo_refresh();
+        pomo_reload();
+        if (lv_screen_active() == screens[QZ_APPLET_POMODORO]) pomo_refresh();
         return;
     }
     since_sync--;
@@ -705,6 +876,101 @@ static void pomo_reset(lv_event_t *event)
 {
     (void)event;
     pomo_send("stop");
+}
+
+static void pomo_custom_close(lv_event_t *event)
+{
+    (void)event;
+    if (pomo_custom_overlay) lv_obj_delete(pomo_custom_overlay);
+    pomo_custom_overlay = NULL;
+}
+
+static void pomo_custom_save(lv_event_t *event)
+{
+    (void)event;
+    int *values[3] = {&pomo_next_focus, &pomo_next_break, &pomo_next_cycles};
+    int limits[3] = {120, 120, 12};
+    int pending[3];
+    for (int i = 0; i < 3; i++) {
+        const char *input = lv_textarea_get_text(pomo_custom_inputs[i]);
+        char *end;
+        long value = strtol(input, &end, 10);
+        if (!input[0] || *end || value < 1 || value > limits[i]) {
+            lv_obj_t *label = lv_obj_get_child(pomo_custom_overlay, i * 2);
+            const char *errors[3] = {"专注：1-120分钟", "休息：1-120分钟", "轮数：1-12"};
+            lv_label_set_text(label, errors[i]);
+            return;
+        }
+        pending[i] = (int)value;
+    }
+    for (int i = 0; i < 3; i++) *values[i] = pending[i];
+    char text[48];
+    snprintf(text, sizeof(text), "%d/%d·%d轮", pomo_next_focus, pomo_next_break, pomo_next_cycles);
+    lv_label_set_text(pomo_preset_caption, text);
+    pomo_next_auto_break = lv_obj_has_state(pomo_auto_switch, LV_STATE_CHECKED);
+    pomo_custom_close(NULL);
+}
+
+static void pomo_number_focus(lv_event_t *event)
+{
+    lv_obj_t *keyboard = lv_keyboard_create(pomo_custom_overlay);
+    lv_obj_set_size(keyboard, lv_pct(100), 130);
+    lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_NUMBER);
+    lv_keyboard_set_textarea(keyboard, lv_event_get_target(event));
+    lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_CANCEL, NULL);
+}
+
+static void pomo_custom_open(lv_event_t *event)
+{
+    (void)event;
+    if (pomo_custom_overlay) return;
+    pomo_custom_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(pomo_custom_overlay, lv_pct(90), 220);
+    lv_obj_center(pomo_custom_overlay);
+    qz_obj_set_bg_color(pomo_custom_overlay, QZ_CARD, 0);
+    const char *labels[3] = {"专注分钟", "休息分钟", "轮数"};
+    int values[3] = {pomo_next_focus, pomo_next_break, pomo_next_cycles};
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *label = qz_text(pomo_custom_overlay, labels[i], 12, qz_color(QZ_TEXT));
+        lv_obj_align(label, LV_ALIGN_TOP_LEFT, 10, 10 + i * 42);
+        pomo_custom_inputs[i] = lv_textarea_create(pomo_custom_overlay);
+        lv_textarea_set_one_line(pomo_custom_inputs[i], true);
+        lv_obj_add_event_cb(pomo_custom_inputs[i], pomo_number_focus, LV_EVENT_FOCUSED, NULL);
+        char value_text[12];
+        snprintf(value_text, sizeof(value_text), "%d", values[i]);
+        lv_textarea_set_text(pomo_custom_inputs[i], value_text);
+        lv_textarea_set_accepted_chars(pomo_custom_inputs[i], "0123456789");
+        lv_obj_set_size(pomo_custom_inputs[i], 80, 30);
+        lv_obj_align(pomo_custom_inputs[i], LV_ALIGN_TOP_RIGHT, -10, 5 + i * 42);
+    }
+    lv_obj_t *auto_label = qz_text(pomo_custom_overlay, "自动开始休息", 12, qz_color(QZ_TEXT));
+    lv_obj_align(auto_label, LV_ALIGN_TOP_LEFT, 10, 138);
+    pomo_auto_switch = lv_switch_create(pomo_custom_overlay);
+    lv_obj_set_size(pomo_auto_switch, 42, 24);
+    lv_obj_align(pomo_auto_switch, LV_ALIGN_TOP_RIGHT, -10, 132);
+    if (pomo_next_auto_break) lv_obj_add_state(pomo_auto_switch, LV_STATE_CHECKED);
+    lv_obj_t *save = qz_button(pomo_custom_overlay, "保存", 80, 34);
+    lv_obj_align(save, LV_ALIGN_BOTTOM_LEFT, 10, -8);
+    lv_obj_add_event_cb(save, pomo_custom_save, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cancel = qz_button(pomo_custom_overlay, "取消", 80, 34);
+    lv_obj_align(cancel, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
+    lv_obj_add_event_cb(cancel, pomo_custom_close, LV_EVENT_CLICKED, NULL);
+}
+
+static void pomo_next_preset(lv_event_t *event)
+{
+    (void)event;
+    if (pomo_active) lv_label_set_text(pomo_phase_chip, "预设将在下一次开始时生效");
+    pomo_preset = (pomo_preset + 1) % 3;
+    pomo_next_focus = pomo_presets[pomo_preset][0];
+    pomo_next_break = pomo_presets[pomo_preset][1];
+    pomo_next_cycles = pomo_presets[pomo_preset][2];
+    char text[48];
+    snprintf(text, sizeof(text), "%d/%d·%d轮", pomo_presets[pomo_preset][0],
+             pomo_presets[pomo_preset][1], pomo_presets[pomo_preset][2]);
+    lv_label_set_text(pomo_preset_caption, text);
 }
 
 static void build_pomodoro_screen(void)
@@ -738,6 +1004,12 @@ static void build_pomodoro_screen(void)
 
     pomo_count = qz_text(pomo_arc, "已完成 0 个番茄", 10, qz_color(QZ_TEXT_TERTIARY));
     lv_obj_align(pomo_count, LV_ALIGN_CENTER, 0, 32);
+
+    lv_obj_t *preset = qz_button(screen, "25/5·4轮", 110, 44);
+    lv_obj_align(preset, LV_ALIGN_TOP_LEFT, 12, 252);
+    pomo_preset_caption = lv_obj_get_child(preset, 0);
+    lv_obj_add_event_cb(preset, pomo_next_preset, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(preset, pomo_custom_open, LV_EVENT_LONG_PRESSED, NULL);
 
     lv_obj_t *reset = qz_icon_button(screen, LV_SYMBOL_REFRESH, 44);
     lv_obj_align(reset, LV_ALIGN_TOP_LEFT, 132, 252);
@@ -818,14 +1090,60 @@ static void control_reload_later(void)
     lv_timer_set_repeat_count(timer, 1);
 }
 
+static bool device_command_busy;
+static bool device_waiting;
+static bool device_target_state;
+static char device_pending_id[QZ_DEVICE_ID_MAX];
+static uint32_t device_pending_at;
+
+static void device_command_done(bool ok, const char *response, void *user_data)
+{
+    (void)response;
+    (void)user_data;
+    device_command_busy = false;
+    device_waiting = ok;
+    device_pending_at = lv_tick_get();
+    control_reload_later();
+    if (control_hint) {
+        lv_label_set_text(control_hint, ok ? "命令已发送，等待设备上报状态" : "命令发送失败，请重试");
+        lv_obj_clear_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void device_switch_changed(lv_event_t *event)
 {
     lv_obj_t *toggle = lv_event_get_target(event);
     int index = (int)(intptr_t)lv_obj_get_user_data(toggle);
     if (index < 0 || index >= control_device_count) return;
     bool on = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-    qz_device_command(control_devices[index].id, on ? "on" : "off", 0);
-    control_reload_later();
+    if (on) lv_obj_remove_state(toggle, LV_STATE_CHECKED);
+    else lv_obj_add_state(toggle, LV_STATE_CHECKED);
+    if (device_command_busy) {
+        if (control_hint) lv_label_set_text(control_hint, "上一条命令仍在执行");
+        return;
+    }
+    char quoted[QZ_DEVICE_ID_MAX * 6 + 3];
+    char payload[sizeof(quoted) + 48];
+    bool encoded = qz_json_quote(control_devices[index].id, quoted, sizeof(quoted));
+    snprintf(payload, sizeof(payload), "{\"id\":%s,\"action\":\"%s\"}",
+             encoded ? quoted : "\"\"", on ? "on" : "off");
+    if (!control_devices[index].online || !encoded ||
+        !qz_web_request_async("POST", "/api/devices/command", payload, device_command_done, NULL)) {
+        if (control_hint) {
+            lv_label_set_text(control_hint, "设备离线或命令发送失败，请重试");
+            lv_obj_clear_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (on) lv_obj_remove_state(toggle, LV_STATE_CHECKED);
+        else lv_obj_add_state(toggle, LV_STATE_CHECKED);
+        return;
+    }
+    device_command_busy = true;
+    device_target_state = on;
+    snprintf(device_pending_id, sizeof(device_pending_id), "%s", control_devices[index].id);
+    if (control_hint) {
+        lv_label_set_text(control_hint, "执行中，等待设备状态");
+        lv_obj_clear_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /** 一台设备一行：图标 + 名字/在线状态 + 状态字 + 开关。 */
@@ -878,16 +1196,21 @@ static void device_row(lv_obj_t *parent, int index, int y)
     lv_obj_set_size(toggle, 60, 32);
     lv_obj_align(toggle, LV_ALIGN_RIGHT_MID, -10, 0);
     if (device->has_state && device->state) lv_obj_add_state(toggle, LV_STATE_CHECKED);
+    if (!device->online) lv_obj_add_state(toggle, LV_STATE_DISABLED);
     lv_obj_set_user_data(toggle, (void *)(intptr_t)index);
     lv_obj_add_event_cb(toggle, device_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
 }
 
 /** 取一次设备表，把中枢状态与设备行重画一遍。 */
-static void control_reload(void)
+static bool control_loading;
+
+static void control_loaded(bool ok, const char *body, void *data)
 {
-    qz_hub_status_t hub;
+    (void)data;
+    control_loading = false;
+    qz_hub_status_t hub = {0};
     char text[64];
-    control_device_count = qz_devices_fetch(control_devices, QZ_DEVICE_MAX, &hub);
+    control_device_count = ok ? qz_devices_parse(body, control_devices, QZ_DEVICE_MAX, &hub) : -1;
 
     if (control_hub_chip) {
         if (control_device_count < 0) {
@@ -916,7 +1239,7 @@ static void control_reload(void)
             lv_obj_clear_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
         } else if (!hub.enabled || !hub.connected) {
             qz_device_ip(address, sizeof(address));
-            snprintf(text, sizeof(text), "浏览器打开设备 IP:8080 配置智能家居");
+            snprintf(text, sizeof(text), "浏览器打开设备 IP:%u 配置智能家居", qz_web_port());
             lv_label_set_text(control_hint, text);
             lv_obj_clear_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -945,6 +1268,13 @@ static void control_reload(void)
     }
     device_row(control_device_list, control_page, 0);
     lv_obj_set_height(control_device_list, 80);
+}
+
+static void control_reload(void)
+{
+    if (control_loading) return;
+    control_loading = qz_web_request_async("GET", "/api/devices", NULL, control_loaded, NULL);
+    if (!control_loading && control_hint) lv_label_set_text(control_hint, "无法刷新，请重试");
 }
 
 static void hub_refresh_clicked(lv_event_t *event)
@@ -1605,6 +1935,22 @@ static void applet_tick(lv_timer_t *timer)
     static int reminder_ticks;
 
     (void)timer;
+    if (device_waiting) {
+        control_reload();
+        bool confirmed = false;
+        for (int i = 0; i < control_device_count; i++) {
+            if (strcmp(control_devices[i].id, device_pending_id) == 0 &&
+                control_devices[i].has_state && control_devices[i].state == device_target_state)
+                confirmed = true;
+        }
+        if (confirmed || lv_tick_elaps(device_pending_at) >= 10000) {
+            device_waiting = false;
+            if (control_hint) {
+                lv_label_set_text(control_hint, confirmed ? "设备状态已确认" : "设备未确认执行，显示最后上报状态");
+                lv_obj_clear_flag(control_hint, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
     pomo_tick();
     /* 提醒列表定期与核心对齐：语音刚加的、或刚响过被撤掉的一次性提醒 */
     if (--reminder_ticks <= 0) {

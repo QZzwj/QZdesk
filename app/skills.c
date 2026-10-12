@@ -22,13 +22,18 @@ static qz_skill_role_t role_from_key(const char *key)
 int qz_skills_fetch(qz_skill_t *output, int max_count, qz_skill_summary_t *summary)
 {
     static char body[RESPONSE_MAX];
+    if (!qz_web_request("GET", "/api/skills", NULL, body, sizeof(body))) return -1;
+    return qz_skills_parse(body, output, max_count, summary);
+}
+
+int qz_skills_parse(const char *body, qz_skill_t *output, int max_count, qz_skill_summary_t *summary)
+{
     char role[24];
     int count = 0;
     int declared = 0;
 
     if (summary) memset(summary, 0, sizeof(*summary));
-    if (!output || max_count <= 0) return -1;
-    if (!qz_web_request("GET", "/api/skills", NULL, body, sizeof(body))) return -1;
+    if (!body || !output || max_count <= 0) return -1;
 
     qz_json_int(body, "count", &declared);
     for (int i = 0; i < max_count; i++) {

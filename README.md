@@ -88,7 +88,7 @@ xiaozhi_linux_rs（Rust 语音核心）
 
 ```bash
 cd <Rockchip SDK>
-./build_qzdesk.sh       # 编界面 + 交叉编核心，最后打包 output/image/update.img
+tools/build/build_image.sh --desk   # 编界面 + 交叉编核心，最后打包 output/image/update-desk.img
 ```
 
 首次需要先选板级（脚本会提示）：`./build.sh lunch` → RV1106_QZdesk + SPI_NAND。

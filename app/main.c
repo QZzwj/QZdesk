@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "weather_page.h"
 #include "theme.h"
+#include "notifications.h"
 #include "qzdesk_core_process.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,7 @@ int main(void)
      * primary blue as the custom styled ones. */
     lv_theme_default_init(lv_display_get_default(), qz_color(QZ_ACCENT),
                           qz_color(QZ_ACCENT_DARK), false, qz_font());
+    qz_notifications_init();
     lv_obj_t *desktop = qz_desktop_create(server);
     lv_obj_t *apps = qz_apps_create();
     lv_obj_t *assistant = qz_assistant_create();
@@ -112,7 +114,9 @@ int main(void)
                 };
                 for (int id = 0; id < QZ_APPLET_COUNT; id++) {
                     if (strcmp(open, names[id]) == 0) {
-                        lv_screen_load(qz_applets_screen((qz_applet_t)id));
+                        lv_obj_t *target = qz_applets_screen((qz_applet_t)id);
+                        if (target) lv_screen_load(target);
+                        else fprintf(stderr, "QZdesk: applet %s is unavailable\n", open);
                         break;
                     }
                 }

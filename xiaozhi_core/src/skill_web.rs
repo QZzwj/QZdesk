@@ -5,7 +5,7 @@ use crate::chat::ChatHub;
 use crate::net_link::NetCommand;
 use crate::timers::{PomodoroOptions, TimerStore};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +48,8 @@ struct ReminderRequest {
     daily: bool,
     #[serde(default)]
     date: String,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
 }
 
 /// 番茄钟操作。`action` 缺省当查询，界面刷新状态时可以直接发空对象。
@@ -61,6 +63,8 @@ struct PomodoroRequest {
     break_minutes: Option<u32>,
     #[serde(default)]
     cycles: Option<u32>,
+    #[serde(default)]
+    auto_break: Option<bool>,
 }
 
 fn default_pomodoro_action() -> String {
@@ -101,6 +105,7 @@ pub async fn run(
     weather: crate::weather::WeatherService,
     performance: crate::performance::PerformanceService,
     timers: TimerStore,
+    companion: crate::companion::CompanionStore,
 ) -> anyhow::Result<()> {
     let port = std::env::var("QZDESK_SKILL_WEB_PORT")
         .or_else(|_| std::env::var("XIAOZHI_SKILL_WEB_PORT"))
@@ -141,6 +146,7 @@ pub async fn run(
         let weather = weather.clone();
         let performance = performance.clone();
         let timers = timers.clone();
+        let companion = companion.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_connection(
                 stream,
@@ -152,6 +158,7 @@ pub async fn run(
                 weather,
                 performance,
                 timers,
+                companion,
             )
             .await
             {
@@ -166,19 +173,20 @@ pub async fn run(
 async fn handle_connection(
     mut stream: TcpStream,
     manager: Arc<SkillManager>,
-    net_tx: tokio::sync::mpsc::Sender<NetCommand>,
+    _net_tx: tokio::sync::mpsc::Sender<NetCommand>,
     chat_hub: ChatHub,
     core_tx: tokio::sync::mpsc::Sender<crate::controller::CoreCommand>,
     smarthome: Arc<crate::smarthome::SmartHomeHub>,
     weather: crate::weather::WeatherService,
     performance: crate::performance::PerformanceService,
     timers: TimerStore,
+    companion: crate::companion::CompanionStore,
 ) -> anyhow::Result<()> {
     let mut buffer = vec![0_u8; 8192];
     let mut request = Vec::new();
     let header_end;
     loop {
-        let n = stream.read(&mut buffer).await?;
+        let n = tokio::time::timeout(Duration::from_secs(15), stream.read(&mut buffer)).await??;
         if n == 0 { return Ok(()); }
         request.extend_from_slice(&buffer[..n]);
         if request.len() > MAX_REQUEST { return respond(&mut stream, 413, "请求过大", "text/plain; charset=utf-8").await; }
@@ -195,6 +203,18 @@ async fn handle_connection(
     let mut first_parts = first.split_whitespace();
     let method = first_parts.next().unwrap_or("").to_string();
     let path = first_parts.next().unwrap_or("").to_string();
+    if !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+        let host = header.lines().find_map(|line| line.split_once(':')
+            .filter(|(key, _)| key.eq_ignore_ascii_case("host")).map(|(_, value)| value.trim()));
+        let origin = header.lines().find_map(|line| line.split_once(':')
+            .filter(|(key, _)| key.eq_ignore_ascii_case("origin")).map(|(_, value)| value.trim()));
+        if let Some(origin) = origin {
+            let authority = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://"));
+            if authority != host {
+                return respond(&mut stream, 403, "不允许跨站写入", "text/plain; charset=utf-8").await;
+            }
+        }
+    }
     let content_length = lines
         .find_map(|line| line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:")))
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -206,8 +226,11 @@ async fn handle_connection(
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     });
+    if content_length > MAX_REQUEST.saturating_sub(header_end) {
+        return respond(&mut stream, 413, "请求过大", "text/plain; charset=utf-8").await;
+    }
     while request.len() < header_end + content_length {
-        let n = stream.read(&mut buffer).await?;
+        let n = tokio::time::timeout(Duration::from_secs(15), stream.read(&mut buffer)).await??;
         if n == 0 { break; }
         request.extend_from_slice(&buffer[..n]);
         if request.len() > MAX_REQUEST { return respond(&mut stream, 413, "请求过大", "text/plain; charset=utf-8").await; }
@@ -228,7 +251,9 @@ async fn handle_connection(
                 }
                 // 页面读得慢时广播会丢旧消息；丢掉的只是显示，不影响记录本身，
                 // 刷新页面会用 /api/chat/history 补齐。
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    stream.write_all(b"event: resync\ndata: {}\n\n").await?;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -345,6 +370,15 @@ async fn handle_connection(
                 json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
             ),
         },
+        ("GET", "/api/companion") => (200, "application/json; charset=utf-8", crate::companion::catalog().to_string()),
+        ("POST", "/api/companion/records") | ("POST", "/api/companion/care") => {
+            let result = serde_json::from_slice::<Value>(&body).map_err(|e| e.to_string())
+                .and_then(|input| if path.ends_with("/care") { companion.care(input) } else { companion.records(input) });
+            match result {
+                Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
+                Err(error) => (400, "application/json; charset=utf-8", json!({"error":error}).to_string()),
+            }
+        }
         /* 核心日志：内存里那份环形缓冲，`?limit=` 控制条数。
          * 排查「技能有没有下发」这类问题，看这里比翻 /var/log 快得多。 */
         _ if method == "GET" && path.starts_with("/api/logs") => {
@@ -371,6 +405,29 @@ async fn handle_connection(
         }
         /* 提醒与番茄钟：核心是唯一权威，设备界面与网页读写这里，语音侧的同名
          * MCP 工具写的也是同一份（见 timers.rs 的模块说明）。 */
+        ("GET", "/api/status") => {
+            let (reply, status) = tokio::sync::oneshot::channel();
+            if core_tx.try_send(crate::controller::CoreCommand::Status(reply)).is_err() {
+                (503, "application/json; charset=utf-8", json!({"error":"核心忙碌"}).to_string())
+            } else {
+                match tokio::time::timeout(Duration::from_secs(2), status).await {
+                    Ok(Ok(status)) => (200, "application/json; charset=utf-8", status.to_string()),
+                    _ => (503, "application/json; charset=utf-8", json!({"error":"核心状态未确认"}).to_string()),
+                }
+            }
+        }
+        ("POST", "/api/notifications/snooze") => {
+            let result = serde_json::from_slice::<serde_json::Value>(body)
+                .map_err(|error| error.to_string()).and_then(|input| {
+                    let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("提醒");
+                    let minutes = input.get("minutes").and_then(|v| v.as_u64()).unwrap_or(5).clamp(1, 60);
+                    timers.snooze(text, minutes)
+                });
+            match result {
+                Ok(()) => (200, "application/json; charset=utf-8", json!({"ok":true}).to_string()),
+                Err(error) => (400, "application/json; charset=utf-8", json!({"ok":false,"error":error}).to_string()),
+            }
+        }
         ("GET", "/api/timers") => (
             200,
             "application/json; charset=utf-8",
@@ -407,6 +464,20 @@ async fn handle_connection(
                 json!({ "ok": false, "error": format!("JSON 格式错误: {}", error) }).to_string(),
             ),
         },
+        _ if method == "PUT" && path.starts_with("/api/timers/") => {
+            let result = path["/api/timers/".len()..].parse::<u64>()
+                .map_err(|_| "提醒 id 必须是数字".to_string())
+                .and_then(|id| serde_json::from_slice::<ReminderRequest>(body)
+                    .map_err(|error| error.to_string())
+                    .and_then(|input| timers.update_reminder(id, input.hour, input.minute,
+                        &input.label, input.daily, &input.date, input.enabled)));
+            match result {
+                Ok(reminder) => (200, "application/json; charset=utf-8",
+                    json!({"ok": true, "reminder": reminder}).to_string()),
+                Err(error) => (400, "application/json; charset=utf-8",
+                    json!({"ok": false, "error": error}).to_string()),
+            }
+        }
         _ if method == "DELETE" && path.starts_with("/api/timers/") => {
             match path["/api/timers/".len()..].trim().parse::<u64>() {
                 Ok(id) => match timers.remove_reminder(id) {
@@ -444,6 +515,7 @@ async fn handle_connection(
                     focus_minutes: input.focus_minutes,
                     break_minutes: input.break_minutes,
                     cycles: input.cycles,
+                    auto_break: input.auto_break,
                 },
             ) {
                 Ok(state) => {
@@ -472,8 +544,12 @@ async fn handle_connection(
                 Ok(()) => {
                     // 内容变了：索引失效并重建会话，保证立刻生效
                     manager.invalidate_index();
-                    let _ = net_tx.send(NetCommand::Reconnect).await;
-                    (200, "application/json; charset=utf-8", json!({"ok": true}).to_string())
+                    match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                        Ok(()) => (200, "application/json; charset=utf-8",
+                            json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
+                        Err(_) => (503, "application/json; charset=utf-8",
+                            json!({"ok": false, "saved": true, "error": "技能已保存，同步未排队，请稍后重试"}).to_string()),
+                    }
                 }
                 Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
             },
@@ -484,12 +560,18 @@ async fn handle_connection(
             let name = &path[prefix.len()..path.len() - "/selection".len()];
             match serde_json::from_slice::<SelectionRequest>(body) {
                 Ok(input) => match SkillRole::parse(input.role.trim()) {
-                    Ok(role) => match manager.set_role(name, role) {
+                    Ok(role) => match if role == SkillRole::Primary {
+                        manager.switch_primary(name)
+                    } else {
+                        manager.set_role(name, role)
+                    } {
                         Ok(()) => {
-                            // Reconnect so the new primary instructions are
-                            // delivered in the next MCP initialize exchange.
-                            let _ = net_tx.send(NetCommand::Reconnect).await;
-                            (200, "application/json; charset=utf-8", json!({"ok": true}).to_string())
+                            match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                                Ok(()) => (200, "application/json; charset=utf-8",
+                                    json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
+                                Err(_) => (503, "application/json; charset=utf-8",
+                                    json!({"ok": false, "saved": true, "error": "选择已保存，同步未排队，请稍后重试"}).to_string()),
+                            }
                         },
                         Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
                     },
@@ -525,31 +607,34 @@ async fn handle_connection(
             Some(name) => match manager.install_zip(&name, zip).await {
                 Ok(()) => {
                     manager.invalidate_index();
-                    let _ = net_tx.send(NetCommand::Reconnect).await;
-                    (200, "application/json; charset=utf-8", json!({"ok": true}).to_string())
+                    match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                        Ok(()) => (200, "application/json; charset=utf-8",
+                            json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
+                        Err(_) => (503, "application/json; charset=utf-8",
+                            json!({"ok": false, "saved": true, "error": "技能已保存，同步未排队，请稍后重试"}).to_string()),
+                    }
                 }
                 Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
             },
             None => (400, "application/json; charset=utf-8", json!({"ok": false, "error": "缺少 Skill 名称"}).to_string()),
             }
         },
-        ("POST", "/api/chat/send") if manager.active_summary().0 == 0 => (
-            409,
-            "application/json; charset=utf-8",
-            json!({"ok": false, "error": "当前没有已启用的主技能，请先在 Skill 列表中设置一个主技能"}).to_string(),
-        ),
         ("POST", "/api/chat/send") => match serde_json::from_slice::<ChatRequest>(body) {
             Ok(input) if !input.text.trim().is_empty() => {
                 /* 云端只接受音频输入，所以这条文字要先在本地合成成语音，再按麦克风
                  * 同样的格式发出去。合成与发送都在核心侧完成（CoreCommand），这里
                  * 只负责把请求转过去并立刻回执，避免浏览器等一次完整推理。 */
                 let text = input.text.trim().to_string();
-                match core_tx.send(crate::controller::CoreCommand::TextAsSpeech(text)).await {
-                    Ok(()) => (
-                        202,
-                        "application/json; charset=utf-8",
-                        json!({"ok": true, "queued": true}).to_string(),
-                    ),
+                let (reply, accepted) = tokio::sync::oneshot::channel();
+                match core_tx.try_send(crate::controller::CoreCommand::TextAsSpeech(text, reply)) {
+                    Ok(()) => match tokio::time::timeout(Duration::from_secs(3), accepted).await {
+                        Ok(Ok(Ok(()))) => (202, "application/json; charset=utf-8",
+                            json!({"ok": true, "accepted": true}).to_string()),
+                        Ok(Ok(Err(error))) => (409, "application/json; charset=utf-8",
+                            json!({"ok": false, "error": error}).to_string()),
+                        _ => (503, "application/json; charset=utf-8",
+                            json!({"ok": false, "error": "核心未确认接收，请检查聊天记录后重试"}).to_string()),
+                    },
                     Err(error) => (
                         503,
                         "application/json; charset=utf-8",
@@ -579,8 +664,12 @@ async fn handle_connection(
             match manager.remove(name) {
                 Ok(()) => {
                     manager.invalidate_index();
-                    let _ = net_tx.send(NetCommand::Reconnect).await;
-                    (200, "application/json; charset=utf-8", json!({"ok": true}).to_string())
+                    match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                        Ok(()) => (200, "application/json; charset=utf-8",
+                            json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
+                        Err(_) => (503, "application/json; charset=utf-8",
+                            json!({"ok": false, "saved": true, "error": "技能已保存，同步未排队，请稍后重试"}).to_string()),
+                    }
                 }
                 Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
             }

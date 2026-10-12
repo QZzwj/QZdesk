@@ -88,7 +88,7 @@ The device is an ARMv7 / RV1106 board: **nothing is compiled on it and host bina
 
 ```bash
 cd <Rockchip SDK>
-./build_qzdesk.sh       # builds the UI + cross-compiles the core, then packs output/image/update.img
+tools/build/build_image.sh --desk   # builds the UI + cross-compiles the core, then packs output/image/update-desk.img
 ```
 
 The board configuration has to be picked once beforehand (the script reminds you): `./build.sh lunch` → RV1106_QZdesk + SPI_NAND.

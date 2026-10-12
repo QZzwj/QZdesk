@@ -41,6 +41,7 @@ typedef struct {
  * reached (the core is not running, or it was started with the web UI off).
  */
 int qz_skills_fetch(qz_skill_t *output, int max_count, qz_skill_summary_t *summary);
+int qz_skills_parse(const char *body, qz_skill_t *output, int max_count, qz_skill_summary_t *summary);
 
 /** Change one skill's role. The core reconnects the session so it takes effect
  *  immediately. Returns false when the service rejected or could not be

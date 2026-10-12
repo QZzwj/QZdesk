@@ -39,6 +39,7 @@ typedef struct {
 
 /** 取设备表。返回设备条数，-1 表示本地服务不可达。 */
 int qz_devices_fetch(qz_device_t *output, int max_count, qz_hub_status_t *status);
+int qz_devices_parse(const char *body, qz_device_t *output, int max_count, qz_hub_status_t *status);
 
 /** 下发一条指令：action 取 "on" / "off" / "toggle" / "brightness"。
  *  value 只在 brightness 时有意义（0-100）。 */

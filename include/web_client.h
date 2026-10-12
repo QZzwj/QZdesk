@@ -18,6 +18,10 @@ bool qz_web_request(const char *method, const char *path, const char *body,
 /** 读服务端口（QZDESK_SKILL_WEB_PORT / XIAOZHI_SKILL_WEB_PORT，默认 8080）。 */
 unsigned short qz_web_port(void);
 
+typedef void (*qz_web_done_cb_t)(bool ok, const char *response, void *user_data);
+bool qz_web_request_async(const char *method, const char *path, const char *body,
+                          qz_web_done_cb_t callback, void *user_data);
+
 /* ------------------------------------------------------------------------- *
  * 极简 JSON 读取
  *
@@ -30,6 +34,7 @@ const char *qz_json_value(const char *json, const char *key);
 /** 读字符串值并反转义（\n \t \r \uXXXX）。 */
 bool qz_json_string(const char *json, const char *key, char *output, size_t output_size);
 bool qz_json_int(const char *json, const char *key, int *output);
+bool qz_json_quote(const char *input, char *output, size_t size);
 /** 读布尔值：支持 true/false 与 0/1。 */
 bool qz_json_bool(const char *json, const char *key, bool *output);
 

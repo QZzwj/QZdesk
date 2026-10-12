@@ -12,6 +12,7 @@
 #include "theme.h"
 #include "wifi.h"
 #include "qzdesk_core.h"
+#include "notifications.h"
 #include "lvgl/src/display/lv_display_private.h"
 #include "lvgl/src/misc/lv_area_private.h"
 #include "lvgl/src/widgets/image/lv_image_private.h"
@@ -21,6 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 static int failures, warnings, cases;
 static int panel_width, panel_height;
@@ -96,7 +98,28 @@ int __wrap_qz_skills_fetch(qz_skill_t *out, int maximum, qz_skill_summary_t *sum
 bool __wrap_qz_web_request(const char *method, const char *path, const char *body,
                             char *out, size_t size)
 {
-    (void)method; (void)body;
+    (void)body;
+    if (strcmp(path, "/api/companion/records") == 0) {
+        if (strstr(body, "\"text\":\"失败测试\"")) {
+            snprintf(out, size, "{\"error\":\"写盘失败，未保存\"}"); return false;
+        }
+        if (strcmp(method, "POST") == 0 && strstr(body, "\"action\":\"add\""))
+            snprintf(out, size, "{\"status\":\"saved\",\"records\":[{\"id\":1,\"kind\":\"memory\",\"text\":\"喜欢简短回复\",\"done\":false}]}");
+        else snprintf(out, size, "{\"records\":[{\"id\":1,\"kind\":\"memory\",\"text\":\"喜欢简短回复\",\"done\":false}]}");
+        return true;
+    }
+    if (strcmp(path, "/api/companion/care") == 0) {
+        snprintf(out, size, "{\"care\":{\"enabled\":false,\"interval_minutes\":120,\"quiet_start\":22,\"quiet_end\":8}}");
+        return true;
+    }
+    if (strcmp(path, "/api/notifications/snooze") == 0) {
+        snprintf(out, size, "{\"error\":\"保存失败\"}");
+        return false;
+    }
+    if (strcmp(method, "POST") == 0 && strcmp(path, "/api/timers") == 0) {
+        snprintf(out, size, "{\"error\":\"保存失败，请重试\"}");
+        return false;
+    }
     if (strcmp(path, "/api/timers") == 0) {
         char name[32];
         memset(name, 'W', sizeof(name) - 1);
@@ -107,6 +130,28 @@ bool __wrap_qz_web_request(const char *method, const char *path, const char *bod
                     "%s{\"id\":%d,\"hour\":%d,\"minute\":30,\"daily\":true,"
                     "\"label\":\"%s\"}", i ? "," : "", i + 1, i + 8,
                     fixture_long_names ? name : "布局提醒");
+        }
+        if (used < size) snprintf(out + used, size - used, "]}");
+    } else if (strcmp(path, "/api/skills") == 0) {
+        size_t used = (size_t)snprintf(out, size, "{\"skills\":[");
+        for (int i = 0; i < fixture_skill_count && used < size; i++) {
+            char name[80];
+            snprintf(name, sizeof(name), "布局验证技能 %02d", i + 1);
+            if (fixture_long_names) { memset(name, 'W', 60); name[60] = 0; }
+            used += (size_t)snprintf(out + used, size - used,
+                "%s{\"id\":\"layout-%02d\",\"name\":\"%s\",\"role\":\"%s\",\"description\":\"这段说明用于检查技能详情分页。切换后仍应可读。继续检查角色按钮和内容区域的边界。\"}",
+                i ? "," : "", i, name, i ? "secondary" : "primary");
+        }
+        if (used < size) snprintf(out + used, size - used, "]}");
+    } else if (strcmp(path, "/api/devices") == 0) {
+        size_t used = (size_t)snprintf(out, size, "{\"hub\":{\"enabled\":true,\"connected\":true},\"count\":%d,\"devices\":[", QZ_DEVICE_MAX);
+        for (int i = 0; i < QZ_DEVICE_MAX && used < size; i++) {
+            char name[80];
+            snprintf(name, sizeof(name), "客厅设备 %02d", i + 1);
+            if (fixture_long_names) { memset(name, 'W', 60); name[60] = 0; }
+            used += (size_t)snprintf(out + used, size - used,
+                "%s{\"id\":\"layout-device-%02d\",\"name\":\"%s\",\"online\":true,\"has_state\":true,\"state\":false,\"kind\":\"light\",\"brightness\":100}",
+                i ? "," : "", i, name);
         }
         if (used < size) snprintf(out + used, size - used, "]}");
     } else if (strcmp(path, "/api/pomodoro") == 0) {
@@ -141,6 +186,7 @@ bool __wrap_qz_cam_preview_snapshot(char *out, size_t size)
     return true;
 }
 int __wrap_qz_cam_preview_photos(void) { return 999999; }
+bool __wrap_qzdesk_core_send_text(const char *text) { (void)text; return false; }
 bool __wrap_qzdesk_core_open(void) { return true; }
 bool __wrap_qzdesk_core_request_status(void) { return true; }
 bool __wrap_qzdesk_core_request_weather(void) { return true; }
@@ -367,10 +413,11 @@ static lv_obj_t *find_label(lv_obj_t *object, const char *text)
 
 static void settle(void)
 {
-    /* Async deletion/rebuilding happens in timer_handler. Reduced motion makes
-     * this deterministic; no wall-clock wait or GUI window is needed. */
-    lv_tick_inc(1);
-    lv_timer_handler();
+    for (int i = 0; i < 30; i++) {
+        usleep(1000);
+        lv_tick_inc(20);
+        lv_timer_handler();
+    }
 }
 
 static bool click_text(lv_obj_t *screen, const char *text)
@@ -441,8 +488,8 @@ static void check_apps_scroll(lv_obj_t *screen)
     lv_obj_t *grid = lv_obj_get_child(screen, 1);
     lv_obj_update_layout(screen);
     if (!grid || !lv_obj_has_flag(grid, LV_OBJ_FLAG_SCROLLABLE) ||
-        lv_obj_get_scroll_dir(grid) != LV_DIR_VER || lv_obj_get_child_count(grid) != 8) {
-        fprintf(stderr, "APPS_SCROLL expected 8 tiles in a vertical scroll area\n");
+        lv_obj_get_scroll_dir(grid) != LV_DIR_VER || lv_obj_get_child_count(grid) != 7) {
+        fprintf(stderr, "APPS_SCROLL expected 6 tiles in a vertical scroll area\n");
         failures++;
         return;
     }
@@ -453,12 +500,13 @@ static void check_apps_scroll(lv_obj_t *screen)
         lv_area_t viewport;
         lv_obj_get_coords(grid, &viewport);
         int visible = 0;
-        for (uint32_t i = 0; i < 8; i++) {
+        for (uint32_t i = 0; i < 7; i++) {
             lv_area_t tile;
             lv_obj_get_coords(lv_obj_get_child(grid, i), &tile);
             if (inside(&tile, &viewport)) visible++;
         }
-        if (visible != 4 || lv_obj_get_scroll_left(grid) > 0 || lv_obj_get_scroll_right(grid) > 0) {
+        int expected_visible = bottom ? 3 : 4;
+        if (visible != expected_visible || lv_obj_get_scroll_left(grid) > 0 || lv_obj_get_scroll_right(grid) > 0) {
             fprintf(stderr, "APPS_SCROLL %s visible=%d, expected 4 without horizontal overflow\n",
                     bottom ? "bottom" : "top", visible);
             failures++;
@@ -627,7 +675,7 @@ int main(int argc, char **argv)
     name_screen(find_screen(display, "WLAN"), "wifi");
     name_screen(find_screen(display, "通用设置"), "general");
     name_screen(find_screen(display, "关于"), "about");
-    name_screen(find_screen(display, "天气"), "weather");
+    name_screen(find_screen(display, "桌面气象站"), "weather");
     static const char *const applet_names[] = {
         "status", "reminders", "pomodoro", "control", "presence", "camera"
     };
@@ -646,6 +694,21 @@ int main(int argc, char **argv)
         settle();
         check(screen, name);
     }
+    lv_screen_load(apps);
+    lv_obj_t *clock_grid = lv_obj_get_child(apps, 1);
+    lv_obj_update_layout(apps);
+    lv_obj_scroll_to_y(clock_grid, lv_obj_get_scroll_bottom(clock_grid), LV_ANIM_OFF);
+    require_click(apps, "桌面时钟", "apps-open-clock");
+    settle();
+    lv_obj_t *clock_screen = lv_screen_active();
+    if (clock_screen == desktop || !find_label(clock_screen, "桌面气象站")) failures++;
+    check(clock_screen, "desktop-clock-weather-station");
+    lv_obj_t *station_toolbar = lv_obj_get_child(clock_screen, 0);
+    lv_obj_t *station_back = lv_obj_get_child(station_toolbar, 0);
+    lv_obj_send_event(station_back, LV_EVENT_CLICKED, NULL);
+    settle();
+    if (lv_screen_active() != apps) failures++;
+    check(apps, "desktop-clock-weather-return");
     lv_screen_load(performance);
     settle();
     seed_events();
@@ -667,7 +730,7 @@ int main(int argc, char **argv)
             }
         }
     }
-    check_weather_states(desktop, find_screen(display, "天气"));
+    check_weather_states(desktop, find_screen(display, "桌面气象站"));
     check_apps_scroll(apps);
     lv_obj_t *control = qz_applets_screen(QZ_APPLET_CONTROL);
     require_click(control, "局域网设备", "control-devices");
@@ -687,6 +750,18 @@ int main(int argc, char **argv)
     lv_tick_inc(1000);
     settle();
     check(assistant_screen, "assistant-chat");
+    require_click(assistant_screen, "本地记忆", "assistant-memory");
+    lv_obj_t *memory_page = lv_screen_active();
+    check(memory_page, "assistant-memory");
+    lv_obj_t *memory_field = find_type(memory_page, &lv_textarea_class);
+    if (memory_field) {
+        lv_obj_send_event(memory_field, LV_EVENT_FOCUSED, NULL);
+        check(memory_page, "assistant-memory-keyboard");
+        lv_obj_t *memory_keys = find_type(memory_page, &lv_keyboard_class);
+        if (memory_keys) lv_obj_send_event(memory_keys, LV_EVENT_CANCEL, NULL);
+        check(memory_page, "assistant-memory-keyboard-closed");
+    } else failures++;
+    lv_screen_load(assistant_screen);
     emit_ascii_chat("assistant");
     check(assistant_screen, "assistant-ascii-reply");
     emit_ascii_chat("user");
@@ -697,6 +772,14 @@ int main(int argc, char **argv)
         check(assistant_screen, "assistant-keyboard");
         lv_obj_send_event(input, LV_EVENT_DEFOCUSED, NULL);
         check(assistant_screen, "assistant-keyboard-closed");
+        lv_textarea_set_text(input, "发送失败时保留这份草稿");
+        lv_obj_send_event(input, LV_EVENT_READY, NULL);
+        if (strcmp(lv_textarea_get_text(input), "发送失败时保留这份草稿") != 0) {
+            fprintf(stderr, "DRAFT_LOST transport failure\n");
+            failures++;
+        }
+        check(assistant_screen, "assistant-send-failed");
+        lv_textarea_set_text(input, "");
     }
     else {
         fprintf(stderr, "MISSING_INPUT assistant-keyboard\n");
@@ -713,6 +796,46 @@ int main(int argc, char **argv)
         lv_obj_send_event(input, LV_EVENT_DEFOCUSED, NULL);
     }
     check_pages(skills, "skills");
+    if (click_text(skills, "陪伴")) {
+        inspect(lv_layer_top(), "lcd-companion-1");
+        check(skills, "lcd-companion-1");
+        if (!find_label(lv_layer_top(), "个人记忆") || !find_label(lv_layer_top(), "专注搭子")) failures++;
+        if (!click_text(lv_layer_top(), "换一页")) failures++;
+        inspect(lv_layer_top(), "lcd-companion-2");
+        check(skills, "lcd-companion-2");
+        if (!find_label(lv_layer_top(), "学习教练") || !find_label(lv_layer_top(), "设备管家")) failures++;
+        if (input) {
+            lv_textarea_set_text(input, "已有草稿");
+            click_text(lv_layer_top(), "睡前故事");
+            if (strcmp(lv_textarea_get_text(input), "已有草稿") != 0 ||
+                !find_label(lv_layer_top(), "请先处理聊天草稿或当前录音")) failures++;
+            lv_textarea_set_text(input, "");
+        }
+        if (!click_text(lv_layer_top(), "睡前故事")) failures++;
+        if (!input || strcmp(lv_textarea_get_text(input), "给我讲一个三分钟的睡前故事") != 0) failures++;
+        check(assistant_screen, "lcd-companion-draft");
+        if (input) lv_textarea_set_text(input, "");
+    } else failures++;
+    click_text(skills, "陪伴");
+    click_text(lv_layer_top(), "个人记忆");
+    if (!find_label(lv_layer_top(), "喜欢简短回复")) failures++;
+    inspect(lv_layer_top(), "lcd-memory-live"); check(skills, "lcd-memory-live");
+    lv_obj_t *record_input = find_type(lv_layer_top(), &lv_textarea_class);
+    if (record_input) {
+        lv_textarea_set_text(record_input, "喜欢简短回复");
+        click_text(lv_layer_top(), "新增");
+        lv_obj_send_event(record_input, LV_EVENT_FOCUSED, NULL);
+        inspect(lv_layer_top(), "lcd-memory-keyboard"); check(skills, "lcd-memory-keyboard");
+        lv_obj_send_event(record_input, LV_EVENT_DEFOCUSED, NULL);
+        lv_textarea_set_text(record_input, "失败测试"); click_text(lv_layer_top(), "新增");
+        if (strcmp(lv_textarea_get_text(record_input), "失败测试") != 0 || !find_label(lv_layer_top(), "写盘失败，未保存")) failures++;
+        inspect(lv_layer_top(), "lcd-memory-save-failed"); check(skills, "lcd-memory-save-failed");
+    } else failures++;
+    click_text(lv_layer_top(), "返回");
+    click_text(skills, "陪伴"); click_text(lv_layer_top(), "主动关心");
+    if (!find_label(lv_layer_top(), "主动关心：已关闭")) failures++;
+    inspect(lv_layer_top(), "lcd-care-live"); check(skills, "lcd-care-live");
+    click_text(lv_layer_top(), "返回");
     for (int i = 0; i < 16 && click_text(skills, "上一页"); i++) {}
     char skill_name[QZ_SKILL_NAME_MAX];
     memset(skill_name, 'W', sizeof(skill_name) - 1);
@@ -725,17 +848,87 @@ int main(int argc, char **argv)
     lv_obj_t *reminders = qz_applets_screen(QZ_APPLET_REMINDER);
     check_pages(reminders, "reminders");
     if (open_dialog(reminders, "添加提醒", "reminder-add")) {
+        lv_obj_t *overlay = lv_obj_get_child(reminders, -1);
+        click_text(reminders, "确定");
+        for (int i = 0; i < 50; i++) {
+            usleep(1000);
+            lv_tick_inc(20);
+            lv_timer_handler();
+        }
+        if (!lv_obj_is_valid(overlay)) {
+            fprintf(stderr, "FORM_LOST reminder save failure\n");
+            failures++;
+        }
+        check(reminders, "reminder-save-failed");
         click_text(reminders, "取消");
     }
-    lv_obj_t *camera = qz_applets_screen(QZ_APPLET_CAMERA);
-    lv_screen_load(camera);
-    settle();
-    lv_point_t shutter_point = { panel_width / 2, panel_height - qz_scale_y(40) };
-    lv_obj_t *shutter = lv_indev_search_obj(camera, &shutter_point);
-    if (shutter) lv_obj_send_event(shutter, LV_EVENT_CLICKED, NULL);
-    settle();
-    check(camera, "camera-saved");
-    if (open_dialog(camera, "已保存·查看位置", "camera-result")) click_text(camera, "关闭");
+
+    lv_tick_inc(8100);
+    lv_timer_handler();
+    for (int i = 0; i < 8 && click_text(reminders, "上一页"); i++) {}
+    if (open_dialog(reminders, "08:30", "reminder-edit")) {
+        click_text(reminders, "取消");
+    }
+    lv_obj_t *pomodoro = qz_applets_screen(QZ_APPLET_POMODORO);
+    lv_screen_load(pomodoro);
+    require_click(pomodoro, "25/5·4轮", "pomodoro-preset");
+    check(pomodoro, "pomodoro-preset-change");
+    lv_obj_t *preset_label = find_label(pomodoro, "45/10·2轮");
+    if (preset_label) {
+        lv_obj_send_event(lv_obj_get_parent(preset_label), LV_EVENT_LONG_PRESSED, NULL);
+        settle();
+        if (!find_label(lv_layer_top(), "自动开始休息")) {
+            fprintf(stderr, "MISSING_CUSTOM_POMODORO\n");
+            failures++;
+        }
+        inspect(lv_layer_top(), "pomodoro-custom");
+        check(pomodoro, "pomodoro-custom");
+        lv_obj_t *custom_input = find_type(lv_layer_top(), &lv_textarea_class);
+        if (custom_input) {
+            lv_textarea_set_text(custom_input, "0");
+            click_text(lv_layer_top(), "保存");
+            if (!find_label(lv_layer_top(), "专注：1-120分钟")) failures++;
+            check(pomodoro, "pomodoro-invalid-input");
+            lv_textarea_set_text(custom_input, "30");
+            if (!click_text(lv_layer_top(), "保存") ||
+                !find_label(pomodoro, "30/10·2轮")) failures++;
+        } else failures++;
+        click_text(lv_layer_top(), "取消");
+    } else { fprintf(stderr, "MISSING_CUSTOM_PRESET_TRIGGER\n"); failures++; }
+
+    qz_notifications_init();
+    qzdesk_core_event_t notification = { .type = QZDESK_CORE_EVENT_TOAST };
+    snprintf(notification.role, sizeof(notification.role), "timer");
+    snprintf(notification.text, sizeof(notification.text), "专注完成，起身喝水，休息一下");
+    if (qz_notifications_dnd()) {
+        fprintf(stderr, "NOTIFICATION_FIXTURE_DND_ENABLED\n");
+        failures++;
+    } else {
+        emit(&notification);
+        settle();
+        inspect(lv_layer_top(), "timer-notification");
+        check(pomodoro, "timer-notification");
+        snprintf(notification.text, sizeof(notification.text), "第二条提醒：喝水");
+        emit(&notification);
+        if (!find_label(lv_layer_top(), "专注完成，起身喝水，休息一下")) {
+            fprintf(stderr, "NOTIFICATION_OVERWRITTEN\n"); failures++;
+        }
+        if (!click_text(lv_layer_top(), "完成") ||
+            !find_label(lv_layer_top(), "第二条提醒：喝水")) {
+            fprintf(stderr, "NOTIFICATION_QUEUE_LOST\n"); failures++;
+        }
+        check(pomodoro, "timer-notification-queued");
+        if (!click_text(lv_layer_top(), "完成") ||
+            find_label(lv_layer_top(), "5分钟后")) failures++;
+        emit(&notification);
+        if (!click_text(lv_layer_top(), "5分钟后") ||
+            !find_label(lv_layer_top(), "保存失败，请重试") ||
+            !find_label(lv_layer_top(), "第二条提醒：喝水")) failures++;
+        inspect(lv_layer_top(), "timer-snooze-failed");
+        check(pomodoro, "timer-snooze-failed");
+        if (!click_text(lv_layer_top(), "完成")) failures++;
+    }
+
     lv_obj_t *general = find_screen(display, "通用设置");
     if (general) {
         if (open_dialog(general, "时间", "time-modal")) click_text(general, "取消");

@@ -8,6 +8,7 @@
 #include "theme.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define CARD_W (QZ_DESIGN_W - 2 * QZ_GUTTER) /* 452 */
 #define HERO_Y 60
@@ -15,9 +16,9 @@
 #define GRID_Y 208
 #define GRID_H 104
 #define INSET 12
-#define ICON_SIZE 72
-#define SPINNER_SIZE 30
-#define TEXT_X 96
+#define ICON_SIZE 32
+#define SPINNER_SIZE 24
+#define TEXT_X 232
 #define TEXT_W (CARD_W - TEXT_X - INSET)
 #define TILE_COLS 5
 #define TILE_ROWS 2
@@ -36,6 +37,40 @@ static lv_obj_t *temp_label;
 static lv_obj_t *desc_label;
 static lv_obj_t *updated_label;
 static lv_obj_t *refresh_button;
+static lv_obj_t *station_time;
+static lv_obj_t *station_date;
+static bool refreshing;
+static uint32_t refresh_started;
+
+static void update_station_clock(void)
+{
+    if (!station_time || !station_date) return;
+    time_t now = time(NULL);
+    struct tm value;
+    if (!localtime_r(&now, &value)) return;
+    char text[64];
+    strftime(text, sizeof(text), "%H:%M:%S", &value);
+    lv_label_set_text(station_time, text);
+    static const char *days[] = {"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"};
+    snprintf(text, sizeof(text), "%04d年%02d月%02d日  %s", value.tm_year + 1900,
+             value.tm_mon + 1, value.tm_mday, days[value.tm_wday]);
+    lv_label_set_text(station_date, text);
+}
+
+static void refresh_watch(lv_timer_t *timer)
+{
+    (void)timer;
+    update_station_clock();
+    if (!refreshing || lv_tick_elaps(refresh_started) < 20000) return;
+    refreshing = false;
+    if (spinner) lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
+    if (icon_box) lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_HIDDEN);
+    if (refresh_button) {
+        lv_obj_remove_state(refresh_button, LV_STATE_DISABLED);
+        lv_obj_set_style_opa(refresh_button, LV_OPA_COVER, 0);
+    }
+    if (updated_label) lv_label_set_text(updated_label, "刷新超时，请重试");
+}
 static lv_obj_t *tile_caption[TILES];
 static lv_obj_t *tile_value[TILES];
 
@@ -51,6 +86,17 @@ static void on_refresh(lv_event_t *event);
 /* ------------------------------------------------------------------------- *
  * 构建
  * ------------------------------------------------------------------------- */
+
+static lv_color_t station_color(qz_color_token_t token)
+{
+    switch (token) {
+    case QZ_TEXT: return lv_color_hex(0xECF8FF);
+    case QZ_TEXT_SECONDARY: return lv_color_hex(0xB5CDD9);
+    case QZ_TEXT_TERTIARY: return lv_color_hex(0x91AFBF);
+    case QZ_ORANGE: return lv_color_hex(0xFFBF75);
+    default: return lv_color_hex(0x60DCE5);
+    }
+}
 
 static void make_plain(lv_obj_t *obj)
 {
@@ -69,6 +115,11 @@ static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int width, int height
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, y);
     lv_obj_set_style_radius(card, QZ_RADIUS_CARD, 0);
     qz_style_plate(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x142C40), 0);
+    lv_obj_set_style_bg_grad_color(card, lv_color_hex(0x0F2334), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x315B70), 0);
+    lv_obj_set_style_border_opa(card, LV_OPA_COVER, 0);
     /* 卡片内部一律用 INSET 自己留边：坐标从卡片左上角起算，不受主题内边距影响 */
     lv_obj_set_style_pad_all(card, 0, 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
@@ -86,7 +137,7 @@ static void build_toolbar(void)
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, on_back, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "天气", 18, qz_color(QZ_TEXT));
+    lv_obj_t *title = qz_text(toolbar, "桌面气象站", 18, qz_color(QZ_TEXT));
     lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
 
     refresh_button = qz_icon_button(toolbar, LV_SYMBOL_REFRESH, 40);
@@ -98,21 +149,29 @@ static void build_hero(void)
 {
     lv_obj_t *hero = make_card(screen, QZ_GUTTER, HERO_Y, CARD_W, HERO_H);
 
+    station_time = qz_text(hero, "00:00:00", 40, station_color(QZ_TEXT));
+    lv_obj_align(station_time, LV_ALIGN_TOP_LEFT, INSET, 24);
+    station_date = qz_text(hero, "", 16, station_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(station_date, 200);
+    lv_label_set_long_mode(station_date, LV_LABEL_LONG_WRAP);
+    lv_obj_align(station_date, LV_ALIGN_TOP_LEFT, INSET, 82);
+    update_station_clock();
+
     icon_box = qz_weather_icon_create(hero, ICON_SIZE);
-    lv_obj_align(icon_box, LV_ALIGN_LEFT_MID, INSET, 0);
+    lv_obj_align(icon_box, LV_ALIGN_TOP_LEFT, 190, 18);
 
     spinner = lv_spinner_create(hero);
     lv_obj_set_size(spinner, SPINNER_SIZE, SPINNER_SIZE);
-    lv_obj_align(spinner, LV_ALIGN_LEFT_MID, INSET + (ICON_SIZE - SPINNER_SIZE) / 2, 0);
+    lv_obj_align(spinner, LV_ALIGN_TOP_LEFT, 194, 22);
     /* 只留转动的那一段弧，底圈不画 */
     lv_obj_set_style_arc_opa(spinner, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_arc_width(spinner, 3, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(spinner, qz_color(QZ_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(spinner, station_color(QZ_ACCENT), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(spinner, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_clear_flag(spinner, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
 
-    city_label = qz_text(hero, "未设置位置", 16, qz_color(QZ_TEXT_SECONDARY));
+    city_label = qz_text(hero, "未设置位置", 16, station_color(QZ_TEXT_SECONDARY));
     lv_obj_align(city_label, LV_ALIGN_TOP_LEFT, TEXT_X, 8);
     lv_obj_set_width(city_label, TEXT_W);
     lv_label_set_long_mode(city_label, LV_LABEL_LONG_WRAP);
@@ -126,13 +185,13 @@ static void build_hero(void)
     lv_obj_set_flex_align(temp_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
     lv_obj_set_style_pad_column(temp_row, 7, 0);
 
-    temp_label = qz_text(temp_row, "--°", 36, qz_color(QZ_TEXT));
-    desc_label = qz_text(temp_row, "", 17, qz_color(QZ_TEXT_SECONDARY));
+    temp_label = qz_text(temp_row, "--°", 44, station_color(QZ_ACCENT));
+    desc_label = qz_text(temp_row, "", 17, station_color(QZ_TEXT_SECONDARY));
 
     lv_obj_set_flex_grow(desc_label, 1);
     lv_label_set_long_mode(desc_label, LV_LABEL_LONG_WRAP);
 
-    updated_label = qz_text(hero, "", 16, qz_color(QZ_TEXT_TERTIARY));
+    updated_label = qz_text(hero, "", 16, station_color(QZ_TEXT_TERTIARY));
     lv_obj_align(updated_label, LV_ALIGN_TOP_LEFT, TEXT_X, 114);
     lv_obj_set_width(updated_label, TEXT_W);
     lv_label_set_long_mode(updated_label, LV_LABEL_LONG_WRAP);
@@ -152,10 +211,10 @@ static void build_grid(void)
         int y = TILE_PAD_Y + row * TILE_H;
 
         tile_caption[index] = qz_text(grid, TILE_CAPTION_TEXT[index], 16,
-                                      qz_color(QZ_TEXT_TERTIARY));
+                                      station_color(QZ_TEXT_TERTIARY));
         lv_obj_align(tile_caption[index], LV_ALIGN_TOP_MID, center, y);
 
-        tile_value[index] = qz_text(grid, "—", 17, qz_color(QZ_TEXT));
+        tile_value[index] = qz_text(grid, "—", 17, station_color(QZ_TEXT));
         lv_obj_align(tile_value[index], LV_ALIGN_TOP_MID, center, y + 22);
     }
 }
@@ -232,6 +291,8 @@ static void apply(const qzdesk_core_weather_t *weather)
 
     if (!screen || !weather) return;
     loading = strcmp(weather->status, "loading") == 0;
+    if (loading && !refreshing) refresh_started = lv_tick_get();
+    refreshing = loading;
     stale = strcmp(weather->status, "stale") == 0;
 
     /* 刷新期间保留旧数据，只在图标位置转圈 */
@@ -246,6 +307,8 @@ static void apply(const qzdesk_core_weather_t *weather)
         }
     }
     if (refresh_button) {
+        if (loading) lv_obj_add_state(refresh_button, LV_STATE_DISABLED);
+        else lv_obj_remove_state(refresh_button, LV_STATE_DISABLED);
         lv_obj_set_style_opa(refresh_button, loading ? LV_OPA_40 : LV_OPA_COVER, 0);
     }
 
@@ -256,9 +319,9 @@ static void apply(const qzdesk_core_weather_t *weather)
         lv_label_set_text(temp_label, "");
         lv_obj_add_flag(temp_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_text_font(desc_label, qz_font_size(16), 0);
-        qz_obj_set_text_color(desc_label, QZ_ORANGE, 0);
+        lv_obj_set_style_text_color(desc_label, station_color(QZ_ORANGE), 0);
         lv_label_set_text(desc_label, message);
-        qz_obj_set_text_color(updated_label, QZ_TEXT_TERTIARY, 0);
+        lv_obj_set_style_text_color(updated_label, station_color(QZ_TEXT_TERTIARY), 0);
         lv_label_set_text(updated_label, loading ? "正在刷新…" : "点右上角刷新重试");
         clear_tiles();
         return;
@@ -266,7 +329,7 @@ static void apply(const qzdesk_core_weather_t *weather)
 
     lv_obj_clear_flag(temp_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_text_font(desc_label, qz_font_size(17), 0);
-    qz_obj_set_text_color(desc_label, QZ_TEXT_SECONDARY, 0);
+    lv_obj_set_style_text_color(desc_label, station_color(QZ_TEXT_SECONDARY), 0);
     lv_label_set_text(city_label, weather->city);
 
     snprintf(text, sizeof(text), "%d°", weather->temperature);
@@ -283,9 +346,8 @@ static void apply(const qzdesk_core_weather_t *weather)
     }
     lv_label_set_text(updated_label, text);
     /* 沿用上一次的数据时时间行转橙：不吵，但看得出这不是刚取的 */
-    qz_obj_set_text_color(updated_label, (stale || strcmp(weather->status, "offline") == 0)
-                                             ? QZ_ORANGE
-                                             : QZ_TEXT_TERTIARY, 0);
+    lv_obj_set_style_text_color(updated_label, station_color(
+        (stale || strcmp(weather->status, "offline") == 0) ? QZ_ORANGE : QZ_TEXT_TERTIARY), 0);
 
     set_tiles(weather);
 }
@@ -303,6 +365,7 @@ static void on_back(lv_event_t *event)
 static void on_refresh(lv_event_t *event)
 {
     (void)event;
+    if (refreshing) return;
     /* 只发一个 UDP 包给本机核心；HTTP 请求在核心自己的任务里，UI 不等网络 */
     if (!qzdesk_core_refresh_weather()) {
         if (updated_label) lv_label_set_text(updated_label, "核心未连接");
@@ -310,6 +373,9 @@ static void on_refresh(lv_event_t *event)
     }
     if (icon_box) lv_obj_add_flag(icon_box, LV_OBJ_FLAG_HIDDEN);
     if (spinner) lv_obj_clear_flag(spinner, LV_OBJ_FLAG_HIDDEN);
+    refreshing = true;
+    refresh_started = lv_tick_get();
+    if (refresh_button) lv_obj_add_state(refresh_button, LV_STATE_DISABLED);
     if (updated_label) lv_label_set_text(updated_label, "正在刷新…");
 }
 
@@ -330,10 +396,13 @@ void qz_weather_page_init(lv_obj_t *back_screen)
 
     screen = lv_obj_create(NULL);
     qz_style_screen(screen);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x091827), 0);
+    lv_obj_set_style_bg_grad_color(screen, lv_color_hex(0x122E43), 0);
 
     build_toolbar();
     build_hero();
     build_grid();
+    lv_timer_create(refresh_watch, 1000, NULL);
 
     /* 首页卡片拿着一个订阅名额，这里再加一个：各自都能收到天气推送 */
     qzdesk_core_subscribe(core_event, NULL);
@@ -344,6 +413,7 @@ void qz_weather_page_init(lv_obj_t *back_screen)
 void qz_weather_page_open(void)
 {
     if (!screen) return;
+    back_ref = lv_screen_active();
     qz_screen_load(screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, QZ_DUR_SCREEN);
     /* 再要一次：首页那次可能是几分钟前，快照是最新的本地数据 */
     qzdesk_core_request_weather();

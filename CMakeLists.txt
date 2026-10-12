@@ -55,6 +55,8 @@ add_executable(qzdesk_screen
     app/skills.c
     app/smarthome.c
     app/web_client.c
+    app/web_async.c
+    app/notifications.c
     app/qzdesk_core.c
     app/qzdesk_core_process.c
     pages/desktop.c
@@ -92,6 +94,24 @@ add_custom_target(qzdesk_mcp_tools ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi_core/restart_simulator.sh
             ${CMAKE_CURRENT_BINARY_DIR}/restart_simulator.sh
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi_core/set_brightness.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/set_brightness.sh
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi_core/set_volume.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/set_volume.sh
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi_core/speak.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/speak.sh
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi_core/screenshot.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/screenshot.sh
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi_core/power_action.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/power_action.sh
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi_core/gpio_set.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/gpio_set.sh
     COMMENT "Installing QZdesk MCP tool scripts"
 )
 add_dependencies(qzdesk_screen qzdesk_mcp_tools)

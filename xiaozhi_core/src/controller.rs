@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio::process::Command;
 use std::process::Stdio;
 
+
 /// 本机把文字合成上行后，云端识别回来的那条 stt 在这个时间窗内算作回显。
 /// 超过了就当它是用户真的说了话，照常记录。
 ///
@@ -43,7 +44,9 @@ const PRESENCE_COOLDOWN_SECS: u64 = 300;
 /// 条路径，避免两处各写一遍「合成 → 分包 → 定时」的逻辑。
 pub enum CoreCommand {
     /// 把这段文字合成语音，当成用户说了一句话。
-    TextAsSpeech(String),
+    TextAsSpeech(String, tokio::sync::oneshot::Sender<Result<(), String>>),
+    SkillsSaved,
+    Status(tokio::sync::oneshot::Sender<serde_json::Value>),
 }
 
 pub struct CoreController {
@@ -73,6 +76,9 @@ pub struct CoreController {
     /// 上次"有人靠近就打招呼"的时刻。有人在桌前走动不该被反复打断，所以按
     /// `PRESENCE_COOLDOWN` 限流。
     last_presence_greeting: Option<Instant>,
+    speech_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    skills_pending: bool,
+    new_chat_pending: bool,
 }
 
 /// 归一化聊天文本：只保留字母和数字（各语种的文字都算字母），丢掉空白、标点
@@ -131,7 +137,7 @@ impl CoreController {
         performance: PerformanceService,
     ) -> Self {
         Self {
-            state: SystemState::Idle,
+            state: SystemState::NetworkError,
             current_session_id: None,
             should_mute_mic: false,
             config,
@@ -145,6 +151,9 @@ impl CoreController {
             weather,
             performance,
             last_presence_greeting: None,
+            speech_task: None,
+            skills_pending: false,
+            new_chat_pending: false,
         }
     }
 
@@ -204,6 +213,8 @@ impl CoreController {
                 "type": "chat",
                 "role": entry.role,
                 "text": entry.text,
+                "id": entry.id,
+                "ts": entry.ts,
             })
             .to_string();
             if let Err(error) = self.gui_bridge.send_message(&event).await {
@@ -221,12 +232,32 @@ impl CoreController {
             NetEvent::Binary(data) => self.process_server_audio(data).await,
             NetEvent::Connected => {
                 log::info!("WebSocket Connected");
-                if let Err(e) = self.gui_bridge.send_message(r#"{"state": 3, "type":"toast", "text":"云端已连接"}"#).await {
+                self.state = SystemState::NetworkError;
+                if let Err(e) = self.gui_bridge.send_message(r#"{"state": 4, "type":"toast", "text":"正在协商新会话与MCP技能"}"#).await {
                     log::error!("Failed to send to GUI: {}", e);
                 }
             }
+            NetEvent::Ready => {
+                if self.new_chat_pending {
+                    self.new_chat_pending = false;
+                    self.push_chat(ChatRole::Divider, "新聊天 · 会话已连接，技能已投递（非执行确认）").await;
+                }
+                if self.state == SystemState::NetworkError {
+                    self.state = SystemState::Idle;
+                    let _ = self.gui_bridge.send_message(r#"{"state":3}"#).await;
+                }
+            }
+            NetEvent::SkillRequired => {
+                self.push_chat(ChatRole::System, "本轮回复已阻止：云端必须先调用 MCP skill_list 获取主技能正文，请重试。").await;
+                self.should_mute_mic = false;
+                self.cancel_speech().await;
+                let _ = self.net_tx.send(NetCommand::Reconnect).await;
+                self.state = SystemState::NetworkError;
+                let _ = self.gui_bridge.send_message(r#"{"state":4}"#).await;
+            }
             NetEvent::Disconnected => {
                 log::info!("WebSocket Disconnected");
+                self.cancel_speech().await;
                 self.state = SystemState::NetworkError;
                 if let Err(e) = self.gui_bridge.send_message(r#"{"state": 4}"#).await {
                     log::error!("Failed to send to GUI: {}", e);
@@ -320,7 +351,7 @@ impl CoreController {
                         if let Err(e) = self.gui_bridge.send_message(r#"{"state": 6}"#).await {
                             log::error!("Failed to send state 6 to GUI: {}", e);
                         }
-                    } else if state == "stop" || state == "sentence_end" {
+                    } else if state == "stop" {
                         self.should_mute_mic = false;
                         self.state = SystemState::Idle;
                         log::info!("TTS Stopped (state={}), unmuting mic, sending state 3 to GUI", state);
@@ -446,19 +477,21 @@ impl CoreController {
 
     /// 把一段文字合成成语音，按「用户说了一句话」发给云端。
     ///
-    /// 云端只接受音频输入，所以 GUI / web 的文字聊天必须先变成声音。报文序列
-    /// 与按住说话完全一致（listen start → 裸 Opus 帧 → listen stop），服务器
-    /// 那一侧走的就是一次普通语音轮，不需要任何特殊分支。
-    pub async fn send_text_as_speech(&mut self, text: String) {
+    /// 当前云端限制 listen detect 为短唤醒词，文字聊天仍通过语音上行。
+    pub async fn send_text_as_speech(&mut self, text: String) -> Result<(), String> {
         let text = text.trim().to_string();
-        if text.is_empty() {
-            return;
+        if text.is_empty() || text.len() > 4096 {
+            return Err("消息不能为空且最多 4096 字节".to_string());
+        }
+        if self.speech_task.is_some() || self.state != SystemState::Idle {
+            return Err("云端未就绪或当前对话忙碌，请稍后重试".to_string());
         }
 
         // 先把这条记进聊天记录：不管文字来自 GUI 输入框还是 web 控制台，两端都
         // 立刻看到同一句话，不用等合成完成。
         self.push_chat(ChatRole::User, &text).await;
         self.inject_speech(text).await;
+        Ok(())
     }
 
     /// 注入一段「用户说的话」：本地合成成语音，再按麦克风同样的报文发上去。
@@ -466,104 +499,100 @@ impl CoreController {
     /// 聊天记录里留什么由调用方决定（文字聊天留用户气泡，存在检测留一条系统
     /// 提示），这里只负责把声音送出去，并记下这轮文本用于识别云端回显。
     async fn inject_speech(&mut self, text: String) {
-        self.injected_text = Some((chat_text_key(&text), Instant::now()));
-
-        // 合成可能要几百毫秒到数秒（取决于文本长度与 CPU），先做完再开始这一轮，
-        // 免得让服务器空等一个 start。
-        let (pcm, sample_rate) = match self.tts.synthesize(&text).await {
-            Ok(result) => result,
-            Err(error) => {
-                log::warn!("文字转语音失败: {}", error);
-                self.injected_text = None;
-                self.push_chat(ChatRole::System, &format!("文字转语音不可用：{}", error))
-                    .await;
-                return;
-            }
-        };
-
-        let mut encoder = match OpusEncoder::new(
-            sample_rate as u32,
-            1,
-            20,
-            self.config.hello_sample_rate,
-            self.config.hello_channels as u32,
-            64000,
-        ) {
-            Ok(encoder) => encoder,
-            Err(error) => {
-                log::error!("创建 Opus 编码器失败: {}", error);
-                return;
-            }
-        };
-        let frame_samples = encoder.input_frame_samples();
-        if frame_samples == 0 {
-            log::error!("Opus 帧长为 0，放弃本次文字转语音");
+        if self.speech_task.is_some() || self.state != SystemState::Idle {
+            self.push_chat(ChatRole::System, "当前对话忙碌，请结束当前操作后重试；未执行新的语音上行").await;
             return;
         }
-
-        log::info!(
-            "文字转语音: {} 字 -> {:.1}s 音频 ({} Hz)",
-            text.chars().count(),
-            pcm.len() as f32 / sample_rate.max(1) as f32,
-            sample_rate
-        );
-
-        // 这一段上行是我们注入的合成音频，同时把麦克风静音，别把房间里的声音混进去。
+        self.injected_text = Some((chat_text_key(&text), Instant::now()));
         self.should_mute_mic = true;
         self.state = SystemState::Listening;
         let _ = self.gui_bridge.send_message(r#"{"state": 5}"#).await;
-
-        // 与按住说话保持一致：开口前先对齐主技能（技能没变时是空操作）。
-        if let Err(error) = self.net_tx.send(NetCommand::RefreshSkillsIfChanged).await {
-            log::error!("文字转语音：请求技能刷新失败: {}", error);
-        }
-        if let Err(error) = self
-            .net_tx
-            .send(NetCommand::SendText(
-                r#"{"type":"listen","state":"start"}"#.to_string(),
-            ))
-            .await
-        {
-            log::error!("文字转语音：发送 listen start 失败: {}", error);
-        }
-
-        let mut frames_sent = 0usize;
-        for chunk in pcm.chunks(frame_samples) {
-            let mut frame = chunk.to_vec();
-            if frame.len() < frame_samples {
-                frame.resize(frame_samples, 0); // 末帧补静音，凑满 20ms
+        let tts = self.tts.clone();
+        let net_tx = self.net_tx.clone();
+        let config = self.config.clone();
+        self.speech_task = Some(tokio::spawn(async move {
+            let (pcm, sample_rate) = tokio::time::timeout(Duration::from_secs(30), tts.synthesize(&text))
+                .await.map_err(|_| "文字合成超时，请重试".to_string())?
+                .map_err(|error| format!("文字合成失败：{}", error))?;
+            let mut encoder = OpusEncoder::new(sample_rate as u32, 1, 20,
+                config.hello_sample_rate, config.hello_channels as u32, 64000)
+                .map_err(|error| format!("创建语音编码器失败：{}", error))?;
+            let frame_samples = encoder.input_frame_samples();
+            if frame_samples == 0 || pcm.is_empty() {
+                return Err("合成语音为空或帧长无效".to_string());
             }
-            match encoder.encode(&frame) {
-                Ok(packet) => {
-                    if let Err(error) = self.net_tx.send(NetCommand::SendBinary(packet)).await {
-                        log::error!("文字转语音：发送音频帧失败: {}", error);
-                        break;
-                    }
-                    frames_sent += 1;
-                }
-                Err(error) => {
-                    log::warn!("文字转语音：Opus 编码失败: {}", error);
-                    break;
-                }
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            net_tx.send(NetCommand::EnsureSkillsReady(ready_tx)).await
+                .map_err(|error| format!("技能同步失败：{}", error))?;
+            tokio::time::timeout(Duration::from_secs(20), ready_rx).await
+                .map_err(|_| "技能同步超时：云端尚未完成 Hello/MCP 工具表协商，本轮未发送".to_string())?
+                .map_err(|_| "技能同步通道已关闭，本轮未发送".to_string())??;
+            net_tx.send(NetCommand::SendText(r#"{"type":"listen","state":"start"}"#.to_string())).await
+                .map_err(|error| format!("语音上行启动失败：{}", error))?;
+            for chunk in pcm.chunks(frame_samples) {
+                let mut frame = chunk.to_vec();
+                frame.resize(frame_samples, 0);
+                let packet = encoder.encode(&frame)
+                    .map_err(|error| format!("语音编码失败：{}", error))?;
+                net_tx.send(NetCommand::SendBinary(packet)).await
+                    .map_err(|error| format!("语音帧发送失败：{}", error))?;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            // 按真实时间推进：服务器按流式节奏做 VAD / 识别，一次灌完会被当成异常音频。
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+            net_tx.send(NetCommand::SendText(r#"{"type":"listen","state":"stop"}"#.to_string())).await
+                .map_err(|error| format!("语音上行结束失败：{}", error))?;
+            Ok(())
+        }));
+    }
 
-        if let Err(error) = self
-            .net_tx
-            .send(NetCommand::SendText(
-                r#"{"type":"listen","state":"stop"}"#.to_string(),
-            ))
-            .await
-        {
-            log::error!("文字转语音：发送 listen stop 失败: {}", error);
-        }
+    pub fn capabilities(&self) -> serde_json::Value {
+        serde_json::json!({"local":true,
+            "cloud": self.current_session_id.is_some() && self.state != SystemState::NetworkError,
+            "busy": self.state != SystemState::Idle || self.speech_task.is_some(),
+            "tts":self.tts.available(), "skills_pending":self.skills_pending})
+    }
 
-        self.state = SystemState::Idle;
-        self.should_mute_mic = false;
-        let _ = self.gui_bridge.send_message(r#"{"state": 3}"#).await;
-        log::info!("文字转语音已发送: {} 帧", frames_sent);
+    pub fn mark_skills_pending(&mut self) {
+        self.skills_pending = true;
+    }
+
+    pub async fn poll_speech(&mut self) {
+        if self.skills_pending && self.speech_task.is_none() && self.state == SystemState::Idle {
+            if self.net_tx.try_send(NetCommand::Reconnect).is_ok() {
+                self.skills_pending = false;
+                self.state = SystemState::NetworkError;
+                let _ = self.gui_bridge.send_message(r#"{"state":4,"type":"toast","text":"技能已保存，正在同步下一轮对话"}"#).await;
+            }
+        }
+        if !self.speech_task.as_ref().map(|task| task.is_finished()).unwrap_or(false) {
+            return;
+        }
+        let result = self.speech_task.take().unwrap().await;
+        self.should_mute_mic = matches!(self.state, SystemState::Listening | SystemState::Speaking);
+        let error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some(format!("语音任务异常：{}", error)),
+        };
+        if let Some(error) = error {
+            self.injected_text = None;
+            let _ = self.net_tx.send(NetCommand::SendText(r#"{"type":"listen","state":"stop"}"#.to_string())).await;
+            self.push_chat(ChatRole::System, &error).await;
+            if self.state == SystemState::Listening {
+                self.should_mute_mic = false;
+                self.state = SystemState::Idle;
+                let _ = self.gui_bridge.send_message(r#"{"state": 3}"#).await;
+            }
+        }
+    }
+
+    pub async fn cancel_speech(&mut self) {
+        if let Some(task) = self.speech_task.take() {
+            task.abort();
+            let _ = task.await;
+            let _ = self.net_tx.send(NetCommand::SendText(r#"{"type":"listen","state":"stop"}"#.to_string())).await;
+            self.should_mute_mic = false;
+            self.injected_text = None;
+        }
     }
 
     // 处理来自 GuiBridge 的事件
@@ -573,6 +602,13 @@ impl CoreController {
     /// 走的是和文字聊天同一条上行链路（合成 → 当成用户说的话发上去），所以问候语
     /// 是模型按当时的主技能与上下文现说的，还能出声。聊天记录里留一条系统提示，
     /// 说明这句话为什么会出现。
+    pub async fn proactive_care(&mut self) -> bool {
+        if self.state != SystemState::Idle || self.speech_task.is_some()
+            || self.current_session_id.is_none() || !self.tts.available() { return false; }
+        self.inject_speech("请沿用当前主 Skill 的人格，用一句简短自然的话关心用户，可以询问是否需要休息或喝水；不要假装知道用户的情绪或正在做什么。".to_string()).await;
+        true
+    }
+
     async fn handle_presence(&mut self, present: bool) {
         if !present {
             log::info!("存在检测：人离开了");
@@ -607,6 +643,36 @@ impl CoreController {
          * Connected notification.  Reply to an explicit status request so
          * the page can synchronize its current state over UDP. */
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg) {
+            if value.get("type").and_then(|item| item.as_str()) == Some("new_chat") {
+                let result = if self.state != SystemState::Idle || self.speech_task.is_some() {
+                    Err("请等待当前对话结束后再新建聊天".to_string())
+                } else {
+                    self.net_tx.send(NetCommand::Reconnect).await
+                        .map_err(|_| "网络通道不可用，请重试".to_string())
+                };
+                if result.is_ok() {
+                    self.new_chat_pending = true;
+                    self.current_session_id = None;
+                    self.last_assistant = None;
+                    self.injected_text = None;
+                    self.state = SystemState::NetworkError;
+                    let _ = self.gui_bridge.send_message(r#"{"state":4}"#).await;
+                }
+                let _ = self.gui_bridge.send_message(&serde_json::json!({
+                    "type":"command_ack", "command":"new_chat", "ok":result.is_ok(),
+                    "text":result.err().unwrap_or_else(|| "已请求新会话，正在重新连接；历史与本地记忆保留".into()),
+                }).to_string()).await;
+                return;
+            }
+            if value.get("type").and_then(|item| item.as_str()) == Some("timezone") {
+                let ok = value.get("value").and_then(|item| item.as_str())
+                    .map(crate::timers::set_timezone).unwrap_or(false);
+                let _ = self.gui_bridge.send_message(&serde_json::json!({
+                    "type":"command_ack", "command":"timezone", "ok":ok,
+                    "text": if ok { "时区已保存并同步" } else { "核心时区同步失败，请重试" },
+                }).to_string()).await;
+                return;
+            }
             if value.get("type").and_then(|item| item.as_str()) == Some("status_request") {
                 let state = match self.state {
                     crate::state_machine::SystemState::Idle => 3,
@@ -638,7 +704,13 @@ impl CoreController {
             // turn must send {"type":"listen","state":"start"} and later
             // {"type":"listen","state":"stop"}.
             if value.get("type").and_then(|item| item.as_str()) == Some("listen") {
-                if value.get("state").and_then(|item| item.as_str()) == Some("start") {
+                let start = value.get("state").and_then(|item| item.as_str()) == Some("start");
+                if start && (self.state != SystemState::Idle && self.state != SystemState::Listening) {
+                    let _ = self.gui_bridge.send_message(r#"{"type":"toast","text":"云端未就绪，录音未开始"}"#).await;
+                    return;
+                }
+                self.cancel_speech().await;
+                if start {
                     self.state = SystemState::Listening;
                     /* 用户自己开口了：接下来那条 stt 是真人说话，必须记录。
                      * 不摘掉上一轮打字留下的回声标记，这一句会被当成回显丢掉。 */
@@ -696,10 +768,15 @@ impl CoreController {
             // 再当成一次说话发出去。必须在这里拦下来——否则它会被当成裸文本
             // 直发服务器，这正是之前一直失败的原因。
             if value.get("type").and_then(|item| item.as_str()) == Some("chat_text") {
-                match value.get("text").and_then(|item| item.as_str()) {
+                let result = match value.get("text").and_then(|item| item.as_str()) {
                     Some(text) => self.send_text_as_speech(text.to_string()).await,
-                    None => log::warn!("chat_text 缺少 text 字段: {}", msg),
-                }
+                    None => Err("消息缺少 text 字段".to_string()),
+                };
+                let _ = self.gui_bridge.send_message(&serde_json::json!({
+                    "type": "command_ack", "command": "chat_text",
+                    "request_id": value.get("request_id").and_then(|id| id.as_u64()).unwrap_or(0),
+                    "ok": result.is_ok(), "text": result.err().unwrap_or_default(),
+                }).to_string()).await;
                 return;
             }
         }

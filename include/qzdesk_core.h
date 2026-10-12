@@ -5,6 +5,7 @@
 
 typedef enum {
     QZDESK_CORE_EVENT_STATUS,
+    QZDESK_CORE_EVENT_ACK,
     /** 一条聊天记录：用户打字 / 语音识别、助手回复、核心提示，GUI 与 web 共用。 */
     QZDESK_CORE_EVENT_CHAT,
     QZDESK_CORE_EVENT_TOAST,
@@ -135,6 +136,10 @@ typedef struct {
 typedef struct {
     qzdesk_core_event_type_t type;
     int state;
+    unsigned long long id;
+    unsigned long long request_id;
+    bool ok;
+    char command[24];
     /** 聊天记录的角色："user" / "assistant" / "system"（其他事件为空串）。 */
     char role[12];
     /**
@@ -155,6 +160,7 @@ typedef void (*qzdesk_core_event_cb_t)(const qzdesk_core_event_t *event, void *u
 
 bool qzdesk_core_open(void);
 bool qzdesk_core_request_status(void);
+bool qzdesk_core_set_timezone(const char *timezone);
 /**
  * Ask the core to replay the recent chat history as a series of `chat` events.
  *
@@ -164,6 +170,7 @@ bool qzdesk_core_request_status(void);
  * proves the core is listening.
  */
 bool qzdesk_core_request_history(void);
+bool qzdesk_core_new_chat(void);
 /**
  * Hand a typed message to the core as `{"type":"chat_text","text":"..."}`.
  *
@@ -174,6 +181,19 @@ bool qzdesk_core_request_history(void);
  * toast, not by this return value.
  */
 bool qzdesk_core_send_text(const char *text);
+unsigned long long qzdesk_core_text_request_id(void);
+
+/**
+ * 告诉核心"用户可以说话了"（push-to-talk 按下 / 松开）。
+ *
+ * 发 `{"type":"listen","state":"start"}` 或 `...:"stop"`。核心只在 Listening
+ * 状态才把麦克风帧上行（见 controller.rs 的 handle_audio_event），所以**没有这
+ * 一步，按住说话是收不到音的** —— 之前界面只改了本地文案，音频一帧都没出去。
+ *
+ * 唤醒词进程走的是同一条报文（它直接往核心的 UDP 口发），两边互不干扰：
+ * 谁先唤醒谁说了算，后到的 start 只是把状态再置一次。
+ */
+bool qzdesk_core_listen(bool start);
 
 /**
  * Tell the core that someone arrived in front of the device (or left).

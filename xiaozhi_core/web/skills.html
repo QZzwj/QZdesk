@@ -1182,12 +1182,17 @@ textarea{resize:vertical;line-height:1.6}
          */
         async function fetchJson(url, options) {
             let res;
+            let raw;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 15000);
             try {
-                res = await fetch(url, options);
+                res = await fetch(url, { ...options, signal: controller.signal });
+                raw = await res.text();
             } catch (error) {
                 throw new Error('无法连接设备服务：' + ((error && error.message) || '网络错误'));
+            } finally {
+                clearTimeout(timer);
             }
-            const raw = await res.text().catch(() => '');
             let data = null;
             if (raw) {
                 try { data = JSON.parse(raw); } catch (_) { data = null; }
@@ -1402,11 +1407,17 @@ textarea{resize:vertical;line-height:1.6}
             const bubble = document.createElement('div');
             bubble.className = 'chat-bubble ' + chatRoleClass(role);
             bubble.textContent = text.trim();
+            if (role === 'divider') {
+                bubble.className = 'chat-divider';
+                bubble.style.cssText = 'align-self:stretch;text-align:center;border-top:1px solid currentColor;margin:18px 0 8px;padding-top:10px;opacity:.65;font-size:13px';
+            }
             const box = $('#chatMessages');
+            const follow = box.scrollHeight - box.scrollTop - box.clientHeight < 32;
             box.appendChild(bubble);
+            while (box.children.length > 100) box.firstElementChild.remove();
             /* 补历史时不逐条弹入：一次几十条会变成一串无意义的抖动 */
             if (animate !== false) bubbleIn(bubble);
-            box.scrollTop = box.scrollHeight;
+            if (follow || role === 'user') box.scrollTop = box.scrollHeight;
         }
 
         /* 先连实时流、再补历史，两条来源用记录自带的 id 对齐：历史里最大 id 之后的
@@ -1426,16 +1437,27 @@ textarea{resize:vertical;line-height:1.6}
                 const data = await fetchJson('/api/chat/history');
                 const messages = Array.isArray(data && data.messages) ? data.messages : [];
                 messages.forEach(item => {
-                    chatLastId = Math.max(chatLastId, chatEntryId(item));
-                    addChatMessage(item && item.text, item && item.role, false);
+                    const id = chatEntryId(item);
+                    if (id > chatLastId) addChatMessage(item && item.text, item && item.role, false);
+                    chatLastId = Math.max(chatLastId, id);
                 });
             } catch (_) { /* 取不到历史就从空面板开始，后面的消息仍会实时到达 */ }
             chatReady = true;
             chatPending.forEach(item => {
-                if (chatEntryId(item) > chatLastId) addChatMessage(item && item.text, item && item.role);
+                const id = chatEntryId(item);
+                if (id > chatLastId) addChatMessage(item && item.text, item && item.role);
+                chatLastId = Math.max(chatLastId, id);
             });
             chatPending.length = 0;
         }
+
+        async function refreshCapabilities() {
+            try {
+                const status = await fetchJson('/api/status');
+                setChatState(!status.cloud ? '本地在线·云端未连接' : !status.tts ? '云端在线·文字语音不可用' : status.busy ? '云端在线·对话处理中' : '云端在线·可对话', status.cloud ? '' : 'busy');
+            } catch (_) { setChatState('本地状态未确认', 'busy'); }
+        }
+        setInterval(refreshCapabilities, 5000);
 
         function connectChatStream() {
             if (!window.EventSource) {
@@ -1444,14 +1466,24 @@ textarea{resize:vertical;line-height:1.6}
             }
             if (chatStream) chatStream.close();
             chatStream = new EventSource('/api/chat/stream');
-            chatStream.onopen = () => setChatState('在线', '');
+            chatStream.onopen = () => {
+                refreshCapabilities();
+                if (chatReady) {
+                    chatReady = false;
+                    loadChatHistory();
+                }
+            };
             chatStream.onerror = () => setChatState('等待连接', 'busy');
+            chatStream.addEventListener('resync', () => {
+                chatReady = false;
+                loadChatHistory();
+            });
             chatStream.onmessage = event => {
                 let data;
                 try { data = JSON.parse(event.data); } catch (_) { return; }
                 /* 记录在核心侧就已经成对写好（含去重），这里只负责显示：这个页面和设备
                  * 屏幕上的对话是同一份，顺序也一致。 */
-                setChatState('在线', '');
+                refreshCapabilities();
                 if (!chatReady) { chatPending.push(data); return; }
                 if (chatEntryId(data) > chatLastId) addChatMessage(data && data.text, data && data.role);
                 chatLastId = Math.max(chatLastId, chatEntryId(data));
@@ -1464,8 +1496,7 @@ textarea{resize:vertical;line-height:1.6}
             const text = input.value.trim();
             if (!text) return;
             const stop = busy($('#chatSend'), '发送中…');
-            input.value = '';
-            input.style.height = '46px';
+            input.disabled = true;
             /* 不在本地先画一条气泡：核心收到后会把它记成用户消息再推回来，这样网页与
              * 设备屏幕上的这条消息是同一条记录，不会出现“一边有、一边没有”。 */
             setChatState('等待回复', 'busy');
@@ -1478,12 +1509,16 @@ textarea{resize:vertical;line-height:1.6}
                     addChatMessage(out.error || '发送失败，请先启用一个主技能。', 'system');
                     setChatState('需要配置', 'offline');
                     toast('err', '发送失败', out.error || '请先在列表里启用一个主技能');
+                } else {
+                    input.value = '';
+                    input.style.height = '46px';
                 }
                 /* 202 = 已交给核心：文字会在设备侧合成成语音再上行，回复照常从 SSE 流里回来 */
             } catch (err) {
                 addChatMessage('网络通道不可用：' + err, 'system');
                 setChatState('离线', 'offline');
             } finally {
+                input.disabled = false;
                 stop();
             }
         });

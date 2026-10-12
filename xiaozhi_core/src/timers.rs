@@ -103,6 +103,8 @@ pub struct Pomodoro {
     pub focus_minutes: u32,
     #[serde(default = "default_break")]
     pub break_minutes: u32,
+    #[serde(default = "default_true")]
+    pub auto_break: bool,
 }
 
 impl Default for Pomodoro {
@@ -117,6 +119,7 @@ impl Default for Pomodoro {
             total_cycles: DEFAULT_CYCLES,
             focus_minutes: DEFAULT_FOCUS_MINUTES,
             break_minutes: DEFAULT_BREAK_MINUTES,
+            auto_break: true,
         }
     }
 }
@@ -134,6 +137,7 @@ pub struct PomodoroOptions {
     pub focus_minutes: Option<u32>,
     pub break_minutes: Option<u32>,
     pub cycles: Option<u32>,
+    pub auto_break: Option<bool>,
 }
 
 /// 该播报什么。文本在这里就定稿：界面、网页、日志看到的完全一样。
@@ -161,11 +165,28 @@ struct LocalNow {
 }
 
 /// 走 libc 的 `localtime_r`：TZ 由设置页写进环境（与界面时钟一致），核心只需跟随。
+static TIMEZONE_OVERRIDE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+
+pub fn set_timezone(zone: &str) -> bool {
+    let hours = match zone {
+        "PST8" => -8, "EST5" => -5, "GMT0" => 0, "CET-1" => 1,
+        "UZT-5" => 5, "ICT-7" => 7, "CST-8" => 8, "JST-9" => 9, "AEST-10" => 10,
+        _ => return false,
+    };
+    TIMEZONE_OVERRIDE.store(hours * 3600, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
 fn local_now(now: u64) -> Option<LocalNow> {
-    let seconds = now as libc::time_t;
+    let offset = TIMEZONE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    let seconds = if offset == i32::MIN { now as libc::time_t }
+        else { (now as i64 + offset as i64) as libc::time_t };
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: `localtime_r` 只写我们提供的 `tm`，不做全局状态写入之外的副作用。
-    let converted = unsafe { libc::localtime_r(&seconds, &mut tm) };
+    let converted = unsafe {
+        if offset == i32::MIN { libc::localtime_r(&seconds, &mut tm) }
+        else { libc::gmtime_r(&seconds, &mut tm) }
+    };
     if converted.is_null() {
         return None;
     }
@@ -179,6 +200,10 @@ fn local_now(now: u64) -> Option<LocalNow> {
         hour: tm.tm_hour as u32,
         minute: tm.tm_min as u32,
     })
+}
+
+pub fn local_hour(now: u64) -> Option<u32> {
+    local_now(now).map(|time| time.hour)
 }
 
 pub fn unix_now() -> u64 {
@@ -294,11 +319,13 @@ impl TimerStore {
         let mut errors = Vec::new();
         if write_reminders {
             if let Err(error) = write_json_atomic(&self.dir.join(REMINDER_FILE), &reminders) {
+                self.lock().dirty_reminders = true;
                 errors.push(error);
             }
         }
         if write_pomodoro {
             if let Err(error) = write_json_atomic(&self.pomodoro_dir.join(POMODORO_FILE), &pomodoro) {
+                self.lock().dirty_pomodoro = true;
                 errors.push(error);
             }
         }
@@ -315,6 +342,13 @@ impl TimerStore {
 
     pub fn pomodoro(&self) -> Pomodoro {
         self.lock().pomodoro.clone()
+    }
+
+    pub fn snooze(&self, text: &str, minutes: u64) -> Result<(), String> {
+        let local = local_now(unix_now().saturating_add(minutes.clamp(1, 60) * 60))
+            .ok_or_else(|| "无法读取本地时间".to_string())?;
+        self.add_reminder(local.hour, local.minute, text, false, &local.date)?;
+        Ok(())
     }
 
     /// 新建提醒。规则与 `set_timer.py` 一致：同钟点同内容的算重复，超过上限拒绝。
@@ -376,6 +410,35 @@ impl TimerStore {
         Ok(reminder)
     }
 
+    pub fn update_reminder(
+        &self, id: u64, hour: u32, minute: u32, label: &str,
+        daily: bool, date: &str, enabled: bool,
+    ) -> Result<Reminder, String> {
+        if hour > 23 || minute > 59 {
+            return Err("时间超出范围".to_string());
+        }
+        let mut inner = self.lock();
+        let label: String = if label.trim().is_empty() { "提醒".to_string() }
+            else { label.trim().chars().take(24).collect() };
+        if inner.reminders.iter().any(|item| item.id != id && item.hour as u32 == hour
+            && item.minute as u32 == minute && item.label == label && item.daily == daily) {
+            return Err("已存在相同提醒".to_string());
+        }
+        let item = inner.reminders.iter_mut().find(|item| item.id == id)
+            .ok_or_else(|| format!("提醒 {} 不存在", id))?;
+        item.hour = hour as u8;
+        item.minute = minute as u8;
+        item.label = label;
+        item.daily = daily;
+        item.date = if daily { String::new() } else { date.trim().to_string() };
+        item.enabled = enabled;
+        let result = item.clone();
+        inner.dirty_reminders = true;
+        drop(inner);
+        self.flush()?;
+        Ok(result)
+    }
+
     pub fn remove_reminder(&self, id: u64) -> Result<(), String> {
         let mut inner = self.lock();
         let before = inner.reminders.len();
@@ -415,6 +478,7 @@ impl TimerStore {
                     total_cycles: cycles,
                     focus_minutes: focus,
                     break_minutes: pause,
+                    auto_break: options.auto_break.unwrap_or(true),
                 };
             }
             "pause" => {
@@ -474,7 +538,11 @@ impl TimerStore {
                 }
             }
         }
-        if !events.is_empty() {
+        let pending = {
+            let inner = self.lock();
+            inner.dirty_reminders || inner.dirty_pomodoro
+        };
+        if !events.is_empty() || pending {
             if let Err(error) = self.flush() {
                 log::warn!("提醒/番茄钟写盘失败: {}", error);
             }
@@ -521,6 +589,14 @@ fn settle_pomodoro(state: &mut Pomodoro, now: u64) -> Option<TimerEvent> {
             }
             state.phase = "break".to_string();
             remaining = state.break_minutes.max(1) as u64 * 60;
+            if !state.auto_break {
+                state.paused = true;
+                state.remaining_seconds = remaining as u32;
+                state.updated_at = now;
+                return Some(TimerEvent::Pomodoro {
+                    text: "专注完成，休息计时等待确认；点击继续开始休息".to_string(),
+                });
+            }
             event = Some(TimerEvent::Pomodoro {
                 text: format!("☕ 第 {} 轮专注完成，休息 {} 分钟", state.completed_cycles, state.break_minutes),
             });
@@ -634,6 +710,48 @@ mod tests {
     }
 
     #[test]
+    fn failed_flush_keeps_dirty_state_for_retry() {
+        let (store, dir) = store();
+        let reminder_path = dir.join(REMINDER_FILE);
+        let pomodoro_path = dir.join(POMODORO_FILE);
+        for path in [&reminder_path, &pomodoro_path] {
+            let _ = fs::remove_file(path);
+            fs::create_dir(path).unwrap();
+        }
+        {
+            let mut inner = store.lock();
+            inner.dirty_reminders = true;
+            inner.dirty_pomodoro = true;
+        }
+        assert!(store.flush().is_err());
+        assert!(store.lock().dirty_reminders);
+        assert!(store.lock().dirty_pomodoro);
+        fs::remove_dir(&reminder_path).unwrap();
+        fs::remove_dir(&pomodoro_path).unwrap();
+        store.flush().unwrap();
+        assert!(reminder_path.is_file());
+        assert!(pomodoro_path.is_file());
+        assert!(!store.lock().dirty_reminders);
+        assert!(!store.lock().dirty_pomodoro);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reminder_edit_preserves_id_and_rejects_invalid_input() {
+        let (store, dir) = store();
+        let original = store.add_reminder(7, 30, "喝水", true, "").unwrap();
+        let edited = store.update_reminder(original.id, 8, 17, "喝水", true, "", false).unwrap();
+        assert_eq!(edited.id, original.id);
+        assert_eq!(edited.minute, 17);
+        assert!(!edited.enabled);
+        assert!(store.update_reminder(original.id, 25, 0, "喝水", true, "", true).is_err());
+        let reloaded = TimerStore::load_in(dir.clone(), dir.clone());
+        assert_eq!(reloaded.reminders()[0].hour, 8);
+        assert!(!reloaded.reminders()[0].enabled);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn reminders_persist_and_survive_reload() {
         let (store, dir) = store();
         store.add_reminder(7, 30, "喝水", true, "").unwrap();
@@ -724,6 +842,20 @@ mod tests {
     }
 
     #[test]
+    fn manual_break_waits_for_confirmation() {
+        let mut state = Pomodoro { active: true, phase: "focus".into(),
+            remaining_seconds: 60, updated_at: 1000, total_cycles: 2,
+            focus_minutes: 1, break_minutes: 2, auto_break: false,
+            ..Pomodoro::default() };
+        assert!(settle_pomodoro(&mut state, 1060).is_some());
+        assert!(state.paused);
+        assert!(state.is_break());
+        assert_eq!(state.remaining_seconds, 120);
+        assert!(settle_pomodoro(&mut state, 2000).is_none());
+        assert_eq!(state.remaining_seconds, 120);
+    }
+
+    #[test]
     fn pomodoro_walks_focus_break_finish() {
         let mut state = Pomodoro {
             active: true,
@@ -735,6 +867,7 @@ mod tests {
             total_cycles: 2,
             focus_minutes: 1,
             break_minutes: 1,
+            auto_break: true,
         };
         // 专注结束 → 进入休息
         let first = settle_pomodoro(&mut state, 1_060).expect("focus -> break");
@@ -779,6 +912,7 @@ mod tests {
                     focus_minutes: Some(30),
                     break_minutes: Some(10),
                     cycles: Some(99),
+                    auto_break: None,
                 },
             )
             .unwrap();
@@ -809,6 +943,7 @@ mod tests {
             total_cycles: 4,
             focus_minutes: 25,
             break_minutes: 5,
+            auto_break: true,
         };
         let text = pomodoro_text(&state);
         assert!(text.contains("休息剩余 02:05"), "{}", text);

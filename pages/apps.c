@@ -1,7 +1,9 @@
 #include "apps.h"
 #include "applets.h"
 #include "skills_page.h"
+#include "settings.h"
 #include "theme.h"
+#include "weather_page.h"
 #include <stdio.h>
 
 /* Two columns and two visible rows; swipe vertically for the remaining apps. */
@@ -31,6 +33,12 @@ static void open_applet(lv_event_t *event)
     if (screen) qz_screen_load(screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, QZ_DUR_SCREEN);
 }
 
+static void open_clock(lv_event_t *event)
+{
+    (void)event;
+    qz_weather_page_open();
+}
+
 static void open_skills(lv_event_t *event)
 {
     (void)event;
@@ -42,6 +50,7 @@ static void open_settings(lv_event_t *event)
 {
     (void)event;
     if (settings_screen) {
+        qz_settings_set_return(apps_screen);
         qz_screen_load(settings_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, QZ_DUR_SCREEN);
     }
 }
@@ -59,20 +68,24 @@ static lv_obj_t *app_row(lv_obj_t *grid, int col, int row, const char *symbol,
                          const char *title, const char *detail, uint32_t tile,
                          uint32_t mark, lv_event_cb_t cb, void *user_data)
 {
-    (void)detail;
     lv_obj_t *card = qz_card_button(grid, ROW_W, ROW_H);
     lv_obj_set_pos(card, col ? COL_RIGHT : COL_LEFT, row * (ROW_H + ROW_GAP));
 
     lv_obj_t *icon = qz_squircle(card, 54, tile);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 12);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 12, 0);
     lv_obj_t *glyph = qz_symbol(icon, symbol, 28, qz_color(mark));
     lv_obj_center(glyph);
 
     lv_obj_t *name = qz_text(card, title, 22, qz_color(QZ_TEXT));
-    lv_obj_set_width(name, ROW_W - 24);
+    lv_obj_set_width(name, ROW_W - 86);
     lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 78);
+    lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(name, LV_ALIGN_TOP_LEFT, 76, 20);
+
+    lv_obj_t *summary = qz_text(card, detail, 16, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(summary, ROW_W - 86);
+    lv_label_set_long_mode(summary, LV_LABEL_LONG_WRAP);
+    lv_obj_align(summary, LV_ALIGN_TOP_LEFT, 76, 56);
 
     lv_obj_add_event_cb(card, cb, LV_EVENT_CLICKED, user_data);
     qz_animate_entrance(card, (uint32_t)((col + row) * 40));
@@ -116,8 +129,10 @@ lv_obj_t *qz_apps_create(void)
             QZ_ACCENT, QZ_TEXT_ON_ACCENT, open_applet,
             (void *)(intptr_t)QZ_APPLET_CONTROL);
 
-    app_row(grid, 1, 3, LV_SYMBOL_SETTINGS, "设置", "WLAN · 声音 · 显示",
+    app_row(grid, 1, 2, LV_SYMBOL_SETTINGS, "设置", "WLAN · 声音 · 显示",
             QZ_ACCENT_TINT, QZ_ACCENT_DARK, open_settings, NULL);
+    app_row(grid, 0, 3, LV_SYMBOL_LOOP, "桌面时钟", "时钟与气象站",
+            QZ_ACCENT, QZ_TEXT_ON_ACCENT, open_clock, NULL);
     return apps_screen;
 }
 

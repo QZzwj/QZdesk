@@ -146,6 +146,7 @@ impl McpTool for PomodoroTool {
                 .get("cycles")
                 .and_then(Value::as_u64)
                 .map(|value| value as u32),
+            auto_break: params.get("auto_break").and_then(Value::as_bool),
         };
         match self.store.pomodoro_action(action, options) {
             Ok(state) => Ok(json!({

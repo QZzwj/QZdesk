@@ -27,6 +27,8 @@ LOG=/var/log/qzdesk.log
 PIDFILE=/var/run/qzdesk.pid
 WIFI_KO=/oem/usr/lib/wifi   # RTL8723BS 驱动模块（镜像里没带时目录不存在，静默跳过）
 CAM_KO=/oem/usr/lib/camera  # SC3336 + rkcif/rkisp 驱动模块
+KWS_BIN=/oem/usr/bin/qzdesk-kws # 本地唤醒词进程（NPU KWS，独立进程；没编出来就静默跳过）
+KWS_SOCK=/var/run/qzdesk-kws.sock
 FW_SRC=/oem/usr/lib/firmware # WiFi 固件（开机补进 /lib/firmware）
 READY_WAIT=50           # 就绪等待轮数：50 × 100ms = 5 秒
 LOG_MAX=$((512 * 1024)) # 日志超过 512KB 就在启动时截断（免得越写越大拖慢写盘）
@@ -34,6 +36,13 @@ LOG_MAX=$((512 * 1024)) # 日志超过 512KB 就在启动时截断（免得越�
 export QZDESK_FONT=${QZDESK_FONT:-/oem/usr/share/fonts/NanoTikBazHei-Bold.ttf}
 export QZDESK_FB=${QZDESK_FB:-/dev/fb0}
 export QZDESK_TOUCH=${QZDESK_TOUCH:-/dev/input/event0}
+# 唤醒词旁路：核心与 qzdesk-kws 用同一个 socket 路径（两边都读这个变量）。
+# 不想用唤醒词就把这行注释掉 —— 核心侧就不会建旁路 socket，KWS 进程也起不来。
+export QZDESK_KWS_SOCKET=${QZDESK_KWS_SOCKET:-/var/run/qzdesk-kws.sock}
+# 唤醒词用哪一套模型（库与模型由进程按这个变量选，不用重编）：
+#   mode2（默认）= 唤醒词 "小和小和" + 19 条命令词（打电话给爸爸…）
+#   mode1        = 8 条一次性命令词（我要拍照 / 打开关闭热点、录音、屏幕）
+export QZDESK_KWS_MODE=${QZDESK_KWS_MODE:-mode2}
 
 # 本脚本同时装在 rootfs /etc/init.d（rcS 跑）和 oem /oem/usr/etc/init.d（RkLunch 跑），
 # 没这个判断时两条路各起一次，两个界面进程抢同一个 framebuffer。
@@ -125,6 +134,23 @@ wait_ready() {
 	ready
 }
 
+# 本地唤醒词：独立进程（Rockchip NPU KWS，唤醒词 "小和小和"）。
+#
+# 它绑定一个 Unix socket，等核心把采集到的 PCM 旁路过来（核心侧见 audio/kws_tap.rs）；
+# 命中唤醒词就往核心的 UDP 口发 {"type":"listen","state":"start"}，核心随即进入
+# Listening —— 后面就是原本的语音链路，这个进程不参与说话，只负责"叫人"。
+start_kws() {
+	[ -x "$KWS_BIN" ] || return 0
+	# 唤醒库按 mode 各自命名装在 lib/qzdesk/（进程自己 dlopen，不链接），所以这里只需
+	# 确认要用的那一套在。目录不在 = 这版固件没编唤醒，静默跳过。
+	[ -f "/oem/usr/lib/qzdesk/libaec_bf_process_${QZDESK_KWS_MODE:-mode2}.so" ] || return 0
+	rm -f "$KWS_SOCK"
+	# LD_LIBRARY_PATH 要给的是**库自己的依赖**（librknnmrt.so / librkaudio_common.so 在
+	# /oem/usr/lib），不是唤醒库本身 —— 它是 dlopen 指定完整路径加载的。
+	LD_LIBRARY_PATH=/oem/usr/lib "$KWS_BIN" >>"$LOG" 2>&1 &
+	echo "qzdesk: 唤醒词进程已启动（pid $!，模式 ${QZDESK_KWS_MODE:-mode2}），日志 $LOG"
+}
+
 start() {
 	running && { echo "qzdesk: 已在运行（pid $pid），跳过"; return 0; }
 	wait_ready || echo "qzdesk: 就绪等待超时，仍尝试启动（显示节点或字体可能还没到）"
@@ -138,6 +164,7 @@ start() {
 	"$DAEMON" >>"$LOG" 2>&1 &
 	echo $! > "$PIDFILE"
 	echo "qzdesk: 已启动（pid $(cat $PIDFILE)），日志 $LOG"
+	start_kws
 	# 界面先跑起来，再挂相机模块（相机初始化比较重，别挡住第一帧）
 	load_camera
 }
@@ -148,6 +175,8 @@ stop() {
 		rm -f "$PIDFILE"
 	fi
 	killall qzdesk_screen 2>/dev/null
+	killall qzdesk-kws 2>/dev/null
+	rm -f "$KWS_SOCK"
 	echo "qzdesk: 已停止"
 }
 

@@ -8,6 +8,7 @@ build_dir=${QZDESK_BUILD_DIR:-"$script_dir/build"}
 # The SDL simulator has no ALSA capture/playback devices. Keep the core
 # network and GUI paths active without starting failing ALSA threads.
 export QZDESK_AUDIO_DISABLED=1
+export QZDESK_AUTO_MEMORY=${QZDESK_AUTO_MEMORY:-1}
 
 # The simulator can reuse a previously built core. Set QZDESK_BUILD_CORE=ON
 # when testing Rust changes; this avoids competing Cargo cache locks during

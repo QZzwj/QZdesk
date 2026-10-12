@@ -52,6 +52,8 @@ for panel in os.environ.get('QZ_LAYOUT_PANELS', '320x240 480x320').split():
                                 stdout=report, stderr=subprocess.STDOUT)
     contents = (output / 'report.txt').read_text()
     print(contents, end='')
+    if result.returncode != 0:
+        print('Layout process failed:', panel, 'exit code', result.returncode)
     failed |= result.returncode != 0
 print('Layout reports and PPM screenshots:', artifacts)
 sys.exit(1 if failed else 0)

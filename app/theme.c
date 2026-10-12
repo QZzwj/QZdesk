@@ -31,25 +31,25 @@ static const struct {
     uint32_t light;
     uint32_t dark;
 } qz_palette[] = {
-    [QZ_BG]             = { 0xE5E5EA, 0x000000 }, /* canvas: systemGray5 / true black (OLED) */
-    [QZ_BG_GRAD]        = { 0xD8DAE3, 0x101014 }, /* canvas gradient bottom（顶部用 QZ_BG） */
+    [QZ_BG]             = { 0xE8EFF7, 0x101B2C },
+    [QZ_BG_GRAD]        = { 0xDCE8F2, 0x17283B },
     [QZ_CARD]           = { 0xFFFFFF, 0x1C1C1E }, /* grouped plate: white / systemGray6 dark */
     [QZ_CARD_GRAD]      = { 0xF1F2F6, 0x161619 }, /* plate gradient bottom（顶部用 QZ_CARD） */
     [QZ_BAR]            = { 0xFFFFFF, 0x1C1C1E }, /* toolbar glass fill */
     [QZ_FILL]           = { 0xF2F2F7, 0x2C2C2E }, /* recessed fill / track */
     [QZ_FILL_PRESSED]   = { 0xE9E9EF, 0x3A3A3C }, /* pressed / switch-off track */
     [QZ_SEPARATOR]      = { 0xC6C6C8, 0x38383A }, /* hairline */
-    [QZ_TEXT]           = { 0x000000, 0xFFFFFF },
-    [QZ_TEXT_SECONDARY] = { 0x55555B, 0xFFFFFF }, /* Small text stays legible on the canvas. */
-    [QZ_TEXT_TERTIARY]  = { 0x5F5F65, 0xFFFFFF }, /* Dark mode retains white secondary text. */
+    [QZ_TEXT]           = { 0x172B43, 0xF4F7FC },
+    [QZ_TEXT_SECONDARY] = { 0x40546B, 0xCAD7E7 },
+    [QZ_TEXT_TERTIARY]  = { 0x4B5E73, 0xBFCDDE },
     [QZ_SHADOW]         = { 0x1C1C1E, 0x000000 },
     [QZ_FACE_BUBBLE]    = { 0xE4EFFF, 0x2C2C2E }, /* AI thinking pips */
     [QZ_KNOB]           = { 0xFFFFFF, 0xFFFFFF }, /* slider / switch knob stays white */
     [QZ_GLASS_RIM]      = { 0xFFFFFF, 0xFFFFFF }, /* specular rim on glass chrome */
-    [QZ_ACCENT]         = { 0x007AFF, 0x0A84FF }, /* systemBlue, brighter on dark */
-    [QZ_ACCENT_DARK]    = { 0x0062CC, 0x409CFF }, /* pressed accent + accent text on tint */
-    [QZ_ACCENT_TEXT]    = { 0x0062CC, 0x409CFF },
-    [QZ_ACCENT_TINT]    = { 0xE4EFFF, 0x1C2C4A }, /* 10% accent wash under badges */
+    [QZ_ACCENT]         = { 0x006BFF, 0x66F7FF },
+    [QZ_ACCENT_DARK]    = { 0x056570, 0x75DCE4 }, /* pressed accent + accent text on tint */
+    [QZ_ACCENT_TEXT]    = { 0x056570, 0x75DCE4 },
+    [QZ_ACCENT_TINT]    = { 0xD9F3F4, 0x17383D }, /* 10% accent wash under badges */
     [QZ_TEXT_ON_ACCENT] = { 0xFFFFFF, 0xFFFFFF },
     [QZ_GREEN]          = { 0x248A3D, 0x30D158 }, /* systemGreen */
     [QZ_ORANGE]         = { 0xC93400, 0xFF9F0A }, /* systemOrange */

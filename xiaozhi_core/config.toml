@@ -141,6 +141,100 @@ type = "object"
 type = "string"
 description = "运动方向：forward、backward、left、right 或 stop"
 
+# ---------------------------------------------------------------------------
+# 设备自身的操作类工具（都在本机执行，不联网）
+# 脚本与核心二进制放在同一个目录，所以这里用相对路径 ./xxx.sh。
+# ---------------------------------------------------------------------------
+
+[[mcp.tools]]
+name = "set_brightness"
+description = "调节设备屏幕亮度。用户说屏幕太亮/太暗/调暗一点/看不清时调用。"
+type = "subprocess"
+executable = "./set_brightness.sh"
+mode = "sync"
+timeout_ms = 5000
+[mcp.tools.input_schema]
+type = "object"
+required = ["percent"]
+[mcp.tools.input_schema.properties.percent]
+type = "integer"
+description = "目标亮度，1-100（1 最暗，100 最亮；不要传 0，那等于黑屏）"
+
+[[mcp.tools]]
+name = "set_volume"
+description = "调节设备扬声器音量。用户说声音太大/太小/大点声/静音时调用。"
+type = "subprocess"
+executable = "./set_volume.sh"
+mode = "sync"
+timeout_ms = 5000
+[mcp.tools.input_schema]
+type = "object"
+required = ["percent"]
+[mcp.tools.input_schema.properties.percent]
+type = "integer"
+description = "目标音量，0-100"
+
+[[mcp.tools]]
+name = "speak"
+description = "让设备用扬声器把一段文字念出来（本地播报，不改变对话内容）。用户说「念一下」「读出来」「播报一下」时调用。"
+type = "subprocess"
+executable = "./speak.sh"
+mode = "sync"
+timeout_ms = 30000
+[mcp.tools.input_schema]
+type = "object"
+required = ["text"]
+[mcp.tools.input_schema.properties.text]
+type = "string"
+description = "要念出来的文字，用中文，尽量短"
+
+[[mcp.tools]]
+name = "screenshot"
+description = "给设备屏幕截图并保存成文件，返回文件路径。用户说「截个屏」「拍张屏幕」时调用。"
+type = "subprocess"
+executable = "./screenshot.sh"
+mode = "sync"
+timeout_ms = 15000
+[mcp.tools.input_schema]
+type = "object"
+[mcp.tools.input_schema.properties.name]
+type = "string"
+description = "可选的文件名前缀，只支持字母数字和 . _ -"
+
+[[mcp.tools]]
+name = "power_action"
+description = "重启设备、关机，或只重启界面程序。用户说「重启」「关机」「屏幕卡住了」时调用。重启或关机前一定要先跟用户确认一次，因为会中断当前对话。"
+type = "subprocess"
+executable = "./power_action.sh"
+mode = "sync"
+timeout_ms = 10000
+[mcp.tools.input_schema]
+type = "object"
+required = ["action"]
+[mcp.tools.input_schema.properties.action]
+type = "string"
+description = "reboot = 重启整机；poweroff = 关机；restart_gui = 只重启界面与核心（屏幕卡住、改完配置时用）"
+[mcp.tools.input_schema.properties.delay]
+type = "integer"
+description = "多少秒后执行，默认 2，最大 30"
+
+[[mcp.tools]]
+name = "gpio_set"
+description = "控制一路 GPIO 输出，用于继电器、灯、风扇这类只有开/关的外设。电机不要用这个工具，用 robot_move。"
+type = "subprocess"
+executable = "./gpio_set.sh"
+mode = "sync"
+timeout_ms = 3000
+[mcp.tools.input_schema]
+type = "object"
+required = ["pin", "value"]
+[mcp.tools.input_schema.properties.pin]
+type = "integer"
+description = "内核全局 GPIO 编号，例如 32 表示 GPIO1_A0"
+[mcp.tools.input_schema.properties.value]
+type = "integer"
+description = "1 = 高电平（开），0 = 低电平（关）"
+
 # set_timer 与 pomodoro 是核心内置工具（见 src/mcp_gateway/timer_tools.rs）：它们直接
 # 读写核心里的提醒 / 番茄钟表，与设备界面、网页控制台用的是同一份数据。以前这两个工具
 # 写成子进程脚本（set_timer.py / pomodoro.py），脚本只把命令写进文件等着"界面来消费"，

@@ -2,6 +2,7 @@ mod activation;
 mod audio;
 mod audio_bridge;
 mod config;
+mod companion;
 mod controller;
 mod gui_bridge;
 mod logbuf;
@@ -148,6 +149,10 @@ async fn main() -> anyhow::Result<()> {
     mcp_server.register_tool(Box::new(mcp_gateway::timer_tools::PomodoroTool::new(
         timer_store.clone(),
     )));
+    let companion_store = companion::CompanionStore::load().map_err(anyhow::Error::msg)?;
+    for care in [false, true] {
+        mcp_server.register_tool(Box::new(companion::CompanionTool { store: companion_store.clone(), care }));
+    }
     let mcp_server = Arc::new(mcp_server);
 
     // 创建通道，用于组件间通信
@@ -202,6 +207,8 @@ async fn main() -> anyhow::Result<()> {
                 for event in store.tick(timers::unix_now()) {
                     log::info!("{}", event.text());
                     if let Some(message) = hub.push(chat::ChatRole::System, event.text()) {
+                        let _ = bridge.send_message(&message).await;
+                        let message = serde_json::json!({"type":"toast", "role":"timer", "text":event.text()}).to_string();
                         if let Err(error) = bridge.send_message(&message).await {
                             log::warn!("提醒推送界面失败: {}", error);
                         }
@@ -235,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
     let web_weather = weather.clone();
     let web_performance = performance.clone();
     let web_timer_store = timer_store.clone();
+    let web_companion = companion_store.clone();
     tokio::spawn(async move {
         if let Err(error) = skill_web::run(
             web_skill_manager,
@@ -245,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
             web_weather,
             web_performance,
             web_timer_store,
+            web_companion,
         )
         .await
         {
@@ -306,6 +315,9 @@ async fn main() -> anyhow::Result<()> {
         net_link.run().await;
     });
 
+    // 唤醒词进程的 PCM 旁路：设了 QZDESK_KWS_SOCKET 才开（见 audio/kws_tap.rs）
+    crate::audio::kws_tap::init();
+
     // 启动音频桥（内置音频系统，无需外部进程）
     let audio_bridge = Arc::new(AudioBridge::start(&config, tx_audio_event)?);
 
@@ -332,21 +344,41 @@ async fn main() -> anyhow::Result<()> {
     );
 
     log::info!("QZdesk Core Started. Entering Event Loop...");
+    let mut speech_poll = tokio::time::interval(std::time::Duration::from_millis(50));
+    speech_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut care_poll = tokio::time::interval(std::time::Duration::from_secs(60));
+    care_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
                 log::info!("Received Ctrl+C, shutting down...");
+                controller.cancel_speech().await;
                 break;
             }
+            _ = speech_poll.tick() => controller.poll_speech().await,
+            _ = care_poll.tick() => {
+                let now = timers::unix_now();
+                let due = timers::local_hour(now).map(|hour| companion_store.care_due(now, hour)).unwrap_or(false);
+                if due {
+                    if !controller.proactive_care().await {
+                        log::info!("主动关心本轮跳过：对话忙碌或语音未就绪");
+                    } else if let Err(error) = companion_store.mark_care_sent(now) {
+                        log::warn!("主动关心调度保存失败：{}", error);
+                    }
+                }
+            },
             Some(event) = rx_net_event.recv() => controller.handle_net_event(event).await,
             Some(event) = rx_audio_event.recv() => controller.handle_audio_event(event).await,
             Some(event) = rx_gui_event.recv() => controller.handle_gui_event(event).await,
             Some(command) = rx_core_cmd.recv() => {
                 match command {
-                    CoreCommand::TextAsSpeech(text) => {
-                        controller.send_text_as_speech(text).await;
+                    CoreCommand::TextAsSpeech(text, reply) => {
+                        let result = controller.send_text_as_speech(text).await;
+                        let _ = reply.send(result);
                     }
+                    CoreCommand::SkillsSaved => controller.mark_skills_pending(),
+                    CoreCommand::Status(reply) => { let _ = reply.send(controller.capabilities()); }
                 }
             }
         }

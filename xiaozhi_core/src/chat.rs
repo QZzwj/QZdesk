@@ -46,6 +46,7 @@ pub enum ChatRole {
     User,
     Assistant,
     System,
+    Divider,
 }
 
 /// 一条聊天记录。

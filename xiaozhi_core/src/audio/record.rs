@@ -88,6 +88,12 @@ pub fn record_thread(
                     }
                 }
 
+                // 唤醒词旁路：把这一 period 的 PCM 原样（交错、全部声道）再投一份给
+                // KWS 进程。这里才拿得到 PCM —— 下面编码完就 drain 掉了。
+                // 送全部声道而不是只送第 0 声道：单麦唤醒用第 0 声道，若以后要开 AEC，
+                // 第 1 声道就是现成的参考通道，KWS 侧按 QZDESK_KWS_REF_CHAN 决定怎么取。
+                super::kws_tap::send(&read_buf[..frames * actual_channels as usize]);
+
                 // Accumulate processed PCM samples
                 accum_buf
                     .extend_from_slice(&read_buf[..frames * actual_channels as usize]);

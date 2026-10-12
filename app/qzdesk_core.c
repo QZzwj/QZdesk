@@ -1,4 +1,5 @@
 #include "qzdesk_core.h"
+#include "web_client.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -17,7 +18,7 @@
  * JSON — so receive generously and let the text field do the trimming. */
 #define QZDESK_CORE_MESSAGE_MAX 4096
 /* 轮询回调之外还能挂几个订阅者：助手页占着轮询，首页也要天气。 */
-#define QZDESK_CORE_MAX_SUBSCRIBERS 4
+#define QZDESK_CORE_MAX_SUBSCRIBERS 8
 
 static int qzdesk_core_socket = -1;
 static struct sockaddr_in core_address;
@@ -267,6 +268,11 @@ bool qzdesk_core_request_history(void)
     return send_json("{\"type\":\"chat_history_request\"}");
 }
 
+bool qzdesk_core_new_chat(void)
+{
+    return send_json("{\"type\":\"new_chat\"}");
+}
+
 bool qzdesk_core_subscribe(qzdesk_core_event_cb_t callback, void *user_data)
 {
     int index;
@@ -310,6 +316,10 @@ static void deliver(const qzdesk_core_event_t *event, qzdesk_core_event_cb_t cal
     }
 }
 
+static unsigned long long text_request_id;
+
+unsigned long long qzdesk_core_text_request_id(void) { return text_request_id; }
+
 bool qzdesk_core_send_text(const char *text)
 {
     char json[512];
@@ -322,7 +332,7 @@ bool qzdesk_core_send_text(const char *text)
      * uses. The GUI's job is to hand the text over — `chat_text` is that
      * hand-off, and the core answers with state messages while it works. */
     written = snprintf(json, sizeof(json),
-                       "{\"type\":\"chat_text\",\"text\":\"");
+                       "{\"type\":\"chat_text\",\"request_id\":%llu,\"text\":\"", ++text_request_id);
     if (written < 0 || (size_t)written >= sizeof(json)) return false;
 
     for (const char *cursor = text; *cursor; cursor++) {
@@ -364,6 +374,26 @@ bool qzdesk_core_send_text(const char *text)
     return send_json(json);
 }
 
+bool qzdesk_core_set_timezone(const char *timezone)
+{
+    if (!timezone || !timezone[0] || strlen(timezone) > 32) return false;
+    for (const char *p = timezone; *p; p++) {
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '-' || *p == '+'))
+            return false;
+    }
+    char json[112];
+    snprintf(json, sizeof(json), "{\"type\":\"timezone\",\"value\":\"%s\"}", timezone);
+    return send_json(json);
+}
+
+bool qzdesk_core_listen(bool start)
+{
+    /* 核心只在 Listening 时才把麦克风帧上行，所以这条报文就是"能不能说话"的开关。
+     * 唤醒词进程发的也是同一对报文，两条路在核心的 handle_gui_event 里合流。 */
+    return send_json(start ? "{\"type\":\"listen\",\"state\":\"start\"}"
+                           : "{\"type\":\"listen\",\"state\":\"stop\"}");
+}
+
 bool qzdesk_core_notify_presence(bool present)
 {
     /* 有人靠近 / 离开。界面不自己播报，交给核心决定要不要让助手打个招呼 ——
@@ -383,12 +413,27 @@ static void dispatch_message(const char *json, qzdesk_core_event_cb_t callback, 
         deliver(&event, callback, user_data);
     }
     if (!json_string(json, "type", type, sizeof(type))) return;
+    if (strcmp(type, "command_ack") == 0) {
+        long long request_id = 0;
+        event.type = QZDESK_CORE_EVENT_ACK;
+        json_llong(json, "request_id", &request_id);
+        event.request_id = (unsigned long long)request_id;
+        const char *ok = qz_json_value(json, "ok");
+        event.ok = ok && strncmp(ok, "true", 4) == 0;
+        json_string(json, "command", event.command, sizeof(event.command));
+        json_string(json, "text", event.text, sizeof(event.text));
+        deliver(&event, callback, user_data);
+        return;
+    }
     if (strcmp(type, "chat") == 0) {
         event.type = QZDESK_CORE_EVENT_CHAT;
+        long long id = 0;
+        if (json_llong(json, "id", &id) && id > 0) event.id = (unsigned long long)id;
         /* user 是用户自己说的（气泡贴右侧），assistant / system 贴左侧。 */
         json_string(json, "role", event.role, sizeof(event.role));
     } else if (strcmp(type, "toast") == 0) {
         event.type = QZDESK_CORE_EVENT_TOAST;
+        json_string(json, "role", event.role, sizeof(event.role));
     } else if (strcmp(type, "activation") == 0) {
         event.type = QZDESK_CORE_EVENT_ACTIVATION;
     } else if (strcmp(type, "weather") == 0) {

@@ -6,5 +6,7 @@
 /** Root settings list, plus the WLAN, general and about pages it opens. */
 lv_obj_t *qz_settings_create(void);
 void qz_settings_set_desktop(lv_obj_t *desktop);
+void qz_settings_set_return(lv_obj_t *screen);
+void qz_settings_open_wlan(lv_obj_t *return_screen);
 
 #endif
