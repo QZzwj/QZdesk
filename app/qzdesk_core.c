@@ -320,6 +320,11 @@ static unsigned long long text_request_id;
 
 unsigned long long qzdesk_core_text_request_id(void) { return text_request_id; }
 
+bool qzdesk_core_abort_turn(void)
+{
+    return send_json("{\"type\":\"abort_turn\"}");
+}
+
 bool qzdesk_core_send_text(const char *text)
 {
     char json[512];

@@ -24,12 +24,21 @@ pub enum NetEvent {
 pub enum NetCommand {
     SendText(String),
     SendBinary(Vec<u8>),
+    AbortTurn(Option<String>, tokio::sync::oneshot::Sender<Result<(), String>>),
     /// Recreate the session so a changed Skill selection is sent during MCP
     /// initialize on the next connection.
     Reconnect,
     /// 唤醒（开始说话）时调用：只有主技能确实变了才重建会话，避免每次唤醒都断连
     RefreshSkillsIfChanged,
     EnsureSkillsReady(tokio::sync::oneshot::Sender<Result<(), String>>),
+}
+
+fn abort_message(session_id: Option<&str>) -> Value {
+    let mut value = json!({"type":"abort", "reason":"user"});
+    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+        value["session_id"] = json!(session_id);
+    }
+    value
 }
 
 // 音频参数结构体
@@ -103,7 +112,11 @@ impl NetLink {
         // 重试机制，指数退避
         let mut retry_delay = 1;
         loop {
+            let connection_started = tokio::time::Instant::now();
             if let Err(e) = self.connect_and_loop().await {
+                if connection_started.elapsed() >= tokio::time::Duration::from_secs(60) {
+                    retry_delay = 1;
+                }
                 log::error!("Connection error: {}. Retrying in {}s...", e, retry_delay);
                 let _ = self.tx.send(NetEvent::Disconnected).await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay)).await;
@@ -187,13 +200,20 @@ impl NetLink {
 
         let mut hello_seen = false;
         let mut ready_sent = false;
-        let mut skill_fetched = self.mcp_server.has_instructions();
+        let mut skill_fetched = !self.config.mcp.enabled || self.mcp_server.has_instructions() || self.mcp_server.skills_ready();
         let mut turn_waiting = false;
         let mut turn_failed = false;
+        let mut output_suppressed = false;
+        let mut mcp_tasks: tokio::task::JoinSet<(Value, Option<String>, String, bool)> = tokio::task::JoinSet::new();
         let mut skill_deadline = tokio::time::Instant::now();
         let mut ready_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
+        let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(20));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _ = heartbeat.tick() => {
+                    write.send(Message::Ping(Vec::new().into())).await?;
+                }
                 _ = ready_tick.tick() => {
                     self.ready_waiters.retain(|waiter| !waiter.is_closed());
                     if turn_waiting && !skill_fetched && !turn_failed && tokio::time::Instant::now() >= skill_deadline {
@@ -201,12 +221,26 @@ impl NetLink {
                         let _ = self.tx.send(NetEvent::SkillRequired).await;
                         log::warn!("Blocking turn after MCP Skill fetch timeout");
                     }
-                    if hello_seen && self.mcp_server.skills_ready() {
+                    if hello_seen && (!self.config.mcp.enabled || self.mcp_server.skills_ready()) {
                         if !ready_sent {
                             self.tx.send(NetEvent::Ready).await?;
                             ready_sent = true;
                         }
                         for waiter in self.ready_waiters.drain(..) { let _ = waiter.send(Ok(())); }
+                    }
+                }
+                Some(result) = mcp_tasks.join_next(), if !mcp_tasks.is_empty() => {
+                    if let Ok((payload, Some(response), session_id, wrapped)) = result {
+                        if response.is_empty() { continue; }
+                        let response_payload = serde_json::from_str::<Value>(&response).unwrap_or(Value::Null);
+                        let fetched = turn_waiting && !turn_failed && confirms_primary_skill(&payload, &response_payload);
+                        let response = if wrapped {
+                            json!({"type":"mcp", "session_id":session_id, "payload":response_payload})
+                        } else { response_payload };
+                        write.send(Message::Text(response.to_string().into())).await?;
+                        if fetched || (payload.get("method").and_then(Value::as_str) == Some("initialize") && self.mcp_server.has_instructions()) {
+                            skill_fetched = true;
+                        }
                     }
                 }
                 msg = read.next() => {
@@ -236,42 +270,21 @@ impl NetLink {
                                         _ => (None, "", false),
                                     };
                                     let handled = if let Some(payload) = payload {
-                                        let payload_str = payload.to_string();
-                                        log::info!("MCP Request (wrapped={}): {}", wrapped, payload_str);
-                                        if let Some(mcp_response) = self.mcp_server.handle_message(&payload_str).await {
-                                            if mcp_response.is_empty() {
-                                                true
-                                            } else {
-                                                let response_payload = serde_json::from_str::<Value>(&mcp_response).unwrap_or(Value::Null);
-                                                let fetched = turn_waiting && !turn_failed && confirms_primary_skill(&payload, &response_payload);
-                                                let response = if wrapped {
-                                                    json!({"type": "mcp", "session_id": session_id, "payload": response_payload})
-                                                } else {
-                                                    response_payload
-                                                };
-                                                let response_text = serde_json::to_string(&response).unwrap();
-                                                write.send(Message::Text(response_text.into())).await?;
-                                                if fetched {
-                                                    skill_fetched = true;
-                                                    log::info!("MCP skill_list returned primary skill for current turn");
-                                                }
-                                                if payload.get("method").and_then(Value::as_str) == Some("initialize")
-                                                    && self.mcp_server.has_instructions()
-                                                {
-                                                    skill_fetched = true;
-                                                    log::info!("MCP initialize sent skill instructions; session reply gate ready");
-                                                }
-                                                true
-                                            }
-                                        } else {
-                                            false
+                                        if output_suppressed && payload.get("method").and_then(Value::as_str) == Some("tools/call") {
+                                            continue;
                                         }
-                                    } else {
-                                        false
-                                    };
+                                        let server = self.mcp_server.clone();
+                                        let session_id = session_id.to_string();
+                                        mcp_tasks.spawn(async move {
+                                            let response = server.handle_message(&payload.to_string()).await;
+                                            (payload, response, session_id, wrapped)
+                                        });
+                                        true
+                                    } else { false };
 
                                     if !handled {
                                         let reply_type = parsed.as_ref().and_then(|value| value.get("type")).and_then(Value::as_str);
+                                        if output_suppressed && matches!(reply_type, Some("llm" | "tts" | "stt" | "iot")) { continue; }
                                         let is_reply = matches!(reply_type, Some("llm") | Some("tts"));
                                         if is_reply && !skill_fetched {
                                             if !turn_failed {
@@ -283,7 +296,7 @@ impl NetLink {
                                         }
                                         if reply_type == Some("tts") && parsed.as_ref().and_then(|value| value.get("state")).and_then(Value::as_str) == Some("stop") {
                                             turn_waiting = false;
-                                            skill_fetched = self.mcp_server.has_instructions();
+                                            skill_fetched = !self.config.mcp.enabled || self.mcp_server.has_instructions() || self.mcp_server.skills_ready();
                                         }
                                         // 正常信令通道处理。聊天记录由 controller
                                         // 按消息语义（用户 / 助手 / 系统）统一写入，
@@ -293,6 +306,7 @@ impl NetLink {
                                     }
                                 }
                                 Message::Binary(data) => {
+                                    if output_suppressed { continue; }
                                     if !skill_fetched {
                                         if !turn_failed {
                                             turn_failed = true;
@@ -302,6 +316,10 @@ impl NetLink {
                                     }
                                     self.tx.send(NetEvent::Binary(data.to_vec())).await?;
                                 }
+                                Message::Ping(_) => {
+                                    write.flush().await?;
+                                }
+                                Message::Pong(_) => {}
                                 Message::Close(frame) => {
                                     log::info!("Server closed connection: {:?}", frame);
                                     return Err(anyhow::anyhow!("Connection closed"));
@@ -319,8 +337,13 @@ impl NetLink {
                             if let Ok(value) = serde_json::from_str::<Value>(&text) {
                                 if value.get("type").and_then(Value::as_str) == Some("listen")
                                     && matches!(value.get("state").and_then(Value::as_str), Some("start") | Some("detect")) {
-                                    if turn_waiting { return Err(anyhow::anyhow!("Previous reply is still pending; reconnecting to isolate turns")); }
-                                    skill_fetched = self.mcp_server.has_instructions();
+                                    if turn_waiting {
+                                        log::warn!("Previous turn still pending; replacing it with protocol abort without reconnect");
+                                        mcp_tasks.abort_all();
+                                        write.send(Message::Text(abort_message(None).to_string().into())).await?;
+                                    }
+                                    output_suppressed = false;
+                                    skill_fetched = !self.config.mcp.enabled || self.mcp_server.has_instructions() || self.mcp_server.skills_ready();
                                     turn_failed = false;
                                     turn_waiting = true;
                                     skill_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
@@ -328,8 +351,18 @@ impl NetLink {
                             }
                             write.send(Message::Text(text.into())).await?;
                         }
+                        NetCommand::AbortTurn(session_id, reply) => {
+                            output_suppressed = true;
+                            turn_waiting = false;
+                            turn_failed = false;
+                            mcp_tasks = tokio::task::JoinSet::new();
+                            let result = write.send(Message::Text(abort_message(session_id.as_deref()).to_string().into())).await;
+                            let failed = result.is_err();
+                            let _ = reply.send(result.map_err(|error| format!("本地已停止，云端中断发送失败：{}", error)));
+                            if failed { return Err(anyhow::anyhow!("Abort WebSocket write failed")); }
+                        }
                         NetCommand::SendBinary(data) => {
-                            write.send(Message::Binary(data.into())).await?;
+                            if !output_suppressed { write.send(Message::Binary(data.into())).await?; }
                         }
                         NetCommand::EnsureSkillsReady(waiter) => {
                             self.ready_waiters.push(waiter);
@@ -354,5 +387,96 @@ impl NetLink {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp_gateway::tool::McpTool;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::time::{timeout, Duration};
+
+    struct SlowTool {
+        started: Arc<tokio::sync::Notify>,
+        cancelled: Arc<AtomicBool>,
+    }
+    struct CancelGuard(Arc<AtomicBool>);
+    impl Drop for CancelGuard {
+        fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+    }
+    #[async_trait::async_trait]
+    impl McpTool for SlowTool {
+        fn name(&self) -> &str { "slow" }
+        fn description(&self) -> &str { "slow test tool" }
+        fn input_schema(&self) -> Value { json!({"type":"object"}) }
+        async fn call(&self, _: Value) -> Result<Value, String> {
+            let _guard = CancelGuard(self.cancelled.clone());
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[test]
+    fn abort_protocol_has_reason_and_optional_session() {
+        assert_eq!(abort_message(None), json!({"type":"abort","reason":"user"}));
+        assert_eq!(abort_message(Some("session"))["session_id"], "session");
+        assert!(abort_message(Some("" )).get("session_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn abort_interrupts_mcp_and_keeps_session_for_next_turn() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut server = McpServer::new();
+        server.register_tool(Box::new(SlowTool { started: started.clone(), cancelled: cancelled.clone() }));
+        let mut config = Config::default();
+        config.ws_url = format!("ws://{}", listener.local_addr().unwrap()).into();
+        config.device_id = "test".into();
+        let (events, mut event_rx) = mpsc::channel(100);
+        let (commands, command_rx) = mpsc::channel(100);
+        let mut link = NetLink::new(config, events, command_rx, Arc::new(server));
+        let link_task = tokio::spawn(async move { link.connect_and_loop().await });
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        while !matches!(socket.next().await.unwrap().unwrap(), Message::Text(_)) {}
+        socket.send(Message::Text(json!({"type":"hello","session_id":"kept"}).to_string().into())).await.unwrap();
+        socket.send(Message::Text(json!({"type":"mcp","session_id":"kept","payload":{
+            "jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}
+        }}).to_string().into())).await.unwrap();
+        timeout(Duration::from_secs(1), started.notified()).await.unwrap();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        commands.send(NetCommand::AbortTurn(Some("kept".into()), reply)).await.unwrap();
+        timeout(Duration::from_secs(1), result).await.unwrap().unwrap().unwrap();
+        let abort = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                    break serde_json::from_str::<Value>(&text).unwrap();
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(abort, abort_message(Some("kept")));
+        tokio::task::yield_now().await;
+        assert!(cancelled.load(Ordering::Acquire));
+        while event_rx.try_recv().is_ok() {}
+        socket.send(Message::Text(json!({"type":"tts","state":"sentence_start","text":"old"}).to_string().into())).await.unwrap();
+        socket.send(Message::Binary(vec![1,2,3].into())).await.unwrap();
+        let _ = timeout(Duration::from_millis(100), async {
+            while let Some(event) = event_rx.recv().await {
+                assert!(!matches!(event, NetEvent::Binary(_) | NetEvent::SkillRequired | NetEvent::Disconnected), "unexpected aborted-turn event: {event:?}");
+                if let NetEvent::Text(text) = event {
+                    assert_ne!(serde_json::from_str::<Value>(&text).unwrap()["type"], "tts");
+                }
+            }
+        }).await;
+        commands.send(NetCommand::SendText(r#"{"type":"listen","state":"start"}"#.into())).await.unwrap();
+        let next = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() { break text; }
+            }
+        }).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&next).unwrap()["type"], "listen");
+        link_task.abort();
     }
 }

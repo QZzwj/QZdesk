@@ -259,10 +259,46 @@ async fn handle_connection(
         }
         return Ok(());
     }
+    if path.starts_with("/api/computer/") {
+        let peer = stream.peer_addr()?.ip();
+        let local = peer.is_loopback();
+        if header.lines().any(|line| line.to_ascii_lowercase().starts_with("origin:")) {
+            return respond(&mut stream, 403, "配对不接受浏览器请求", "text/plain").await;
+        }
+        let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+        let result = match (method.as_str(), path.as_str()) {
+            ("POST", "/api/computer/pair") => crate::computer_pairing::request(peer, &value),
+            ("POST", "/api/computer/status") => Ok(crate::computer_pairing::status(peer, &value)),
+            ("GET", "/api/computer/pending") if local => Ok(crate::computer_pairing::pending()),
+            ("POST", "/api/computer/decide") if local => crate::computer_pairing::decide(&value),
+            _ => Err("配对确认仅允许设备本机操作".into()),
+        };
+        let (status, value) = match result {
+            Ok(value) => (200, value),
+            Err(error) => (403, json!({"error":error})),
+        };
+        return respond(&mut stream, status, &value.to_string(), "application/json; charset=utf-8").await;
+    }
     let (status, content_type, response) = match (method.as_str(), path.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => (200, "text/html; charset=utf-8", PAGE.to_string()),
         /* 新打开的页面先拿一次现有记录，再接到 SSE 上：页面上看到的对话与设备
          * 屏幕上的一致，不会因为「谁先打开」而各说各话。 */
+        ("POST", "/api/chat/abort") => {
+            let (reply, result) = tokio::sync::oneshot::channel();
+            if core_tx.try_send(crate::controller::CoreCommand::AbortTurn(reply)).is_err() {
+                (503, "application/json; charset=utf-8", json!({"ok":false,"local_stopped":false,"error":"核心通道忙碌，中断未排队"}).to_string())
+            } else {
+                match tokio::time::timeout(Duration::from_secs(3), result).await {
+                    Ok(Ok(result)) => {
+                        let ok = result.is_ok();
+                        (if ok { 200 } else { 503 }, "application/json; charset=utf-8",
+                            json!({"ok":ok,"local_stopped":true,"cloud_abort_sent":ok,
+                                "error":result.err(),"message":"取消在途工具等待，但已发出的电脑动作无法撤销"}).to_string())
+                    }
+                    _ => (503, "application/json; charset=utf-8", json!({"ok":false,"error":"核心中断未确认"}).to_string()),
+                }
+            }
+        }
         ("GET", "/api/chat/history") => (
             200,
             "application/json; charset=utf-8",

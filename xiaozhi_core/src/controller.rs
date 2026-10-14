@@ -47,6 +47,7 @@ pub enum CoreCommand {
     TextAsSpeech(String, tokio::sync::oneshot::Sender<Result<(), String>>),
     SkillsSaved,
     Status(tokio::sync::oneshot::Sender<serde_json::Value>),
+    AbortTurn(tokio::sync::oneshot::Sender<Result<(), String>>),
 }
 
 pub struct CoreController {
@@ -60,8 +61,8 @@ pub struct CoreController {
     tts: Arc<TtsService>,
     /// GUI 与 web 共用的聊天记录。
     chat: ChatHub,
-    /// 云端同一条 TTS 文本可能在多个状态事件中重复下发；只在短时间内去重。
-    last_assistant: Option<(String, Instant)>,
+    /// 当前用户轮次已显示的助手文本。
+    last_assistant: Vec<String>,
     /// 本机刚合成上行的那段文字（已归一化）与时间。
     ///
     /// 云端会对我们上行的音频再做一次 ASR，并把识别结果当成"用户说了话"回传
@@ -79,6 +80,7 @@ pub struct CoreController {
     speech_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     skills_pending: bool,
     new_chat_pending: bool,
+    output_suppressed: bool,
 }
 
 /// 归一化聊天文本：只保留字母和数字（各语种的文字都算字母），丢掉空白、标点
@@ -146,7 +148,7 @@ impl CoreController {
             gui_bridge,
             tts,
             chat,
-            last_assistant: None,
+            last_assistant: Vec::new(),
             injected_text: None,
             weather,
             performance,
@@ -154,6 +156,7 @@ impl CoreController {
             speech_task: None,
             skills_pending: false,
             new_chat_pending: false,
+            output_suppressed: false,
         }
     }
 
@@ -173,7 +176,7 @@ impl CoreController {
         if role != ChatRole::Assistant {
             /* 用户说了话、或核心插了一条提示，说明上一句回复已经翻篇：助手再
              * 说出同样的话就是新的一句，不该被当作重复吃掉。 */
-            self.last_assistant = None;
+            self.last_assistant.clear();
         }
         if let Some(event) = self.chat.push(role, &text) {
             if let Err(error) = self.gui_bridge.send_message(&event).await {
@@ -182,22 +185,12 @@ impl CoreController {
         }
     }
 
-    /// 助手回复是否该记。
-    ///
-    /// 云端对同一句回复会下发两遍（`sentence_start` 与 `sentence_end` 各带一次
-    /// text，实测相隔 1~4 秒），这里吃掉「时间窗内与上一条助手记录一字不差」
-    /// 的那种；中间隔着用户消息就不算重复（`push_chat` 会把上一条清掉）。
     fn assistant_text_is_new(&mut self, text: &str) -> bool {
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() || self.last_assistant.iter().any(|seen| seen == text) {
             return false;
         }
-        if let Some((last, at)) = &self.last_assistant {
-            if last == text && at.elapsed() < Duration::from_secs(5) {
-                return false;
-            }
-        }
-        self.last_assistant = Some((text.to_string(), Instant::now()));
+        self.last_assistant.push(text.to_string());
         true
     }
 
@@ -257,6 +250,7 @@ impl CoreController {
             }
             NetEvent::Disconnected => {
                 log::info!("WebSocket Disconnected");
+                self.current_session_id = None;
                 self.cancel_speech().await;
                 self.state = SystemState::NetworkError;
                 if let Err(e) = self.gui_bridge.send_message(r#"{"state": 4}"#).await {
@@ -285,6 +279,9 @@ impl CoreController {
             }
         }
 
+        if self.output_suppressed && matches!(msg.msg_type.as_str(), "tts" | "llm" | "stt" | "iot") {
+            return;
+        }
         match msg.msg_type.as_str() {
             "hello" => {
                 // Do not enter cloud `auto` listen immediately.  That mode
@@ -443,6 +440,7 @@ impl CoreController {
 
     // 处理来自服务器的音频数据
     async fn process_server_audio(&mut self, data: Vec<u8>) {
+        if self.output_suppressed { return; }
         if self.state != SystemState::Speaking {
             self.state = SystemState::Speaking;
             if let Err(e) = self.gui_bridge.send_message(r#"{"state": 6}"#).await {
@@ -483,8 +481,11 @@ impl CoreController {
         if text.is_empty() || text.len() > 4096 {
             return Err("消息不能为空且最多 4096 字节".to_string());
         }
+        if self.state == SystemState::NetworkError {
+            return Err("云端未连接或会话尚未就绪，请检查网络与核心连接日志".to_string());
+        }
         if self.speech_task.is_some() || self.state != SystemState::Idle {
-            return Err("云端未就绪或当前对话忙碌，请稍后重试".to_string());
+            return Err("当前对话正在处理，请先停止本轮或等待回复结束".to_string());
         }
 
         // 先把这条记进聊天记录：不管文字来自 GUI 输入框还是 web 控制台，两端都
@@ -503,6 +504,7 @@ impl CoreController {
             self.push_chat(ChatRole::System, "当前对话忙碌，请结束当前操作后重试；未执行新的语音上行").await;
             return;
         }
+        self.output_suppressed = false;
         self.injected_text = Some((chat_text_key(&text), Instant::now()));
         self.should_mute_mic = true;
         self.state = SystemState::Listening;
@@ -585,6 +587,27 @@ impl CoreController {
         }
     }
 
+    pub async fn abort_turn(&mut self) -> Result<(), String> {
+        self.output_suppressed = true;
+        if let Some(task) = self.speech_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.audio_bridge.flush_playback();
+        self.should_mute_mic = false;
+        self.injected_text = None;
+        self.last_assistant.clear();
+        if self.state != SystemState::NetworkError { self.state = SystemState::Idle; }
+        let state = if self.state == SystemState::NetworkError { 4 } else { 3 };
+        let _ = self.gui_bridge.send_message(&serde_json::json!({"state":state}).to_string()).await;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.net_tx.try_send(NetCommand::AbortTurn(self.current_session_id.clone(), reply))
+            .map_err(|_| "本地已停止，云端中断未发送：网络通道不可用或忙碌".to_string())?;
+        tokio::time::timeout(Duration::from_secs(2), result).await
+            .map_err(|_| "本地已停止，云端中断发送未确认".to_string())?
+            .map_err(|_| "本地已停止，云端中断发送通道已关闭".to_string())?
+    }
+
     pub async fn cancel_speech(&mut self) {
         if let Some(task) = self.speech_task.take() {
             task.abort();
@@ -643,6 +666,15 @@ impl CoreController {
          * Connected notification.  Reply to an explicit status request so
          * the page can synchronize its current state over UDP. */
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg) {
+            if value.get("type").and_then(|item| item.as_str()) == Some("abort_turn") {
+                let result = self.abort_turn().await;
+                let _ = self.gui_bridge.send_message(&serde_json::json!({
+                    "type":"command_ack", "command":"abort_turn", "request_id":value.get("request_id"),
+                    "ok":result.is_ok(), "local_stopped":true, "cloud_abort_sent":result.is_ok(),
+                    "text":result.err().unwrap_or_else(|| "本轮已停止；已发出的电脑动作无法撤销".into()),
+                }).to_string()).await;
+                return;
+            }
             if value.get("type").and_then(|item| item.as_str()) == Some("new_chat") {
                 let result = if self.state != SystemState::Idle || self.speech_task.is_some() {
                     Err("请等待当前对话结束后再新建聊天".to_string())
@@ -653,7 +685,7 @@ impl CoreController {
                 if result.is_ok() {
                     self.new_chat_pending = true;
                     self.current_session_id = None;
-                    self.last_assistant = None;
+                    self.last_assistant.clear();
                     self.injected_text = None;
                     self.state = SystemState::NetworkError;
                     let _ = self.gui_bridge.send_message(r#"{"state":4}"#).await;
@@ -711,6 +743,7 @@ impl CoreController {
                 }
                 self.cancel_speech().await;
                 if start {
+                    self.output_suppressed = false;
                     self.state = SystemState::Listening;
                     /* 用户自己开口了：接下来那条 stt 是真人说话，必须记录。
                      * 不摘掉上一轮打字留下的回声标记，这一句会被当成回显丢掉。 */

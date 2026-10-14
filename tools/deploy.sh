@@ -116,7 +116,9 @@ if [ "$want_ui" = 1 ] || [ "$want_core" = 1 ] || [ "$push_init" = 1 ] || [ "$s30
         [ -f "$src" ] || die "找不到 $src"
         local name; name=$(basename "$dst")
         say "推 $(basename "$src") -> $dst ($(du -h "$src" | cut -f1))"
-        adb_ push -q "$src" "$STAGE/$name" >/dev/null
+        local adb_src=$src
+        if [[ "$ADB" == *.exe ]]; then adb_src=$(wslpath -w "$src"); fi
+        adb_ push "$adb_src" "$STAGE/$name" >/dev/null
         adb_ shell "mv -f $STAGE/$name $dst && chmod $mode $dst && sync" >/dev/null
     }
 fi

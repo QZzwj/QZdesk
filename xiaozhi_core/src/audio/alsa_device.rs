@@ -45,7 +45,7 @@ fn open_pcm(
     period_size: Option<usize>,
     dir_name: &str,
 ) -> Result<(PCM, AlsaParams)> {
-    let pcm = PCM::new(device, direction, false)
+    let pcm = PCM::new(device, direction, direction == Direction::Playback)
         .with_context(|| format!("Failed to open PCM device '{}' for {}", device, dir_name))?;
 
     // 1. 动态探测与配置硬件参数 (HwParams)

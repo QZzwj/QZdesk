@@ -171,7 +171,7 @@ static void hero_card(lv_obj_t *parent)
     lv_obj_align(face, LV_ALIGN_LEFT_MID, 18, 0);
     qz_face_set_state(face, QZ_FACE_IDLE);
 
-    lv_obj_t *title = qz_text(card, "AI 助手", 30, qz_color(QZ_TEXT));       /* 实机 20 */
+    lv_obj_t *title = qz_text(card, "QZdesk助手", 30, qz_color(QZ_TEXT));       /* 实机 20 */
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 148, 28);
     lv_obj_t *hint = qz_text(card, "点击开始对话", 20, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 148, 72);

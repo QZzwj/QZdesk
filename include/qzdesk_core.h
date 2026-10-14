@@ -182,6 +182,8 @@ bool qzdesk_core_new_chat(void);
  */
 bool qzdesk_core_send_text(const char *text);
 unsigned long long qzdesk_core_text_request_id(void);
+/** 请求核心停止当前助手回合，发送 `{"type":"abort_turn"}`。 */
+bool qzdesk_core_abort_turn(void);
 
 /**
  * 告诉核心"用户可以说话了"（push-to-talk 按下 / 松开）。

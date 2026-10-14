@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use anyhow::Result;
 
@@ -33,6 +33,7 @@ pub fn play_thread(
     config: &AudioConfig,
     mut opus_rx: mpsc::Receiver<PlaybackData>,
     running: &AtomicBool,
+    generation: &AtomicU64,
 ) -> Result<()> {
     // 1. Open ALSA playback device with configurable sample rate, channels, and period size
     let period_size_opt = if config.playback_period_size > 0 {
@@ -64,12 +65,26 @@ pub fn play_thread(
         _period_size,
     );
 
+    let mut active_generation = generation.load(Ordering::Acquire);
     while running.load(Ordering::Relaxed) {
-        // Block until we receive an audio packet (or channel closes)
-        match opus_rx.blocking_recv() {
-            Some(audio_data) => {
+        let current = generation.load(Ordering::Acquire);
+        if current != active_generation {
+            pcm.drop()?;
+            pcm.prepare()?;
+            decoder = create_decoder(config, actual_rate, actual_channels)?;
+            active_generation = current;
+        }
+        match opus_rx.try_recv() {
+            Ok(audio_data) => {
                 let pcm_data = match audio_data {
-                    PlaybackData::Compressed(data) => decoder.decode(&data),
+                    PlaybackData::Compressed { data, generation: packet_generation } => {
+                        if packet_generation != generation.load(Ordering::Acquire) { continue; }
+                        decoder.decode(&data)
+                    }
+                    PlaybackData::Flush(flush_generation) => {
+                        if flush_generation == active_generation { continue; }
+                        continue;
+                    }
                 };
                 match pcm_data {
                     Ok(pcm_data) => {
@@ -83,11 +98,15 @@ pub fn play_thread(
                         let mut retry_count = 0u32;
 
                         while frames_written < total_frames {
+                            if generation.load(Ordering::Acquire) != active_generation { break; }
                             let offset = frames_written * actual_channels as usize;
                             match io.writei(&pcm_data[offset..]) {
                                 Ok(n) => {
                                     frames_written += n;
                                     retry_count = 0; // 成功写入，重置重试计数
+                                }
+                                Err(e) if e.errno() == libc::EAGAIN => {
+                                    std::thread::sleep(std::time::Duration::from_millis(5));
                                 }
                                 Err(e) => {
                                     log::warn!("ALSA XRUN or error: {}, recovering...", e);
@@ -120,8 +139,8 @@ pub fn play_thread(
                     }
                 }
             }
-            None => {
-                // Channel closed, exit playback
+            Err(mpsc::error::TryRecvError::Empty) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
                 log::info!("Playback channel closed");
                 break;
             }

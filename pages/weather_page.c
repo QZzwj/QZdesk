@@ -113,7 +113,7 @@ static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int width, int height
     lv_obj_t *card = lv_obj_create(parent);
     lv_obj_set_size(card, width, height);
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, y);
-    lv_obj_set_style_radius(card, QZ_RADIUS_CARD, 0);
+    lv_obj_set_style_radius(card, 16, 0);
     qz_style_plate(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x142C40), 0);
     lv_obj_set_style_bg_grad_color(card, lv_color_hex(0x0F2334), 0);
@@ -132,13 +132,18 @@ static void build_toolbar(void)
     lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 46);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
+    lv_obj_set_style_radius(toolbar, 16, 0);
+    lv_obj_set_style_border_width(toolbar, 0, 0);
+    lv_obj_set_style_shadow_width(toolbar, 0, 0);
+    lv_obj_set_style_pad_all(toolbar, 0, 0);
+    lv_obj_clear_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, on_back, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "桌面气象站", 18, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *title = qz_text(toolbar, "桌面气象站", 20, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 58, 0);
 
     refresh_button = qz_icon_button(toolbar, LV_SYMBOL_REFRESH, 40);
     lv_obj_align(refresh_button, LV_ALIGN_RIGHT_MID, -8, 0);

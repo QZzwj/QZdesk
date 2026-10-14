@@ -248,6 +248,15 @@ static void rebuild(void)
         char page_text[32];
         snprintf(page_text, sizeof(page_text), "%d / %d", list_page + 1, pages);
         lv_label_set_text(list_page_label, page_text);
+        if (pages == 1) {
+            lv_obj_add_flag(list_previous, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(list_next, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(list_page_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(list_previous, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(list_next, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(list_page_label, LV_OBJ_FLAG_HIDDEN);
+        }
         if (list_page == 0) lv_obj_add_state(list_previous, LV_STATE_DISABLED);
         else lv_obj_remove_state(list_previous, LV_STATE_DISABLED);
         if (list_page == pages - 1) lv_obj_add_state(list_next, LV_STATE_DISABLED);
@@ -280,9 +289,11 @@ static void rebuild(void)
     for (int i = first; i < end; i++) {
         const qz_skill_t *skill = &skills[i];
         lv_obj_t *row = lv_obj_create(list_card);
-        lv_obj_set_size(row, lv_pct(100), 140);
+        lv_obj_set_size(row, lv_pct(100), 112);
         qz_style_row(row);
-        lv_obj_set_style_radius(row, 0, 0);
+        qz_obj_set_bg_color(row, QZ_CARD, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(row, 16, 0);
         lv_obj_set_style_border_width(row, 1, 0);
         qz_obj_set_border_color(row, QZ_SEPARATOR, 0);
         lv_obj_set_style_border_opa(row, (lv_opa_t)140, 0);
@@ -301,7 +312,7 @@ static void rebuild(void)
                                                                   : QZ_TEXT_SECONDARY;
         lv_obj_t *pill = lv_obj_create(row);
         lv_obj_set_size(pill, qz_compact() ? 74 : 54, qz_compact() ? 30 : 20);
-        lv_obj_align(pill, LV_ALIGN_LEFT_MID, CARD_PAD, 0);
+        lv_obj_align(pill, LV_ALIGN_TOP_RIGHT, -18, 16);
         lv_obj_set_style_radius(pill, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(pill, qz_color(pill_color), 0);
         lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
@@ -313,11 +324,13 @@ static void rebuild(void)
                                             qz_color(pill_text));
         lv_obj_center(pill_text_label);
 
-        lv_obj_t *name = qz_text(row, skill->name, qz_compact() ? 16 : 13, qz_color(QZ_TEXT));
-        lv_obj_set_width(name, CONTENT_W - CARD_PAD * 2 - (qz_compact() ? 116 : 96));
-        lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
-        lv_obj_align(name, LV_ALIGN_LEFT_MID,
-                     CARD_PAD + (qz_compact() ? 86 : 62), 0);
+        lv_obj_t *name = qz_text(row, skill->name, 22, qz_color(QZ_TEXT));
+        lv_obj_set_width(name, CONTENT_W - 130);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_obj_set_height(name, 32);
+        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 18, 18);
+        lv_obj_t *hint = qz_text(row, "点击查看与切换角色", 14, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 18, -18);
 
         lv_obj_t *chev = qz_chevron(row, qz_color(QZ_TEXT_TERTIARY), 14);
         lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -CARD_PAD, 0);
@@ -647,13 +660,18 @@ lv_obj_t *qz_skill_page_create(lv_obj_t *apps_screen)
     lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 48);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
+    lv_obj_set_style_radius(toolbar, 16, 0);
+    lv_obj_set_style_border_width(toolbar, 0, 0);
+    lv_obj_set_style_shadow_width(toolbar, 0, 0);
+    lv_obj_set_style_pad_all(toolbar, 0, 0);
+    lv_obj_clear_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, back_clicked, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "技能", 15, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_CENTER, -35, 0);
+    lv_obj_t *title = qz_text(toolbar, "技能", 20, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 58, 0);
     lv_obj_t *companion = qz_button(toolbar, "陪伴", 68, 40);
     lv_obj_align(companion, LV_ALIGN_RIGHT_MID, -58, 0);
     lv_obj_add_event_cb(companion, companion_open, LV_EVENT_CLICKED, NULL);
@@ -663,17 +681,19 @@ lv_obj_t *qz_skill_page_create(lv_obj_t *apps_screen)
     lv_obj_add_event_cb(refresh, refresh_clicked, LV_EVENT_CLICKED, NULL);
 
     summary_label = qz_text(skill_screen, "--", qz_compact() ? 16 : 12, qz_color(QZ_TEXT));
-    lv_obj_align(summary_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 58);
+    lv_obj_align(summary_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER + 4, 68);
     service_label = qz_text(skill_screen, "", 10, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_set_width(service_label, CONTENT_W);
-    lv_label_set_long_mode(service_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(service_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 80);
+    lv_obj_set_width(service_label, CONTENT_W - 8);
+    lv_label_set_long_mode(service_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(service_label, 20);
+    lv_obj_align(service_label, LV_ALIGN_TOP_LEFT, QZ_GUTTER + 4, 232);
 
     list_card = lv_obj_create(skill_screen);
     lv_obj_set_size(list_card, CONTENT_W, 144);
-    lv_obj_align(list_card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 106);
-    lv_obj_set_style_radius(list_card, QZ_RADIUS_CARD, 0);
-    qz_style_plate(list_card);
+    lv_obj_align(list_card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 104);
+    lv_obj_set_style_radius(list_card, 16, 0);
+    lv_obj_set_style_bg_opa(list_card, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list_card, 0, 0);
     lv_obj_set_style_pad_all(list_card, 0, 0);
     lv_obj_set_style_pad_row(list_card, 0, 0);
     lv_obj_set_flex_flow(list_card, LV_FLEX_FLOW_COLUMN);

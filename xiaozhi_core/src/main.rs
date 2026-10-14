@@ -3,6 +3,8 @@ mod audio;
 mod audio_bridge;
 mod config;
 mod companion;
+mod computer;
+mod computer_pairing;
 mod controller;
 mod gui_bridge;
 mod logbuf;
@@ -153,6 +155,13 @@ async fn main() -> anyhow::Result<()> {
     for care in [false, true] {
         mcp_server.register_tool(Box::new(companion::CompanionTool { store: companion_store.clone(), care }));
     }
+    mcp_server.register_tool(Box::new(computer::PairedComputer));
+    mcp_server.register_tool(Box::new(computer::ComputerAction));
+    tokio::spawn(async {
+        if let Err(error) = computer_pairing::discover().await {
+            log::warn!("电脑配对发现服务不可用：{}", error);
+        }
+    });
     let mcp_server = Arc::new(mcp_server);
 
     // 创建通道，用于组件间通信
@@ -375,6 +384,10 @@ async fn main() -> anyhow::Result<()> {
                 match command {
                     CoreCommand::TextAsSpeech(text, reply) => {
                         let result = controller.send_text_as_speech(text).await;
+                        let _ = reply.send(result);
+                    }
+                    CoreCommand::AbortTurn(reply) => {
+                        let result = controller.abort_turn().await;
                         let _ = reply.send(result);
                     }
                     CoreCommand::SkillsSaved => controller.mark_skills_pending(),

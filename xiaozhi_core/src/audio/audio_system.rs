@@ -3,7 +3,7 @@
 //! Uses std::thread (NOT tokio tasks) for real-time audio I/O to avoid
 //! contention with async network tasks.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc;
@@ -85,6 +85,7 @@ impl AudioSystem {
         config: AudioConfig,
         opus_tx: mpsc::Sender<Vec<u8>>,
         opus_rx: mpsc::Receiver<PlaybackData>,
+        playback_generation: Arc<AtomicU64>,
     ) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
 
@@ -132,7 +133,7 @@ impl AudioSystem {
                 .spawn(move || {
                     // Small delay to let capture device initialize first
                     thread::sleep(std::time::Duration::from_secs(1));
-                    if let Err(e) = play_thread(&config, opus_rx, &running) {
+                    if let Err(e) = play_thread(&config, opus_rx, &running, &playback_generation) {
                         log::error!("Playback thread error: {}", e);
                     }
                 })?

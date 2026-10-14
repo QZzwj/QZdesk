@@ -31,10 +31,6 @@ static lv_obj_t *wlan_page_summary;
 static lv_obj_t *wlan_row_summary;
 static lv_obj_t *wlan_toggle;
 static lv_obj_t *wlan_list;
-static lv_obj_t *wlan_page_value;
-static lv_obj_t *wlan_previous;
-static lv_obj_t *wlan_next;
-static int wlan_page;
 static lv_obj_t *time_value;
 static lv_obj_t *timezone_value;
 static lv_obj_t *dark_mode_value;
@@ -91,13 +87,18 @@ static lv_obj_t *page_toolbar(lv_obj_t *screen, const char *title, lv_obj_t *bac
     lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, QZ_TOOLBAR_H + 2);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 4);
     qz_style_toolbar(toolbar);
+    lv_obj_set_style_radius(toolbar, 16, 0);
+    lv_obj_set_style_border_width(toolbar, 0, 0);
+    lv_obj_set_style_shadow_width(toolbar, 0, 0);
+    lv_obj_set_style_pad_all(toolbar, 0, 0);
+    lv_obj_clear_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, go_back, LV_EVENT_CLICKED, back_target);
 
-    lv_obj_t *label = qz_text(toolbar, title, 15, qz_color(QZ_TEXT));
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *label = qz_text(toolbar, title, 20, qz_color(QZ_TEXT));
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 58, 0);
     return toolbar;
 }
 
@@ -113,6 +114,8 @@ static lv_obj_t *section_card(lv_obj_t *parent, int y, int height, bool interact
         lv_obj_set_style_pad_all(card, 0, 0);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     }
+    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_shadow_width(card, 0, 0);
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, y);
     return card;
 }
@@ -136,17 +139,17 @@ static lv_obj_t *group_row(lv_obj_t *parent, int y, int height, const char *symb
     lv_obj_center(glyph);
 
     const int32_t text_x = CARD_PAD + icon_size + 10;
-    lv_obj_t *title_label = qz_text(row, title, qz_compact() ? 16 : 14, qz_color(QZ_TEXT));
+    lv_obj_t *title_label = qz_text(row, title, 18, qz_color(QZ_TEXT));
     if (value)
-        lv_obj_align(title_label, LV_ALIGN_TOP_LEFT, text_x, 9);
+        lv_obj_align(title_label, LV_ALIGN_LEFT_MID, text_x, -13);
     else
-        lv_obj_align(title_label, LV_ALIGN_LEFT_MID, text_x, value ? -9 : 0);
+        lv_obj_align(title_label, LV_ALIGN_LEFT_MID, text_x, 0);
 
     if (value) {
-        lv_obj_t *value_label = qz_text(row, value, 11, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_set_width(value_label, CONTENT_W - text_x - CARD_PAD - 16);
-        lv_label_set_long_mode(value_label, LV_LABEL_LONG_WRAP);
-        lv_obj_align(value_label, LV_ALIGN_TOP_LEFT, text_x, 30);
+        lv_obj_t *value_label = qz_text(row, value, 14, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_set_width(value_label, CONTENT_W - text_x - CARD_PAD - 24);
+        lv_label_set_long_mode(value_label, LV_LABEL_LONG_DOT);
+        lv_obj_align(value_label, LV_ALIGN_LEFT_MID, text_x, 13);
         if (value_out) *value_out = value_label;
     }
     lv_obj_t *chev = qz_chevron(row, qz_color(QZ_TEXT_TERTIARY), 14);
@@ -438,46 +441,6 @@ static lv_obj_t *lock_glyph(lv_obj_t *parent, lv_color_t color)
     return box;
 }
 
-/* A finite page keeps every result inside the screen, even when a scan returns
- * the maximum number of access points. Long SSIDs wrap inside their own row. */
-static int wlan_rows_per_page(void)
-{
-    for (int i = 0; i < access_point_count; i++) {
-        lv_point_t size;
-        lv_text_get_size(&size, access_points[i].ssid, qz_font_size(13), 0, 0,
-                         qz_scale_x(CONTENT_W - 2 * CARD_PAD - 32 - 54), LV_TEXT_FLAG_NONE);
-        if (size.y > qz_scale_y(qz_compact() ? 56 : 44) - 4) return 1;
-    }
-    return qz_compact() ? 2 : 3;
-}
-
-static void wlan_update_pager(int count)
-{
-    int pages = (count + wlan_rows_per_page() - 1) / wlan_rows_per_page();
-    if (pages < 1) pages = 1;
-    if (wlan_page >= pages) wlan_page = pages - 1;
-    if (wlan_page < 0) wlan_page = 0;
-    if (wlan_page_value) {
-        char text[32];
-        snprintf(text, sizeof(text), "%d / %d", wlan_page + 1, pages);
-        lv_label_set_text(wlan_page_value, text);
-    }
-    if (wlan_previous) {
-        if (wlan_page == 0) lv_obj_add_state(wlan_previous, LV_STATE_DISABLED);
-        else lv_obj_remove_state(wlan_previous, LV_STATE_DISABLED);
-    }
-    if (wlan_next) {
-        if (wlan_page + 1 >= pages) lv_obj_add_state(wlan_next, LV_STATE_DISABLED);
-        else lv_obj_remove_state(wlan_next, LV_STATE_DISABLED);
-    }
-}
-
-static void wlan_page_clicked(lv_event_t *event)
-{
-    wlan_page += (int)(intptr_t)lv_event_get_user_data(event);
-    lv_async_call(wlan_rebuild_async, NULL);
-}
-
 static void refresh_wlan_summary(void)
 {
     /* The checkmark and this label both ask the supplicant, so they can never
@@ -525,7 +488,6 @@ static void rebuild_wlan_list(void)
 {
     if (!wlan_list) return;
     lv_obj_clean(wlan_list);
-    wlan_update_pager(access_point_count);
 
     if (access_point_count == 0) {
         /* Echo-Mate 的做法：空状态把"为什么没有列表"说清楚，而不是一句含糊的空话 */
@@ -554,8 +516,6 @@ static void rebuild_wlan_list(void)
     if (connected[0] == '\0') wlan_browse = false;   /* 断开了就回到正常列表 */
 
     if (connected[0] != '\0' && !wlan_browse) {
-        wlan_page = 0;
-        wlan_update_pager(0);
         /* Echo-Mate 的已连接视图：列表换成「当前网络 + 搜索其他 WiFi」两行 */
         char title[96];
         lv_obj_t *cur = lv_obj_create(wlan_list);
@@ -581,14 +541,18 @@ static void rebuild_wlan_list(void)
         return;
     }
 
-    int first = wlan_page * wlan_rows_per_page();
-    int last = first + wlan_rows_per_page();
-    if (last > access_point_count) last = access_point_count;
-    for (int i = first; i < last; i++) {
+    for (int i = 0; i < access_point_count; i++) {
         const qz_wifi_ap_t *ap = &access_points[i];
         lv_obj_t *row = lv_obj_create(wlan_list);
-        const int row_height = wlan_rows_per_page() == 1 ? (qz_compact() ? 108 : 128)
-                                                       : (qz_compact() ? 56 : 44);
+        lv_point_t name_size;
+        lv_text_get_size(&name_size, ap->ssid, qz_font_size(13), 0, 0,
+                         qz_scale_x(CONTENT_W - 2 * CARD_PAD - 32 - 54),
+                         LV_TEXT_FLAG_NONE);
+        const int minimum_height = qz_compact() ? 56 : 48;
+        const int panel_height = qz_scale_y(QZ_DESIGN_H);
+        const int text_height = (name_size.y * QZ_DESIGN_H + panel_height - 1) / panel_height;
+        const int row_height = text_height + 16 > minimum_height
+                             ? text_height + 16 : minimum_height;
         lv_obj_set_size(row, lv_pct(100), row_height);
         qz_style_row(row);
         lv_obj_set_style_radius(row, 0, 0);
@@ -637,7 +601,6 @@ static void wlan_browse_clicked(lv_event_t *event)
 {
     (void)event;
     wlan_browse = true;
-    wlan_page = 0;
     wlan_signature[0] = '\0';
     wlan_scanning = true;
     access_point_count = 0;
@@ -809,7 +772,6 @@ static void wlan_screen_loaded(lv_event_t *event)
     slider_sync(&backlight_binding, qz_backlight_level());
 
     access_point_count = 0;
-    wlan_page = 0;
     wlan_scanning = true;
     wlan_signature[0] = '\0';
     rebuild_wlan_list();
@@ -991,23 +953,16 @@ static void build_wlan_screen(void)
     lv_obj_align(header, LV_ALIGN_TOP_LEFT, QZ_GUTTER + 4, qz_compact() ? 136 : 118);
 
     lv_obj_t *list_card = section_card(wlan_screen, qz_compact() ? 156 : 136,
-                                      qz_compact() ? 116 : 136, false);
+                                      qz_compact() ? 156 : 176, false);
     lv_obj_set_style_clip_corner(list_card, true, 0);
     wlan_list = list_card;
     lv_obj_set_flex_flow(wlan_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_clear_flag(wlan_list, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(wlan_list, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(wlan_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(wlan_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(wlan_list, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_row(wlan_list, 0, 0);
     lv_obj_set_flex_align(wlan_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
-    wlan_previous = qz_button(wlan_screen, "上一页", 112, 40);
-    lv_obj_align(wlan_previous, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 276);
-    lv_obj_add_event_cb(wlan_previous, wlan_page_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
-    wlan_next = qz_button(wlan_screen, "下一页", 112, 40);
-    lv_obj_align(wlan_next, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 276);
-    lv_obj_add_event_cb(wlan_next, wlan_page_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)1);
-    wlan_page_value = qz_text(wlan_screen, "1 / 1", 14, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(wlan_page_value, LV_ALIGN_TOP_MID, 0, 286);
     lv_obj_add_event_cb(wlan_screen, wlan_screen_loaded, LV_EVENT_ALL, NULL);
     /* The supplicant only scans on request and the UI must not block on it, so
      * results are polled while the page is on screen. */
@@ -1056,7 +1011,7 @@ static void slider_row(lv_obj_t *card, int y, const char *glyph, int initial,
                        slider_binding_t *binding)
 {
     lv_obj_t *row = lv_obj_create(card);
-    lv_obj_set_size(row, lv_pct(100), 32);
+    lv_obj_set_size(row, lv_pct(100), 44);
     lv_obj_align(row, LV_ALIGN_TOP_LEFT, 0, y);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
@@ -1064,15 +1019,15 @@ static void slider_row(lv_obj_t *card, int y, const char *glyph, int initial,
     lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *icon = qz_symbol(row, glyph, 15, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *title = qz_text(row, glyph, 14, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *value = qz_text(row, "0%", 12, qz_color(QZ_TEXT));
     lv_obj_align(value, LV_ALIGN_RIGHT_MID, 0, 0);
 
     lv_obj_t *slider = lv_slider_create(row);
-    lv_obj_set_size(slider, CONTENT_W - 2 * CARD_PAD - 22 - 40, 26);
-    lv_obj_align(slider, LV_ALIGN_LEFT_MID, 22, 0);
+    lv_obj_set_size(slider, CONTENT_W - 32 - 108 - 56, 26);
+    lv_obj_align(slider, LV_ALIGN_LEFT_MID, 108, 0);
     lv_slider_set_range(slider, 0, 100);
     qz_style_slider(slider);
     if (binding) {
@@ -1335,7 +1290,9 @@ static void build_general_screen(void)
      * In compact mode each settings row remains 24 actual pixels high. */
     const int settings_row_h = 32;
     lv_obj_t *card = section_card(general_screen, 52, 158, false);
-    lv_obj_set_style_pad_all(card, 10, 0);
+    lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_set_style_pad_top(card, 12, 0);
+    lv_obj_set_style_pad_bottom(card, 12, 0);
 
     /* Start from what the hardware reports; fall back to a neutral default on
      * machines without a mixer or a backlight node. */
@@ -1344,29 +1301,14 @@ static void build_general_screen(void)
     if (volume < 0) volume = 65;
     if (backlight < 0) backlight = 40;
 
-    lv_obj_t *volume_title = qz_text(card, "声音", 12, qz_color(QZ_TEXT));
-    lv_obj_align(volume_title, LV_ALIGN_TOP_LEFT, 0, 0);
     volume_binding.apply = qz_volume_set;
-    slider_row(card, 14, LV_SYMBOL_VOLUME_MAX, volume, &volume_binding);
+    slider_row(card, 0, "音量", volume, &volume_binding);
 
-    lv_obj_t *sep = qz_separator(card, CONTENT_W - 2 * 10, false);
-    lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 42);
-
-    lv_obj_t *brightness_title = qz_text(card, "背光", 12, qz_color(QZ_TEXT));
-    lv_obj_align(brightness_title, LV_ALIGN_TOP_LEFT, 0, 44);
     backlight_binding.apply = qz_backlight_set;
-    slider_row(card, 60, LV_SYMBOL_TINT, backlight, &backlight_binding);
+    slider_row(card, 44, "亮度", backlight, &backlight_binding);
 
-    lv_obj_t *sep_material = qz_separator(card, CONTENT_W - 2 * 10, false);
-    lv_obj_align(sep_material, LV_ALIGN_TOP_LEFT, 0, 88);
-
-    /* How much white the material puts over whatever is behind it: 100% is solid
-     * (the flat theme), lower values let the page read through the bars and the
-     * plates. Applies the moment the slider moves. */
-    lv_obj_t *material_title = qz_text(card, "材质通透度", 12, qz_color(QZ_TEXT));
-    lv_obj_align(material_title, LV_ALIGN_TOP_LEFT, 0, 90);
     material_binding.apply = qz_material_set_percent;
-    slider_row(card, 106, LV_SYMBOL_IMAGE, qz_material_percent(), &material_binding);
+    slider_row(card, 88, "不透明度", qz_material_percent(), &material_binding);
 
     /* The appearance card holds the dark-mode switch and the time / timezone
      * rows. Dark mode flips the whole palette live; the switch is the only
@@ -1473,27 +1415,25 @@ static void build_about_screen(void)
     char address[32];
     qz_device_ip(address, sizeof(address));
 
-    const int device_row_h = 36;
-    const int server_row_h = qz_compact() ? 96 : 72;
+    const int device_row_h = 40;
+    const int server_row_h = device_row_h;
     lv_obj_t *card = section_card(about_screen, qz_compact() ? 108 : 132,
-                                  3 * device_row_h + server_row_h + 4, false);
+                                  4 * device_row_h + 4, false);
     lv_obj_set_style_clip_corner(card, true, 0);
     info_row(card, 0, device_row_h, "设备型号", "QZdesk Desk", NULL);
     info_row(card, device_row_h, device_row_h, "固件版本", "1.0.0", NULL);
     lv_obj_t *server_value;
     lv_obj_t *server_row = info_row(card, 2 * device_row_h, server_row_h,
                                     "服务地址", about_server, &server_value);
-    lv_obj_align(lv_obj_get_child(server_row, 0), LV_ALIGN_TOP_LEFT, CARD_PAD, 6);
-    lv_obj_set_width(server_value, CONTENT_W - 2 * CARD_PAD);
-    lv_obj_set_style_text_align(server_value, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_align(server_value, LV_ALIGN_TOP_LEFT, CARD_PAD, 28);
     lv_obj_add_flag(server_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(server_row, open_server_modal, LV_EVENT_CLICKED, NULL);
     lv_point_t server_size;
     lv_text_get_size(&server_size, about_server, qz_font_size(12), 0, 0,
-                     qz_scale_x(CONTENT_W - 2 * CARD_PAD), LV_TEXT_FLAG_NONE);
-    if (server_size.y > qz_scale_y(server_row_h - 28) - 2)
-        lv_label_set_text(server_value, "点按查看完整地址");
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (server_size.x > qz_scale_x(CONTENT_W / 2 - 10))
+        lv_label_set_text(server_value, "点按查看");
+    lv_obj_t *server_chev = qz_chevron(server_row, qz_color(QZ_TEXT_TERTIARY), 14);
+    lv_obj_align(server_chev, LV_ALIGN_RIGHT_MID, -CARD_PAD - 2, 0);
     info_row(card, 2 * device_row_h + server_row_h, device_row_h, "当前 IP", address, NULL);
     const int separator_y[] = { device_row_h, 2 * device_row_h,
                                 2 * device_row_h + server_row_h };
@@ -1544,16 +1484,16 @@ lv_obj_t *qz_settings_create(void)
     build_general_screen();
     build_about_screen();
 
-    group_row(settings_screen, 52, 74, LV_SYMBOL_WIFI,
+    group_row(settings_screen, 56, 64, LV_SYMBOL_WIFI,
               QZ_ACCENT, QZ_TEXT_ON_ACCENT,
               "WLAN", " ", open_wlan, &wlan_row_summary);
     refresh_wlan_summary();
 
-    group_row(settings_screen, 132, 74,
+    group_row(settings_screen, 128, 64,
               LV_SYMBOL_SETTINGS, QZ_ACCENT_TINT,
-              QZ_ACCENT_DARK, "通用设置", "声音 · 背光 · 时间", open_general, NULL);
+              QZ_ACCENT_DARK, "通用设置", "显示、声音与时间", open_general, NULL);
 
-    lv_obj_t *about_row = group_row(settings_screen, 212, 74, LV_SYMBOL_FILE,
+    lv_obj_t *about_row = group_row(settings_screen, 200, 64, LV_SYMBOL_FILE,
                                     QZ_ACCENT, QZ_TEXT_ON_ACCENT,
                                     "关于", "版本与设备信息", open_about, NULL);
     /* The generic squircle icon is replaced by the "info" glyph, drawn white on
@@ -1565,8 +1505,8 @@ lv_obj_t *qz_settings_create(void)
         lv_obj_center(glyph);
     }
 
-    lv_obj_t *dnd_button = qz_button(settings_screen, qz_notifications_dnd() ? "免打扰：开" : "免打扰：关", 154, 28);
-    lv_obj_align(dnd_button, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_t *dnd_button = qz_button(settings_screen, qz_notifications_dnd() ? "免打扰：开" : "免打扰：关", CONTENT_W, 40);
+    lv_obj_align(dnd_button, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 272);
     lv_obj_add_event_cb(dnd_button, toggle_dnd, LV_EVENT_CLICKED, NULL);
     return settings_screen;
 }

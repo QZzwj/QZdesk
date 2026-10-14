@@ -71,21 +71,26 @@ static lv_obj_t *app_row(lv_obj_t *grid, int col, int row, const char *symbol,
     lv_obj_t *card = qz_card_button(grid, ROW_W, ROW_H);
     lv_obj_set_pos(card, col ? COL_RIGHT : COL_LEFT, row * (ROW_H + ROW_GAP));
 
-    lv_obj_t *icon = qz_squircle(card, 54, tile);
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 12, 0);
-    lv_obj_t *glyph = qz_symbol(icon, symbol, 28, qz_color(mark));
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_shadow_width(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *icon = qz_squircle(card, 44, tile);
+    lv_obj_align(icon, LV_ALIGN_TOP_LEFT, 14, 14);
+    lv_obj_t *glyph = qz_symbol(icon, symbol, 24, qz_color(mark));
     lv_obj_center(glyph);
 
-    lv_obj_t *name = qz_text(card, title, 22, qz_color(QZ_TEXT));
-    lv_obj_set_width(name, ROW_W - 86);
+    lv_obj_t *name = qz_text(card, title, 19, qz_color(QZ_TEXT));
+    lv_obj_set_width(name, ROW_W - 82);
     lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_align(name, LV_ALIGN_TOP_LEFT, 76, 20);
+    lv_obj_align(name, LV_ALIGN_TOP_LEFT, 68, 24);
 
-    lv_obj_t *summary = qz_text(card, detail, 16, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_set_width(summary, ROW_W - 86);
+    lv_obj_t *summary = qz_text(card, detail, 14, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(summary, ROW_W - 28);
     lv_label_set_long_mode(summary, LV_LABEL_LONG_WRAP);
-    lv_obj_align(summary, LV_ALIGN_TOP_LEFT, 76, 56);
+    lv_obj_align(summary, LV_ALIGN_BOTTOM_LEFT, 14, -14);
 
     lv_obj_add_event_cb(card, cb, LV_EVENT_CLICKED, user_data);
     qz_animate_entrance(card, (uint32_t)((col + row) * 40));
@@ -101,13 +106,20 @@ lv_obj_t *qz_apps_create(void)
     lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 46);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
+    lv_obj_set_style_radius(toolbar, 16, 0);
+    lv_obj_set_style_border_width(toolbar, 0, 0);
+    lv_obj_set_style_shadow_width(toolbar, 0, 0);
+    lv_obj_set_style_pad_all(toolbar, 0, 0);
+    lv_obj_clear_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, back_to_desktop, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "应用", 22, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *title = qz_text(toolbar, "应用", 20, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 58, 0);
+    lv_obj_t *hint = qz_text(toolbar, "向上滑动查看更多", 12, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_align(hint, LV_ALIGN_RIGHT_MID, -14, 0);
 
     lv_obj_t *grid = qz_page_scroll(apps_screen, ROW_TOP);
 

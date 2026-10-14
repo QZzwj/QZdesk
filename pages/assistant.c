@@ -32,6 +32,8 @@ static lv_obj_t *mode_button_text;
 static lv_obj_t *mode_button_icon;
 static lv_obj_t *state_label;
 static lv_obj_t *state_dot;
+static lv_obj_t *session_notice;
+static lv_obj_t *session_notice_label;
 static lv_obj_t *desktop_screen;
 static lv_obj_t *typing_bubble;
 static lv_timer_t *typing_timer;
@@ -46,6 +48,8 @@ static uint32_t request_started_at;
 static unsigned long long pending_text_id;
 static uint32_t pending_text_at;
 static char pending_draft[241];
+static bool abort_pending;
+static uint32_t abort_started_at;
 
 /* ------------------------------------------------------------------------- *
  * Helpers
@@ -206,13 +210,72 @@ static void add_typing_bubble(void)
  * Core events
  * ------------------------------------------------------------------------- */
 
+static bool is_session_progress(const char *text)
+{
+    return text && (strstr(text, "正在协商") || strstr(text, "正在同步") ||
+                    strstr(text, "正在连接云端") || strstr(text, "正在重建会话"));
+}
+
+static void show_session_notice(const char *text)
+{
+    if (!chat_view) return;
+    if (!session_notice) {
+        session_notice = lv_obj_create(chat_view);
+        lv_obj_set_size(session_notice, QZ_DESIGN_W - 32, 48);
+        lv_obj_align(session_notice, LV_ALIGN_TOP_MID, 0, CHAT_TOP + 4);
+        qz_style_glass(session_notice);
+        lv_obj_set_style_radius(session_notice, 12, 0);
+        lv_obj_set_style_pad_all(session_notice, 8, 0);
+        lv_obj_set_style_pad_column(session_notice, 10, 0);
+        lv_obj_set_flex_flow(session_notice, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(session_notice, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(session_notice, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t *spinner = lv_spinner_create(session_notice);
+        lv_obj_set_size(spinner, 22, 22);
+        lv_spinner_set_anim_params(spinner, 1000, 90);
+        session_notice_label = qz_text(session_notice, "", 14, qz_color(QZ_TEXT_SECONDARY));
+        lv_obj_set_width(session_notice_label, 0);
+        lv_obj_set_flex_grow(session_notice_label, 1);
+        lv_label_set_long_mode(session_notice_label, LV_LABEL_LONG_DOT);
+    }
+    lv_label_set_text(session_notice_label, text);
+    lv_obj_remove_flag(session_notice, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(session_notice);
+}
+
+static void hide_session_notice(void)
+{
+    if (session_notice) lv_obj_add_flag(session_notice, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
 {
     (void)user_data;
     if (!event) return;
+    if (event->type == QZDESK_CORE_EVENT_ACK && strcmp(event->command, "abort_turn") == 0) {
+        abort_pending = false;
+        if (event->ok) {
+            pending_text_id = 0;
+            talking = false;
+            lv_obj_remove_state(send_button, LV_STATE_DISABLED);
+            stop_typing();
+            hide_session_notice();
+            apply_face_state(QZ_FACE_IDLE);
+            set_caption("已停止", "聊天记录与输入已保留");
+        } else {
+            add_bubble(event->text[0] ? event->text : "停止失败，请重试", false);
+            set_caption("停止失败", "可以再次点击停止");
+        }
+        qzdesk_core_request_status();
+        return;
+    }
     if (event->type == QZDESK_CORE_EVENT_ACK && strcmp(event->command, "new_chat") == 0) {
         stop_typing();
-        add_bubble(event->text, false);
+        if (event->ok) show_session_notice(event->text);
+        else {
+            hide_session_notice();
+            add_bubble(event->text, false);
+        }
         return;
     }
     if (event->type == QZDESK_CORE_EVENT_ACK && pending_text_id &&
@@ -220,7 +283,7 @@ static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
         pending_text_id = 0;
         lv_obj_remove_state(send_button, LV_STATE_DISABLED);
         if (event->ok) {
-            if (strcmp(lv_textarea_get_text(message_input), pending_draft) == 0)
+            if (!abort_pending && strcmp(lv_textarea_get_text(message_input), pending_draft) == 0)
                 lv_textarea_set_text(message_input, "");
             set_caption("已接收", "正在合成语音");
         } else {
@@ -251,6 +314,7 @@ static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
         const char *status = "离线";
         const char *caption = "本地服务暂未连接";
         if (event->state == 3) {
+            hide_session_notice();
             status = "在线";
             caption = qz_face_state_text(QZ_FACE_IDLE);
             if (!talking) apply_face_state(QZ_FACE_IDLE);
@@ -275,6 +339,7 @@ static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
         bool from_user = strcmp(event->role, "user") == 0;
         stop_typing();
         if (strcmp(event->role, "divider") == 0) {
+            hide_session_notice();
             lv_obj_t *row = bubble_row(false);
             lv_obj_set_style_pad_top(row, 8, 0);
             lv_obj_set_style_pad_bottom(row, 8, 0);
@@ -292,18 +357,24 @@ static void qzdesk_core_event(const qzdesk_core_event_t *event, void *user_data)
             lv_obj_set_style_pad_column(row, 12, 0);
             lv_obj_scroll_to_view(row, LV_ANIM_OFF);
         } else if (strcmp(event->role, "system") == 0) {
+            if (is_session_progress(event->text)) return;
             char notice[sizeof(event->text) + 32];
             snprintf(notice, sizeof(notice), "系统提示：%s", event->text);
             add_bubble(notice, false);
         } else add_bubble(event->text, from_user);
         if (strcmp(event->role, "assistant") == 0) {
+            hide_session_notice();
             set_caption("回复中", qz_face_state_text(QZ_FACE_SPEAKING));
             apply_face_state(QZ_FACE_SPEAKING);
 
         }
     } else if (event->type == QZDESK_CORE_EVENT_TOAST && event->text[0] != '\0') {
         stop_typing();
-        add_bubble(event->text, false);
+        if (is_session_progress(event->text)) show_session_notice(event->text);
+        else {
+            hide_session_notice();
+            add_bubble(event->text, false);
+        }
     } else if (event->type == QZDESK_CORE_EVENT_ACTIVATION && event->text[0] != '\0') {
         static char last_activation[64];
         if (strcmp(last_activation, event->text) != 0) {
@@ -324,6 +395,12 @@ static void poll_qzdesk_core(lv_timer_t *timer)
     static bool status_requested;
     static uint32_t last_retry_at;
     const uint32_t now = lv_tick_get();
+    if (abort_pending && lv_tick_elaps(abort_started_at) >= 4000) {
+        abort_pending = false;
+        add_bubble("停止结果未确认，输入与聊天记录已保留，可再次点击停止。", false);
+        set_caption("未确认", "请重试停止");
+        qzdesk_core_request_status();
+    }
     if (pending_text_id && lv_tick_elaps(pending_text_at) >= 4000) {
         pending_text_id = 0;
         lv_obj_remove_state(send_button, LV_STATE_DISABLED);
@@ -370,10 +447,24 @@ static void poll_qzdesk_core(lv_timer_t *timer)
  * Input
  * ------------------------------------------------------------------------- */
 
+static void abort_turn_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (abort_pending) return;
+    if (!qzdesk_core_abort_turn()) {
+        add_bubble("停止指令未发送，本地服务不可达，请重试。", false);
+        set_caption("停止失败", "输入与聊天记录已保留");
+        return;
+    }
+    abort_pending = true;
+    abort_started_at = lv_tick_get();
+    set_caption("停止中", "等待核心确认停止");
+}
+
 static void send_message(lv_event_t *event)
 {
     (void)event;
-    if (pending_text_id) return;
+    if (pending_text_id || abort_pending) return;
     const char *text = lv_textarea_get_text(message_input);
     if (!text || text[0] == '\0') return;
     if (strlen(text) > 240) {
@@ -760,7 +851,7 @@ static void open_memory(lv_event_t *event)
 static void new_chat_clicked(lv_event_t *event)
 {
     (void)event;
-    if (talking || pending_text_id) {
+    if (talking || pending_text_id || abort_pending) {
         add_bubble("请等待当前消息处理完成后再新建聊天", false);
         return;
     }
@@ -791,12 +882,17 @@ static void build_toolbar(void)
     lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 66);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
+    lv_obj_set_style_radius(toolbar, 16, 0);
+    lv_obj_set_style_border_width(toolbar, 0, 0);
+    lv_obj_set_style_shadow_width(toolbar, 0, 0);
+    lv_obj_set_style_pad_all(toolbar, 0, 0);
+    lv_obj_clear_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, back_to_desktop, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "AI 助手", 18, qz_color(QZ_TEXT));
+    lv_obj_t *title = qz_text(toolbar, "QZdesk助手", 16, qz_color(QZ_TEXT));
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 58, 9);
     state_dot = lv_obj_create(toolbar);
     lv_obj_set_size(state_dot, 6, 6);
@@ -805,15 +901,22 @@ static void build_toolbar(void)
     qz_obj_set_bg_color(state_dot, QZ_ORANGE, 0);
     lv_obj_set_style_border_width(state_dot, 0, 0);
     lv_obj_clear_flag(state_dot, LV_OBJ_FLAG_CLICKABLE);
-    state_label = qz_text(toolbar, "连接中", 16, qz_color(QZ_TEXT_SECONDARY));
+    state_label = qz_text(toolbar, "连接中", 13, qz_color(QZ_TEXT_SECONDARY));
     lv_obj_align(state_label, LV_ALIGN_TOP_LEFT, 72, 36);
+    lv_obj_set_width(state_label, 132);
+    lv_label_set_long_mode(state_label, LV_LABEL_LONG_DOT);
 
-    lv_obj_t *new_chat = toolbar_action(toolbar, 150, -120, true);
-    lv_obj_t *new_label = qz_text(new_chat, "新建聊天", 18, lv_color_white());
+    lv_obj_t *stop = toolbar_action(toolbar, 64, -188, false);
+    lv_obj_t *stop_label = qz_text(stop, "停止", 16, qz_color(QZ_RED));
+    lv_obj_center(stop_label);
+    lv_obj_add_event_cb(stop, abort_turn_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *new_chat = toolbar_action(toolbar, 88, -94, true);
+    lv_obj_t *new_label = qz_text(new_chat, "新建聊天", 16, lv_color_white());
     lv_obj_center(new_label);
     lv_obj_add_event_cb(new_chat, new_chat_clicked, LV_EVENT_CLICKED, NULL);
 
-    mode_button = toolbar_action(toolbar, 104, -8, false);
+    mode_button = toolbar_action(toolbar, 84, -8, false);
     mode_button_icon = qz_symbol(mode_button, LV_SYMBOL_IMAGE, 18, qz_color(QZ_ACCENT_TEXT));
     lv_obj_align(mode_button_icon, LV_ALIGN_LEFT_MID, 10, 0);
     mode_button_text = qz_text(mode_button, "表情", 17, qz_color(QZ_ACCENT_TEXT));
@@ -864,20 +967,23 @@ static void build_chat_view(void)
     lv_obj_align(bar, LV_ALIGN_CENTER, 0, -3);
     lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, 0);
     qz_style_glass(bar);
-    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 4, 0);
+    lv_obj_set_style_pad_column(bar, 8, 0);
+    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
     message_input = lv_textarea_create(bar);
-    lv_obj_set_size(message_input, 214, 44);
-    lv_obj_align(message_input, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_set_size(message_input, 0, 38);
+    lv_obj_set_flex_grow(message_input, 1);
     lv_textarea_set_one_line(message_input, true);
-    lv_textarea_set_placeholder_text(message_input, "点击键盘输入，或按住麦克风说话");
+    lv_textarea_set_placeholder_text(message_input, "输入消息…");
     qz_style_textarea(message_input);
     lv_obj_add_event_cb(message_input, input_event, LV_EVENT_ALL, NULL);
 
     keyboard_button = lv_button_create(bar);
     lv_obj_set_size(keyboard_button, 38, 38);
-    lv_obj_align(keyboard_button, LV_ALIGN_RIGHT_MID, -150, 0);
+    lv_obj_set_flex_grow(keyboard_button, 0);
     lv_obj_set_style_radius(keyboard_button, LV_RADIUS_CIRCLE, 0);
     qz_obj_set_bg_color(keyboard_button, QZ_FILL, 0);
     qz_obj_set_bg_color(keyboard_button, QZ_FILL_PRESSED, LV_STATE_PRESSED);
@@ -889,8 +995,8 @@ static void build_chat_view(void)
     lv_obj_add_event_cb(keyboard_button, toggle_keyboard, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *mic = lv_button_create(bar);
-    lv_obj_set_size(mic, 44, 44);
-    lv_obj_align(mic, LV_ALIGN_RIGHT_MID, -62, 0);
+    lv_obj_set_size(mic, 38, 38);
+    lv_obj_set_flex_grow(mic, 0);
     lv_obj_set_style_radius(mic, LV_RADIUS_CIRCLE, 0);
     qz_obj_set_bg_color(mic, QZ_FILL, 0);
     qz_obj_set_bg_color(mic, QZ_FILL_PRESSED, LV_STATE_PRESSED);
@@ -905,9 +1011,11 @@ static void build_chat_view(void)
     lv_obj_add_event_cb(mic, talk_released, LV_EVENT_PRESS_LOST, NULL);
 
     send_button = lv_button_create(bar);
-    lv_obj_set_size(send_button, 44, 44);
-    lv_obj_align(send_button, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_obj_set_size(send_button, 40, 40);
+    lv_obj_set_flex_grow(send_button, 0);
     qz_style_primary_button(send_button);
+    lv_obj_set_style_radius(send_button, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(send_button, 0, 0);
     qz_add_press_scale(send_button, 94);
     lv_obj_t *arrow = qz_symbol(send_button, LV_SYMBOL_UP, 20, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_center(arrow);
@@ -991,6 +1099,8 @@ static void back_to_desktop(lv_event_t *event)
 lv_obj_t *qz_assistant_create(void)
 {
     screen = lv_obj_create(NULL);
+    session_notice = NULL;
+    session_notice_label = NULL;
     qz_style_screen(screen);
 
     build_toolbar();

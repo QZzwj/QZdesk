@@ -1,18 +1,21 @@
 use crate::config::Config;
 use tokio::sync::mpsc;
 use crate::audio::{AudioConfig, AudioSystem};
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 pub enum AudioEvent {
     AudioData(Vec<u8>),
 }
 
 pub enum PlaybackData {
-    Compressed(Vec<u8>),
+    Compressed { data: Vec<u8>, generation: u64 },
+    Flush(u64),
 }
 
 pub struct AudioBridge {
     _audio_system: AudioSystem,
     play_tx: mpsc::Sender<PlaybackData>,
+    generation: Arc<AtomicU64>,
 }
 
 impl AudioBridge {
@@ -45,7 +48,8 @@ impl AudioBridge {
             audio_config.capture_device, audio_config.playback_device,
         );
 
-        let audio_system = AudioSystem::start(audio_config, opus_tx, play_rx)?;
+        let generation = Arc::new(AtomicU64::new(0));
+        let audio_system = AudioSystem::start(audio_config, opus_tx, play_rx, generation.clone())?;
 
         // Forward recording Opus data as AudioEvent
         tokio::spawn(async move {
@@ -59,15 +63,21 @@ impl AudioBridge {
         Ok(Self {
             _audio_system: audio_system,
             play_tx,
+            generation,
         })
     }
 
     /// Send an Opus packet for playback.
     pub async fn send_audio(&self, data: &[u8]) -> anyhow::Result<()> {
+        let generation = self.generation.load(Ordering::Acquire);
         self.play_tx
-            .send(PlaybackData::Compressed(data.to_vec()))
-            .await
+            .try_send(PlaybackData::Compressed { data: data.to_vec(), generation })
             .map_err(|e| anyhow::anyhow!("Failed to send audio for playback: {}", e))
+    }
+
+    pub fn flush_playback(&self) {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.play_tx.try_send(PlaybackData::Flush(generation));
     }
 
 }

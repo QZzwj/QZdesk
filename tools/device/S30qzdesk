@@ -36,6 +36,8 @@ LOG_MAX=$((512 * 1024)) # 日志超过 512KB 就在启动时截断（免得越�
 export QZDESK_FONT=${QZDESK_FONT:-/oem/usr/share/fonts/NanoTikBazHei-Bold.ttf}
 export QZDESK_FB=${QZDESK_FB:-/dev/fb0}
 export QZDESK_TOUCH=${QZDESK_TOUCH:-/dev/input/event0}
+export ALSA_CONFIG_PATH=${ALSA_CONFIG_PATH:-/usr/share/alsa/alsa.conf}
+export ALSA_CONFIG_DIR=${ALSA_CONFIG_DIR:-/usr/share/alsa}
 # 唤醒词旁路：核心与 qzdesk-kws 用同一个 socket 路径（两边都读这个变量）。
 # 不想用唤醒词就把这行注释掉 —— 核心侧就不会建旁路 socket，KWS 进程也起不来。
 export QZDESK_KWS_SOCKET=${QZDESK_KWS_SOCKET:-/var/run/qzdesk-kws.sock}
@@ -43,6 +45,14 @@ export QZDESK_KWS_SOCKET=${QZDESK_KWS_SOCKET:-/var/run/qzdesk-kws.sock}
 #   mode2（默认）= 唤醒词 "小和小和" + 19 条命令词（打电话给爸爸…）
 #   mode1        = 8 条一次性命令词（我要拍照 / 打开关闭热点、录音、屏幕）
 export QZDESK_KWS_MODE=${QZDESK_KWS_MODE:-mode2}
+mkdir -p /userdata/qzdesk
+export QZDESK_COMPUTER_CONFIG=${QZDESK_COMPUTER_CONFIG:-/userdata/qzdesk/computer.json}
+if [ -r /etc/qzdesk/computer-url ]; then
+	export QZDESK_WINDOWS_MCP_URL="$(cat /etc/qzdesk/computer-url)"
+fi
+if [ -r /etc/qzdesk/computer-token ]; then
+	export QZDESK_WINDOWS_MCP_TOKEN="$(cat /etc/qzdesk/computer-token)"
+fi
 
 # 本脚本同时装在 rootfs /etc/init.d（rcS 跑）和 oem /oem/usr/etc/init.d（RkLunch 跑），
 # 没这个判断时两条路各起一次，两个界面进程抢同一个 framebuffer。

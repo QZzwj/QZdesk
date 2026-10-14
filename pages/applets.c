@@ -40,13 +40,18 @@ static lv_obj_t *make_toolbar(lv_obj_t *screen, const char *title)
     lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 48);
     lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
     qz_style_toolbar(toolbar);
+    lv_obj_set_style_radius(toolbar, 16, 0);
+    lv_obj_set_style_border_width(toolbar, 0, 0);
+    lv_obj_set_style_shadow_width(toolbar, 0, 0);
+    lv_obj_set_style_pad_all(toolbar, 0, 0);
+    lv_obj_clear_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *back = qz_back_button(toolbar);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_add_event_cb(back, go_back, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *label = qz_text(toolbar, title, qz_compact() ? 18 : 15, qz_color(QZ_TEXT));
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *label = qz_text(toolbar, title, 20, qz_color(QZ_TEXT));
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 58, 0);
     return toolbar;
 }
 
@@ -55,8 +60,9 @@ static lv_obj_t *make_card(lv_obj_t *screen, int y, int height)
     lv_obj_t *card = lv_obj_create(screen);
     lv_obj_set_size(card, CONTENT_W, height);
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, y);
-    lv_obj_set_style_radius(card, QZ_RADIUS_CARD, 0);
+    lv_obj_set_style_radius(card, 16, 0);
     qz_style_plate(card);
+    lv_obj_set_style_shadow_width(card, 0, 0);
     lv_obj_set_style_pad_all(card, 0, 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     return card;
@@ -1005,19 +1011,19 @@ static void build_pomodoro_screen(void)
     pomo_count = qz_text(pomo_arc, "已完成 0 个番茄", 10, qz_color(QZ_TEXT_TERTIARY));
     lv_obj_align(pomo_count, LV_ALIGN_CENTER, 0, 32);
 
-    lv_obj_t *preset = qz_button(screen, "25/5·4轮", 110, 44);
-    lv_obj_align(preset, LV_ALIGN_TOP_LEFT, 12, 252);
+    lv_obj_t *preset = qz_button(screen, "25/5·4轮", 144, 48);
+    lv_obj_align(preset, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 258);
     pomo_preset_caption = lv_obj_get_child(preset, 0);
     lv_obj_add_event_cb(preset, pomo_next_preset, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(preset, pomo_custom_open, LV_EVENT_LONG_PRESSED, NULL);
 
-    lv_obj_t *reset = qz_icon_button(screen, LV_SYMBOL_REFRESH, 44);
-    lv_obj_align(reset, LV_ALIGN_TOP_LEFT, 132, 252);
+    lv_obj_t *reset = qz_icon_button(screen, LV_SYMBOL_REFRESH, 48);
+    lv_obj_align(reset, LV_ALIGN_TOP_LEFT, 170, 258);
     lv_obj_add_event_cb(reset, pomo_reset, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *start = lv_button_create(screen);
-    lv_obj_set_size(start, 160, 44);
-    lv_obj_align(start, LV_ALIGN_TOP_LEFT, 188, 252);
+    lv_obj_set_size(start, 236, 48);
+    lv_obj_align(start, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 258);
     qz_style_primary_button(start);
     pomo_start_caption = qz_text(start, "开始", 15, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_center(pomo_start_caption);

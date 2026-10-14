@@ -128,6 +128,86 @@ static void show_next(void)
     lv_obj_align(notice_status, LV_ALIGN_BOTTOM_LEFT, 0, -44);
 }
 
+static lv_obj_t *pair_dialog;
+static char pair_id[64];
+static bool pair_polling;
+static bool pair_saving;
+
+static void pair_decided(bool ok, const char *body, void *data)
+{
+    (void)body; (void)data;
+    pair_saving = false;
+    if (ok && pair_dialog) {
+        lv_obj_delete(pair_dialog);
+        pair_dialog = NULL;
+        pair_id[0] = '\0';
+    }
+}
+
+static void pair_decide(lv_event_t *event)
+{
+    if (pair_saving) return;
+    char body[160];
+    snprintf(body, sizeof(body), "{\"id\":\"%s\",\"allow\":%s,\"control\":%s}", pair_id,
+             lv_event_get_user_data(event) ? "true" : "false",
+             lv_event_get_user_data(event) == (void *)2 ? "true" : "false");
+    pair_saving = true;
+    if (!qz_web_request_async("POST", "/api/computer/decide", body, pair_decided, NULL))
+        pair_saving = false;
+}
+
+static void pair_received(bool ok, const char *body, void *data)
+{
+    (void)data;
+    pair_polling = false;
+    if (!ok || pair_saving) return;
+    char id[64], name[160], code[32], peer[64], text[400];
+    if (!qz_json_string(body, "id", id, sizeof(id))) {
+        if (pair_dialog) lv_obj_delete(pair_dialog);
+        pair_dialog = NULL;
+        pair_id[0] = '\0';
+        return;
+    }
+    if (pair_dialog && strcmp(pair_id, id) == 0) return;
+    if (pair_dialog) lv_obj_delete(pair_dialog);
+    snprintf(pair_id, sizeof(pair_id), "%s", id);
+    qz_json_string(body, "name", name, sizeof(name));
+    qz_json_string(body, "code", code, sizeof(code));
+    qz_json_string(body, "peer", peer, sizeof(peer));
+    snprintf(text, sizeof(text), "电脑配对请求\n%s · %s\n校验码：%s\n核对校验码。仅查看读取文字；允许控制可点击、输入。", name, peer, code);
+    if (sleeping && qz_backlight_set(previous_brightness)) sleeping = false;
+    lv_display_trigger_activity(NULL);
+    pair_dialog = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(pair_dialog, lv_pct(100), lv_pct(100));
+    lv_obj_remove_flag(pair_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(pair_dialog, 12, 0);
+    lv_obj_center(pair_dialog);
+    qz_obj_set_bg_color(pair_dialog, QZ_CARD, 0);
+    lv_obj_t *label = qz_text(pair_dialog, text, 18, qz_color(QZ_TEXT));
+    lv_obj_set_width(label, lv_pct(100));
+    lv_obj_set_height(label, lv_pct(72));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_t *deny = qz_button(pair_dialog, "拒绝", 110, 56);
+    lv_obj_t *view = qz_button(pair_dialog, "仅查看", 130, 56);
+    lv_obj_align(view, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_event_cb(view, pair_decide, LV_EVENT_CLICKED, (void *)1);
+    lv_obj_align(deny, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_add_event_cb(deny, pair_decide, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *allow = qz_button(pair_dialog, "允许控制", 140, 56);
+    lv_obj_align(allow, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_add_event_cb(allow, pair_decide, LV_EVENT_CLICKED, (void *)2);
+}
+
+static void pair_watch(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!pair_polling && !pair_saving) {
+        pair_polling = true;
+        if (!qz_web_request_async("GET", "/api/computer/pending", NULL, pair_received, NULL))
+            pair_polling = false;
+    }
+}
+
 static void idle_watch(lv_timer_t *timer)
 {
     (void)timer;
@@ -135,7 +215,7 @@ static void idle_watch(lv_timer_t *timer)
     if (sleeping && idle < 1000 && !notice) {
         qz_backlight_set(previous_brightness);
         sleeping = false;
-    } else if (!sleeping && idle >= 120000 && !notice) {
+    } else if (!sleeping && idle >= 120000 && !notice && !pair_dialog) {
         int brightness = qz_backlight_level();
         if (brightness > 0 && qz_backlight_set(0)) {
             previous_brightness = brightness;
@@ -154,4 +234,5 @@ void qz_notifications_init(void)
     dnd = enabled != 0;
     qzdesk_core_subscribe(notification_event, NULL);
     lv_timer_create(idle_watch, 500, NULL);
+    lv_timer_create(pair_watch, 1500, NULL);
 }
