@@ -29,9 +29,7 @@ pub enum ToolTransport {
         method: String,
     },
     /// TCP Socket JSON 通信
-    Tcp {
-        address: String,
-    },
+    Tcp { address: String },
 }
 
 fn default_http_method() -> String {

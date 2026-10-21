@@ -46,7 +46,7 @@
 //   QZDESK_KWS_RATE        采样率              默认 24000（跟随核心采集）
 //   QZDESK_KWS_SRC_CHAN    麦克风声声道数      默认 1
 //   QZDESK_KWS_REF_CHAN    参考声道数          默认 0（>0 才开 AEC）
-//   QZDESK_KWS_INPUT_CHANNELS  核心旁路来的声道数 默认 2
+//   QZDESK_KWS_INPUT_CHANNELS  核心旁路来的声道数 默认 1
 //   QZDESK_KWS_FRAME       每帧每声道采样数    默认 256
 //   QZDESK_KWS_AEC_DELAY / _AEC_LOOKAHEAD  AEC 的延迟补偿（要上板实测）
 //   QZDESK_KWS_COOLDOWN_MS 命中后的静默期      默认 2000
@@ -278,8 +278,15 @@ public:
         /* in_size 传采样数（同族 API rkaudio_sed_process 也是采样数：demo 里传的 in_size/2） */
         int result = api_.preprocess_short(state_, const_cast<short *>(samples), out_.data(),
                                            (int)frame_samples_, &wakeup_status);
-        if (result != 0) {
-            fprintf(stderr, "qzdesk-kws: preprocess 返回 %d\n", result);
+        /* 正常返回值是输出采样数，不是 0。旧实现把每帧的 512 当成错误，
+         * 既刷满日志，也让人误以为推理失败。只有负数才是错误。 */
+        if (result < 0) {
+            long long now = now_ms();
+            if (now - last_error_log_ms_ >= 5000) {
+                fprintf(stderr, "qzdesk-kws: preprocess 失败: %d\n", result);
+                fflush(stderr);
+                last_error_log_ms_ = now;
+            }
             return 0;
         }
         if (wakeup_status > 0 && api_.preprocess_get_cmd_id) {
@@ -305,6 +312,7 @@ private:
     size_t frame_samples_ = 0;
     bool ready_ = false;
     bool mode1_ = false;
+    long long last_error_log_ms_ = 0;
     std::vector<short> out_;
 };
 
@@ -423,29 +431,56 @@ int run_wav(const char *path, KeywordSpotter &kws, Waker &waker)
     fprintf(stderr, "qzdesk-kws: %s  %d Hz  %d ch  %zu 采样（%.1f 秒）\n", path, rate, channels,
             pcm.size(), (double)pcm.size() / (double)(rate * channels));
 
-    const size_t frame_samples = kws.frame_samples();
-    if ((size_t)channels != (size_t)kws.input_channels_total()) {
-        fprintf(stderr, "qzdesk-kws: 提醒：文件是 %d 声道，算法要 %d 声道"
-                        "（QZDESK_KWS_SRC_CHAN/REF_CHAN 调一下）\n",
-                channels, kws.input_channels_total());
+    const int algo_channels = kws.input_channels_total();
+    const bool keep_interleaved = (channels == algo_channels);
+    const bool duplicate_mono = (channels == 1 && algo_channels > 1);
+    const bool take_first_channel = (algo_channels == 1 && channels > 1);
+    if (keep_interleaved) {
+        fprintf(stderr, "qzdesk-kws: 文件 %d 声道，原样送入算法\n", channels);
+    } else if (duplicate_mono) {
+        fprintf(stderr, "qzdesk-kws: 文件单声道，复制为 %d 声道后送入算法\n", algo_channels);
+    } else if (take_first_channel) {
+        fprintf(stderr, "qzdesk-kws: 文件 %d 声道，算法只用单声道，取第 0 声道\n", channels);
+    } else {
+        fprintf(stderr, "qzdesk-kws: 不支持 %d 声道文件转换为算法的 %d 声道"
+                        "（检查 QZDESK_KWS_SRC_CHAN/REF_CHAN）\n",
+                channels, algo_channels);
+        return 1;
     }
     /* 文件采样率与算法要求不一致时先转换（SDK 的样例都是 16k，一般用不上） */
     LinearResampler resampler(rate, kws.rate(), channels);
+    std::vector<short> normalized;
     if (resampler.needed()) {
-        std::vector<short> converted;
-        resampler.feed(pcm, converted);
-        pcm.swap(converted);
-        fprintf(stderr, "qzdesk-kws: 重采样 %d → %d Hz（%zu 采样）\n", rate, kws.rate(), pcm.size());
+        resampler.feed(pcm, normalized);
+        fprintf(stderr, "qzdesk-kws: 重采样 %d → %d Hz（%zu 采样）\n", rate, kws.rate(), normalized.size());
+    } else {
+        normalized.swap(pcm);
     }
+    if (duplicate_mono) {
+        pcm.clear();
+        pcm.reserve(normalized.size() * (size_t)algo_channels);
+        for (short sample : normalized) {
+            for (int channel = 0; channel < algo_channels; channel++) pcm.push_back(sample);
+        }
+        normalized.swap(pcm);
+    } else if (take_first_channel) {
+        pcm.clear();
+        pcm.reserve(normalized.size() / (size_t)channels);
+        for (size_t i = 0; i < normalized.size(); i += (size_t)channels) {
+            pcm.push_back(normalized[i]);
+        }
+        normalized.swap(pcm);
+    }
+    const size_t frame_samples = kws.frame_samples();
     int hits = 0;
     size_t frames = 0;
-    for (size_t offset = 0; offset + frame_samples <= pcm.size(); offset += frame_samples) {
+    for (size_t offset = 0; offset + frame_samples <= normalized.size(); offset += frame_samples) {
         frames++;
-        int status = kws.process(pcm.data() + offset);
+        int status = kws.process(normalized.data() + offset);
         if (status > 0) {
             hits++;
             fprintf(stderr, "qzdesk-kws: [%.2f 秒] 命中 %s\n",
-                    (double)offset / (double)(rate * channels), word_name(kws.mode1(), status));
+                    (double)offset / (double)(kws.rate() * algo_channels), word_name(kws.mode1(), status));
             waker.fire(status, kws.mode1());
         }
     }
@@ -456,8 +491,12 @@ int run_wav(const char *path, KeywordSpotter &kws, Waker &waker)
 int run_live(KeywordSpotter &kws, Waker &waker)
 {
     const char *path = env_str("QZDESK_KWS_SOCKET", kDefaultSocket);
-    /* 核心旁路来的声道数：核心采集是交错多声道，这里按需取 */
-    const int in_channels = env_int("QZDESK_KWS_INPUT_CHANNELS", 2);
+    /* 核心当前旁路的是处理后的单声道 PCM；算法需要双声道时在下面复制。 */
+    const int in_channels = env_int("QZDESK_KWS_INPUT_CHANNELS", 1);
+    if (in_channels <= 0) {
+        fprintf(stderr, "qzdesk-kws: QZDESK_KWS_INPUT_CHANNELS 必须大于 0\n");
+        return 1;
+    }
     int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (fd < 0) {
         fprintf(stderr, "qzdesk-kws: 建 socket 失败: %s\n", strerror(errno));
@@ -484,14 +523,24 @@ int run_live(KeywordSpotter &kws, Waker &waker)
 
     /* 核心按 ALSA period 投帧，大小不固定，所以这里累积到"每帧采样数"再处理 */
     const size_t frame_samples = kws.frame_samples();
-    /* 算法要几声道就给几声道：核心旁路是 2 声道交错，而 mode2 的 BF 正好要 2 麦，
-     * 所以正常情况下原样透传；只有对不上时才退化成"只取第 0 声道"。 */
-    const bool keep_interleaved = (kws.input_channels_total() == in_channels);
+    const int algo_channels = kws.input_channels_total();
+    const bool keep_interleaved = (algo_channels == in_channels);
+    const bool duplicate_mono = (in_channels == 1 && algo_channels > 1);
+    const bool take_first_channel = (algo_channels == 1 && in_channels > 1);
     const int input_rate = env_int("QZDESK_KWS_INPUT_RATE", 24000);
     LinearResampler resampler(input_rate, kws.rate(), in_channels);
-    if (kws.input_channels_total() != in_channels) {
-        fprintf(stderr, "qzdesk-kws: 提醒：算法要 %d 声道、核心给 %d 声道，只取第 0 声道"
-                        "（用 QZDESK_KWS_SRC_CHAN 调）\n", kws.input_channels_total(), in_channels);
+    if (keep_interleaved) {
+        fprintf(stderr, "qzdesk-kws: 输入 %d 声道，原样送入算法\n", in_channels);
+    } else if (duplicate_mono) {
+        fprintf(stderr, "qzdesk-kws: 输入单声道，复制为 %d 声道后送入算法\n", algo_channels);
+    } else if (take_first_channel) {
+        fprintf(stderr, "qzdesk-kws: 输入 %d 声道，算法只用单声道，取第 0 声道\n", in_channels);
+    } else {
+        fprintf(stderr, "qzdesk-kws: 不支持 %d 声道输入转换为算法的 %d 声道"
+                        "（检查 QZDESK_KWS_INPUT_CHANNELS/SRC_CHAN/REF_CHAN）\n",
+                in_channels, algo_channels);
+        close(fd);
+        return 1;
     }
     if (resampler.needed()) {
         fprintf(stderr, "qzdesk-kws: 重采样 %d → %d Hz\n", input_rate, kws.rate());
@@ -499,8 +548,8 @@ int run_live(KeywordSpotter &kws, Waker &waker)
     std::vector<short> datagram(8192);
     std::vector<short> block;
     std::vector<short> converted;
-    std::vector<short> mono;
-    mono.reserve(frame_samples * 4);
+    std::vector<short> normalized;
+    normalized.reserve(frame_samples * 4);
     long long last_fake_ms = 0;
     bool logged = false;
 
@@ -517,26 +566,37 @@ int run_live(KeywordSpotter &kws, Waker &waker)
                 converted.swap(block);
             }
             if (keep_interleaved) {
-                mono.insert(mono.end(), converted.begin(), converted.end());
-            } else {
+                normalized.insert(normalized.end(), converted.begin(), converted.end());
+            } else if (duplicate_mono) {
+                normalized.reserve(normalized.size() + converted.size() * (size_t)algo_channels);
+                for (short sample : converted) {
+                    for (int channel = 0; channel < algo_channels; channel++) {
+                        normalized.push_back(sample);
+                    }
+                }
+            } else if (take_first_channel) {
                 for (size_t i = 0; i < converted.size(); i += (size_t)in_channels) {
-                    mono.push_back(converted[i]);   /* 只要第 0 声道 */
+                    normalized.push_back(converted[i]);
                 }
             }
             if (!logged) {
                 fprintf(stderr, "qzdesk-kws: 收到 %zd 字节/包（输入 %d 声道%s → 每帧 %zu 采样）\n",
-                        got, in_channels, keep_interleaved ? "，原样透传" : "，取第 0 声道",
+                        got, in_channels,
+                        keep_interleaved ? "，原样透传"
+                                         : (duplicate_mono ? "，复制为双声道" : "，取第 0 声道"),
                         frame_samples);
                 fflush(stderr);
                 logged = true;
             }
             size_t offset = 0;
-            while (mono.size() - offset >= frame_samples) {
-                int status = kws.process(mono.data() + offset);
+            while (normalized.size() - offset >= frame_samples) {
+                int status = kws.process(normalized.data() + offset);
                 if (status > 0) waker.fire(status, kws.mode1());
                 offset += frame_samples;
             }
-            if (offset > 0) mono.erase(mono.begin(), mono.begin() + (long)offset);
+            if (offset > 0) {
+                normalized.erase(normalized.begin(), normalized.begin() + (long)offset);
+            }
         } else if (got < 0 && errno != EINTR && errno != EAGAIN) {
             fprintf(stderr, "qzdesk-kws: recv 出错: %s\n", strerror(errno));
             usleep(100 * 1000);

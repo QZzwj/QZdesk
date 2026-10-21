@@ -8,10 +8,10 @@
 //! （见 `crate::timers::TimerStore::tick`）。
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::tool::McpTool;
-use crate::timers::{pomodoro_text, PomodoroOptions, TimerStore};
+use crate::timers::{PomodoroOptions, TimerStore, pomodoro_text};
 
 fn describe(error: &str) -> Value {
     json!({ "status": "error", "message": error })

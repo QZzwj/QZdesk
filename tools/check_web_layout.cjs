@@ -50,7 +50,10 @@ async function assertWindow(page, view) {
 
 (async () => {
     fs.mkdirSync(output, { recursive: true });
-    const browser = await chromium.launch({ headless: true });
+    const browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.QZ_CHROMIUM_PATH || undefined
+    });
     try {
         for (const [width, height] of [[320, 240], [480, 320], [320, 320]]) {
             const context = await browser.newContext({ viewport: { width, height }, hasTouch: true,
@@ -72,6 +75,11 @@ async function assertWindow(page, view) {
                 if (view === 'editor') await page.locator('#editorBox summary').click();
                 await assertWindow(page, view);
                 await page.screenshot({ path: path.join(output, `${width}x${height}-${view}.png`) });
+                if (view === 'chat') {
+                    await page.locator('#chatBack').click();
+                    assert.equal(await page.locator('#compactView').inputValue(), 'skills',
+                        `${width}x${height}: chat return restores navigation`);
+                }
             }
             await page.selectOption('#compactView', 'skills');
             await page.locator('[data-act="edit"]').first().click();
@@ -82,6 +90,19 @@ async function assertWindow(page, view) {
             await page.selectOption('#compactView', 'chat');
             await page.locator('#chatInput').fill('完整输入内容。'.repeat(60));
             await assertWindow(page, 'chat-input');
+            const chatChrome = await page.evaluate(() => ({
+                appbar: getComputedStyle(document.querySelector('.appbar')).display,
+                back: getComputedStyle(document.querySelector('#chatBack')).display,
+                backSize: document.querySelector('#chatBack').getBoundingClientRect().width,
+                sendSize: document.querySelector('#chatSend').getBoundingClientRect().width
+            }));
+            assert.equal(chatChrome.appbar, 'none', 'dedicated chat hides the console appbar');
+            assert.notEqual(chatChrome.back, 'none', 'dedicated chat keeps a return control');
+            assert.ok(chatChrome.backSize >= 40, 'return control keeps a touch target');
+            assert.ok(chatChrome.sendSize >= 42, 'send control keeps a touch target');
+            await page.locator('#chatBack').click();
+            assert.equal(await page.locator('#compactView').inputValue(), 'skills',
+                'return control restores console navigation');
             await page.locator('#lgToggle').click();
             const bounds = await page.locator('.lg-content').boundingBox();
             assert.ok(bounds && bounds.x >= 0 && bounds.y >= 0 &&

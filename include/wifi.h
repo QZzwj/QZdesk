@@ -39,6 +39,11 @@ const char *qz_wifi_nic_text(void);
  *  case scanning and joining are not possible. */
 bool qz_wifi_ready(void);
 
+/** True only when the interface has carrier, a usable IPv4 lease and a default
+ *  route. Use this for user-facing "connected" state; stale addresses and SSIDs
+ *  from a previous association must never count as a live link. */
+bool qz_wifi_link_up(void);
+
 /** Bring the interface up and start wpa_supplicant (as documented for this
  *  board), creating its socket directory and fixing up the config globals the
  *  first time. Returns true when wpa_cli answers afterwards. */
@@ -87,6 +92,9 @@ bool qz_wifi_join(const char *ssid, const char *password);
 /** Disconnect but keep the saved network (tapping it reconnects). */
 void qz_wifi_disconnect(void);
 
+/** Whether the persistent supplicant config contains credentials for this SSID. */
+bool qz_wifi_is_saved_network(const char *ssid);
+
 /** Forget the saved network: disconnect and delete both config files. */
 bool qz_wifi_forget(void);
 
@@ -96,8 +104,12 @@ bool qz_wifi_worker_start(void);
 void qz_wifi_worker_stop(void);
 /** Submit an asynchronous enable/disable/scan/connect operation. */
 bool qz_wifi_enable_async(bool enabled);
+/** Restore the saved network at boot, including supplicant and DHCP startup. */
+bool qz_wifi_autoconnect_async(void);
 bool qz_wifi_scan_async(void);
 bool qz_wifi_connect_async(const char *ssid, const char *password);
+/** Reconnect an already saved network without asking for its password again. */
+bool qz_wifi_reconnect_async(const char *ssid);
 /** Read the latest worker snapshot without blocking. */
 bool qz_wifi_status(qz_wifi_status_t *output);
 

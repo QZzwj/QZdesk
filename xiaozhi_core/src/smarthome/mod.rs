@@ -15,13 +15,13 @@ pub mod mqtt;
 pub mod tools;
 
 use crate::config::{SmartHomeConfig, SmartHomeDeviceConfig};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use mqtt::{Message, MqttClient};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 /// 断线重连间隔。局域网里 broker 掉线多半是路由器重启，几秒一次足够。
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -127,7 +127,10 @@ struct HubStatus {
 
 /// 发给 MQTT 任务的动作。
 enum HubCommand {
-    Publish { topic: String, payload: String },
+    Publish {
+        topic: String,
+        payload: String,
+    },
     /// 配置变了：断开重连，并按新配置重新订阅。
     Reconnect,
 }
@@ -139,12 +142,14 @@ pub struct SmartHomeHub {
     status: Arc<Mutex<HubStatus>>,
     config: Arc<Mutex<SmartHomeConfig>>,
     tx: Option<mpsc::Sender<HubCommand>>,
+    state_tx: broadcast::Sender<Value>,
 }
 
 impl SmartHomeHub {
     pub fn start(initial: SmartHomeConfig) -> Arc<Self> {
         let devices = Arc::new(Mutex::new(BTreeMap::new()));
         let status = Arc::new(Mutex::new(HubStatus::default()));
+        let (state_tx, _) = broadcast::channel(64);
 
         // 手写设备不依赖网络：先放进表里，开机就能在控制页看到
         {
@@ -169,18 +174,32 @@ impl SmartHomeHub {
                 status,
                 config,
                 tx: None,
+                state_tx,
             });
         }
 
         let (tx, rx) = mpsc::channel::<HubCommand>(16);
-        tokio::spawn(run(config.clone(), devices.clone(), status.clone(), rx));
+        tokio::spawn(run(
+            config.clone(),
+            devices.clone(),
+            status.clone(),
+            state_tx.clone(),
+            rx,
+        ));
 
         Arc::new(Self {
             devices,
             status,
             config,
             tx: Some(tx),
+            state_tx,
         })
+    }
+
+    /// Subscribe to real MQTT state changes. Scene triggers use this instead of
+    /// polling the whole device table once per second.
+    pub fn subscribe_state_changes(&self) -> broadcast::Receiver<Value> {
+        self.state_tx.subscribe()
     }
 
     /// 设备表快照（含中枢自身状态）。界面、网页控制台与 MCP 工具都读这个。
@@ -245,7 +264,7 @@ impl SmartHomeHub {
                     return Err(anyhow!(
                         "不支持的指令: {}（可用 on/off/toggle/brightness）",
                         other
-                    ))
+                    ));
                 }
             };
 
@@ -261,7 +280,12 @@ impl SmartHomeHub {
                 device.brightness = next_brightness;
             }
             device.updated_at = now();
-            (device.command_topic.clone(), payload, next_state, next_brightness)
+            (
+                device.command_topic.clone(),
+                payload,
+                next_state,
+                next_brightness,
+            )
         };
 
         self.publish(&topic, &payload).await?;
@@ -344,11 +368,12 @@ async fn run(
     config: Arc<Mutex<SmartHomeConfig>>,
     devices: Arc<Mutex<BTreeMap<String, LanDevice>>>,
     status: Arc<Mutex<HubStatus>>,
+    state_tx: broadcast::Sender<Value>,
     mut rx: mpsc::Receiver<HubCommand>,
 ) {
     loop {
         let current = lock(&config).clone();
-        match connect_and_serve(&current, &devices, &status, &mut rx).await {
+        match connect_and_serve(&current, &devices, &status, &state_tx, &mut rx).await {
             Ok(()) => log::info!("智能家居中枢：本次连接正常结束"),
             Err(error) => {
                 log::warn!("智能家居中枢断开: {}", error);
@@ -386,6 +411,7 @@ async fn connect_and_serve(
     config: &SmartHomeConfig,
     devices: &Arc<Mutex<BTreeMap<String, LanDevice>>>,
     status: &Arc<Mutex<HubStatus>>,
+    state_tx: &broadcast::Sender<Value>,
     rx: &mut mpsc::Receiver<HubCommand>,
 ) -> Result<()> {
     let client_id = format!("qzdesk-{}", std::process::id());
@@ -400,7 +426,11 @@ async fn connect_and_serve(
     log::info!("智能家居中枢已连接 {}", config.broker);
 
     let mut subscriptions: BTreeSet<String> = BTreeSet::new();
-    let base = config.zigbee2mqtt_topic.trim().trim_end_matches('/').to_string();
+    let base = config
+        .zigbee2mqtt_topic
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
     if !base.is_empty() {
         for topic in [
             format!("{}/bridge/devices", base),
@@ -435,7 +465,7 @@ async fn connect_and_serve(
         tokio::select! {
             incoming = client.next_message(interval) => {
                 match incoming? {
-                    Some(message) => handle_message(&message, config, devices),
+                    Some(message) => handle_message(&message, config, devices, state_tx),
                     None => client.ping().await?,   // 静默到期：发心跳
                 }
             }
@@ -458,6 +488,7 @@ fn handle_message(
     message: &Message,
     config: &SmartHomeConfig,
     devices: &Arc<Mutex<BTreeMap<String, LanDevice>>>,
+    state_tx: &broadcast::Sender<Value>,
 ) {
     let base = config.zigbee2mqtt_topic.trim().trim_end_matches('/');
     let topic = message.topic.as_str();
@@ -478,14 +509,14 @@ fn handle_message(
         if let Some(name) = topic.strip_prefix(&format!("{}/", base)) {
             // `<base>/<名字>`：一层，且不是 bridge 自己的消息
             if !name.is_empty() && !name.contains('/') && name != "bridge" {
-                update_state(devices, &format!("zigbee:{}", name), &payload);
+                update_state(devices, &format!("zigbee:{}", name), &payload, state_tx);
                 return;
             }
         }
     }
     for device in &config.devices {
         if device.state_topic == topic {
-            update_state(devices, &device.id, &payload);
+            update_state(devices, &device.id, &payload, state_tx);
             return;
         }
     }
@@ -519,9 +550,7 @@ fn import_zigbee_devices(
 
     let mut imported = 0usize;
     let mut table = lock(devices);
-    table.retain(|id, device| {
-        device.source == DeviceSource::Manual || known.contains(id)
-    });
+    table.retain(|id, device| device.source == DeviceSource::Manual || known.contains(id));
     for entry in list {
         let name = match entry.get("friendly_name").and_then(Value::as_str) {
             Some(name) if !name.is_empty() => name.to_string(),
@@ -609,13 +638,19 @@ fn update_state(
     devices: &Arc<Mutex<BTreeMap<String, LanDevice>>>,
     id: &str,
     payload: &str,
+    state_tx: &broadcast::Sender<Value>,
 ) {
     let (state, brightness) = parse_state(payload);
     if state.is_none() && brightness.is_none() {
         return;
     }
-    let mut table = lock(devices);
-    if let Some(device) = table.get_mut(id) {
+    let event = {
+        let mut table = lock(devices);
+        let Some(device) = table.get_mut(id) else {
+            return;
+        };
+        let changed = state.is_some_and(|value| device.state != Some(value))
+            || brightness.is_some_and(|value| device.brightness != Some(value));
         if state.is_some() {
             device.state = state;
         }
@@ -625,6 +660,19 @@ fn update_state(
         device.reachable = true;
         device.updated_at = now();
         log::debug!("智能家居状态: {} -> {}", device.name, payload.trim());
+        changed.then(|| {
+            json!({
+                "deviceId": id,
+                "state": device.state,
+                "brightness": device.brightness,
+                "updatedAt": device.updated_at,
+            })
+        })
+    };
+    if let Some(event) = event {
+        // No subscriber is normal when the scene engine is disabled or still
+        // starting. MQTT state updates must not fail because of that.
+        let _ = state_tx.send(event);
     }
 }
 
@@ -633,7 +681,12 @@ fn update_availability(
     name: &str,
     payload: &str,
 ) {
-    let online = match payload.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+    let online = match payload
+        .trim()
+        .trim_matches('"')
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "online" | "true" | "1" => true,
         "offline" | "false" | "0" => false,
         _ => return,
@@ -774,8 +827,14 @@ mod tests {
         assert_eq!(parse_state("ON"), (Some(true), None));
         assert_eq!(parse_state(" 0 "), (Some(false), None));
         // Z2M 的 254 亮度要折成百分比
-        assert_eq!(parse_state(r#"{"state":"ON","brightness":254}"#), (Some(true), Some(100)));
-        assert_eq!(parse_state(r#"{"state":"ON","brightness":127}"#), (Some(true), Some(50)));
+        assert_eq!(
+            parse_state(r#"{"state":"ON","brightness":254}"#),
+            (Some(true), Some(100))
+        );
+        assert_eq!(
+            parse_state(r#"{"state":"ON","brightness":127}"#),
+            (Some(true), Some(50))
+        );
         // 传感器上报（只有温度）不产生状态
         assert_eq!(parse_state(r#"{"temperature":21.5}"#), (None, None));
         assert_eq!(parse_state(""), (None, None));
@@ -799,14 +858,23 @@ mod tests {
 
     #[test]
     fn zigbee_payload_keeps_off_clean() {
-        assert_eq!(zigbee_payload(DeviceKind::Switch, Some(true), None), r#"{"state":"ON"}"#);
-        assert_eq!(zigbee_payload(DeviceKind::Switch, Some(false), None), r#"{"state":"OFF"}"#);
+        assert_eq!(
+            zigbee_payload(DeviceKind::Switch, Some(true), None),
+            r#"{"state":"ON"}"#
+        );
+        assert_eq!(
+            zigbee_payload(DeviceKind::Switch, Some(false), None),
+            r#"{"state":"OFF"}"#
+        );
         assert_eq!(
             zigbee_payload(DeviceKind::Light, Some(true), Some(50)),
             r#"{"brightness":127,"state":"ON"}"#
         );
         // 关灯不带亮度，免得某些固件顺手把灯点亮
-        assert_eq!(zigbee_payload(DeviceKind::Light, Some(false), Some(50)), r#"{"state":"OFF"}"#);
+        assert_eq!(
+            zigbee_payload(DeviceKind::Light, Some(false), Some(50)),
+            r#"{"state":"OFF"}"#
+        );
     }
 
     #[test]

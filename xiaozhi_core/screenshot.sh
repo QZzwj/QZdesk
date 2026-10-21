@@ -11,7 +11,7 @@
 #
 # 为什么用 python3：fb0 是 RGB565（LV_COLOR_DEPTH 16），要按 BGR 重排成 BMP，
 # 用 shell 逐像素不现实；rootfs 里已经带了 python3（见 buildroot qzdesk_defconfig）。
-set -u
+set -eu
 
 json_str() {
 	printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
@@ -63,10 +63,12 @@ fi
 outdir=$data_dir/screenshots
 mkdir -p "$outdir" || { printf '建不了目录：%s\n' "$outdir" >&2; exit 1; }
 out=$outdir/$name-$(date +%Y%m%d-%H%M%S).bmp
+temporary=$out.tmp.$$
+trap 'rm -f "$temporary"' EXIT HUP INT TERM
 
 command -v python3 >/dev/null 2>&1 || { printf '没有 python3（本工具用它做像素格式转换）\n' >&2; exit 1; }
 
-python3 - "$fb" "$out" "$width" "$height" "$bpp" "$stride" <<'PY'
+python3 - "$fb" "$temporary" "$width" "$height" "$bpp" "$stride" <<'PY'
 import struct
 import sys
 
@@ -112,8 +114,15 @@ with open(fb, "rb", buffering=0) as source, open(out, "wb") as target:
         target.write(pad)
 PY
 
-[ -s "$out" ] || { printf '截图失败：%s 没写出内容\n' "$out" >&2; exit 1; }
+[ -s "$temporary" ] || { printf '截图失败：%s 没写出内容\n' "$temporary" >&2; exit 1; }
 
-bytes=$(wc -c < "$out" 2>/dev/null || printf 0)
+bytes=$(wc -c < "$temporary" 2>/dev/null || printf 0)
+expected=$((54 + ((width * 3 + 3) / 4 * 4) * height))
+if [ "$bytes" -ne "$expected" ]; then
+	rm -f "$temporary"
+	printf '截图失败：BMP 大小不完整（%s/%s 字节）\n' "$bytes" "$expected" >&2
+	exit 1
+fi
+mv -f "$temporary" "$out"
 printf '{"status":"ok","path":"%s","width":%s,"height":%s,"bpp":%s,"bytes":%s}\n' \
 	"$out" "$width" "$height" "$bpp" "$bytes"

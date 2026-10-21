@@ -45,8 +45,7 @@ impl OpusEncoder {
             opus::Encoder::new(output_sample_rate, channels, opus::Application::Audio)?;
         encoder.set_bitrate(opus::Bitrate::Bits(bitrate))?;
 
-        let resampler =
-            Resampler::new(output_channels, input_sample_rate, output_sample_rate)?;
+        let resampler = Resampler::new(output_channels, input_sample_rate, output_sample_rate)?;
 
         Ok(Self {
             encoder,
@@ -75,16 +74,14 @@ impl OpusEncoder {
     /// Returns the encoded Opus bytes.
     pub fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>> {
         let original_frame_size = self.input_frame_size_per_channel();
-        let target_frame_size =
-            (self.output_sample_rate * self.duration_ms / 1000) as usize;
+        let target_frame_size = (self.output_sample_rate * self.duration_ms / 1000) as usize;
 
         // Step 1: Channel mixing (multi-channel → output_channels)
         let mixed = self.mix_channels(pcm, original_frame_size);
 
         // Step 2: Resample (input_rate → output_rate)
         let mut resampled = vec![0i16; target_frame_size * self.output_channels as usize];
-        let (_in_consumed, out_produced) =
-            self.resampler.process_int(0, &mixed, &mut resampled)?;
+        let (_in_consumed, out_produced) = self.resampler.process_int(0, &mixed, &mut resampled)?;
 
         let actual_out_samples = out_produced as usize * self.output_channels as usize;
 
@@ -101,19 +98,9 @@ impl OpusEncoder {
     /// Mix input channels down to output_channels.
     fn mix_channels(&self, pcm: &[i16], frame_size: usize) -> Vec<i16> {
         if self.output_channels == 1 && self.input_channels > 1 {
-            // Multi-channel → mono: average all channels
-            let mut mono = vec![0i16; frame_size];
-            for i in 0..frame_size {
-                let mut sum: i32 = 0;
-                for c in 0..self.input_channels as usize {
-                    let idx = i * self.input_channels as usize + c;
-                    if idx < pcm.len() {
-                        sum += pcm[idx] as i32;
-                    }
-                }
-                mono[i] = (sum / self.input_channels as i32) as i16;
-            }
-            mono
+            // QZdesk exposes the microphone on channel 0 and a silent reference
+            // on channel 1. Averaging would cut the captured voice in half.
+            mix_to_mono_left(pcm, frame_size, self.input_channels as usize)
         } else if self.output_channels == self.input_channels {
             // Same channel count, passthrough
             pcm[..frame_size * self.input_channels as usize].to_vec()
@@ -133,6 +120,13 @@ impl OpusEncoder {
             out
         }
     }
+}
+
+fn mix_to_mono_left(pcm: &[i16], frame_size: usize, input_channels: usize) -> Vec<i16> {
+    pcm.chunks_exact(input_channels)
+        .take(frame_size)
+        .map(|frame| frame[0])
+        .collect()
 }
 
 // ======================== Opus Decoder ========================
@@ -170,8 +164,7 @@ impl OpusDecoder {
         };
 
         let decoder = opus::Decoder::new(input_sample_rate, channels)?;
-        let resampler =
-            Resampler::new(input_channels, input_sample_rate, output_sample_rate)?;
+        let resampler = Resampler::new(input_channels, input_sample_rate, output_sample_rate)?;
 
         Ok(Self {
             decoder,
@@ -189,8 +182,7 @@ impl OpusDecoder {
         // Step 1: Opus decode (max 120ms @ 48kHz = 5760 samples/channel, use 6000 for safety)
         let max_frame_size = 6000;
         let mut pcm_buf = vec![0i16; max_frame_size * self.input_channels as usize];
-        let decoded_samples_per_ch =
-            self.decoder.decode(opus_data, &mut pcm_buf, false)?;
+        let decoded_samples_per_ch = self.decoder.decode(opus_data, &mut pcm_buf, false)?;
 
         // Step 2: Resample (input_rate → output_rate)
         // Dynamically size the output buffer based on actual decoded samples,
@@ -199,8 +191,7 @@ impl OpusDecoder {
             * (self.output_sample_rate as f64 / self.input_sample_rate as f64))
             .ceil() as usize;
         // Allocate slightly larger to handle rounding
-        let mut resampled =
-            vec![0i16; (expected_out_samples + 64) * self.input_channels as usize];
+        let mut resampled = vec![0i16; (expected_out_samples + 64) * self.input_channels as usize];
 
         let (in_consumed, out_produced) = self.resampler.process_int(
             0,
@@ -223,11 +214,7 @@ impl OpusDecoder {
     }
 
     /// Convert channels from input_channels to output_channels.
-    fn convert_channels(
-        &self,
-        resampled: &[i16],
-        frame_size: usize,
-    ) -> Result<Vec<i16>> {
+    fn convert_channels(&self, resampled: &[i16], frame_size: usize) -> Result<Vec<i16>> {
         if self.output_channels == self.input_channels {
             // Same channel count
             Ok(resampled[..frame_size * self.output_channels as usize].to_vec())
@@ -264,5 +251,22 @@ use super::stream_decoder::StreamDecoder;
 impl StreamDecoder for OpusDecoder {
     fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
         OpusDecoder::decode(self, data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mix_to_mono_left;
+
+    #[test]
+    fn stereo_mono_mix_uses_microphone_channel_instead_of_averaging() {
+        let stereo = [1200, -80, 2400, -70, 3600, -60];
+        assert_eq!(mix_to_mono_left(&stereo, 3, 2), [1200, 2400, 3600]);
+    }
+
+    #[test]
+    fn mono_mix_ignores_trailing_partial_frame() {
+        let stereo = [100, 0, 200, 0, 300];
+        assert_eq!(mix_to_mono_left(&stereo, 3, 2), [100, 200]);
     }
 }

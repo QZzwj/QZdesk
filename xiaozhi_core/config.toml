@@ -36,9 +36,9 @@ client_id = "unknown-client"
 [features]
 enable_tts_display = true
 
-# 文字转语音（讯飞在线语音合成 WebAPI）
-# GUI 与 web 的文字聊天先用它把文字合成成语音，再按麦克风同样的格式发给云端；
-# 语音输入不经过这里。
+# 主动问候语音合成（讯飞在线语音合成 WebAPI）
+# GUI 与 web 的文字聊天始终以 listen/detect/text 直发云端；超时或云端拒绝时
+# 只报告错误，不会回退为合成语音。主动问候与存在检测会使用这里。
 #
 # 下面这些是**默认值**，运行时可以用同名的 QZDESK_TTS_* 环境变量覆盖，这样
 # 账号密钥不必固化进二进制：

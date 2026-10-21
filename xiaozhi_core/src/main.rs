@@ -1,21 +1,26 @@
 mod activation;
+mod archive;
 mod audio;
 mod audio_bridge;
-mod config;
+mod bridge;
+mod chat;
 mod companion;
 mod computer;
 mod computer_pairing;
+mod config;
 mod controller;
+mod device_sync;
+mod diagnostics;
 mod gui_bridge;
 mod logbuf;
 mod mcp_gateway;
 mod net_link;
 mod performance;
 mod protocol;
-mod state_machine;
+mod scenes;
 mod skill_web;
-mod chat;
 mod smarthome;
+mod state_machine;
 mod timers;
 mod tts;
 mod user_data;
@@ -27,24 +32,16 @@ use controller::{CoreCommand, CoreController};
 use gui_bridge::{GuiBridge, GuiEvent};
 use tts::TtsService;
 
+use crate::chat::ChatHub;
+use crate::mcp_gateway::init_mcp_gateway;
+use crate::mcp_gateway::skill::SkillManager;
 use mac_address::get_mac_address;
 use net_link::{NetCommand, NetEvent, NetLink};
 use std::sync::Arc;
-use std::net::UdpSocket as StdUdpSocket;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use crate::mcp_gateway::init_mcp_gateway;
-use crate::mcp_gateway::skill::SkillManager;
-use crate::chat::ChatHub;
-
-fn device_ip() -> Option<String> {
-    /* Connecting an unbound UDP socket lets the kernel select the address
-     * used by the default route without sending a packet. */
-    let socket = StdUdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("1.1.1.1:80").ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -72,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         logbuf::install(Box::new(inner), level);
     }
 
-    match device_ip() {
+    match bridge::device_ip() {
         Some(ip) => log::info!("QZdesk device IP: {}", ip),
         None => log::warn!("QZdesk device IP: unavailable"),
     }
@@ -110,7 +107,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化 MCP Gateway 工具箱
     let mcp_configs = if config.mcp.enabled {
-        log::info!("MCP Gateway is enabled. Loaded {} tools from configuration.", config.mcp.tools.len());
+        log::info!(
+            "MCP Gateway is enabled. Loaded {} tools from configuration.",
+            config.mcp.tools.len()
+        );
         config.mcp.tools.clone()
     } else {
         log::info!("MCP Gateway is disabled.");
@@ -120,8 +120,8 @@ async fn main() -> anyhow::Result<()> {
     // Share one SkillManager between MCP and the web console so role changes
     // and enable/disable settings are persisted and immediately visible to
     // both sides.
-    let skill_manager = SkillManager::new();
-    let mut mcp_server = init_mcp_gateway(mcp_configs, skill_manager.clone());
+    let skill_manager = Arc::new(SkillManager::new());
+    let mut mcp_server = init_mcp_gateway(mcp_configs, (*skill_manager).clone());
 
     // 智能家居中枢：核心自己接 MQTT，把「设备控制」从本机扩到局域网设备。
     // 它同时是 MCP 工具（云端 AI）与网页控制台的数据源，先建好再挂工具。
@@ -142,7 +142,11 @@ async fn main() -> anyhow::Result<()> {
     log::info!(
         "提醒 {} 条，番茄钟{}（数据目录 {}）",
         timer_store.reminders().len(),
-        if timer_store.pomodoro().active { "进行中" } else { "未运行" },
+        if timer_store.pomodoro().active {
+            "进行中"
+        } else {
+            "未运行"
+        },
         timer_store.dir().display()
     );
     mcp_server.register_tool(Box::new(mcp_gateway::timer_tools::SetTimerTool::new(
@@ -151,12 +155,30 @@ async fn main() -> anyhow::Result<()> {
     mcp_server.register_tool(Box::new(mcp_gateway::timer_tools::PomodoroTool::new(
         timer_store.clone(),
     )));
+    let scene_service = scenes::SceneService::load(
+        skill_manager.clone(),
+        smarthome.clone(),
+        timer_store.clone(),
+    );
+    mcp_server.register_tool(Box::new(scenes::SceneListTool::new(scene_service.clone())));
+    mcp_server.register_tool(Box::new(scenes::SceneRunTool::new(scene_service.clone())));
     let companion_store = companion::CompanionStore::load().map_err(anyhow::Error::msg)?;
     for care in [false, true] {
-        mcp_server.register_tool(Box::new(companion::CompanionTool { store: companion_store.clone(), care }));
+        mcp_server.register_tool(Box::new(companion::CompanionTool {
+            store: companion_store.clone(),
+            care,
+        }));
     }
+    mcp_server.register_tool(Box::new(companion::CompanionMemoryTool {
+        store: companion_store.clone(),
+    }));
     mcp_server.register_tool(Box::new(computer::PairedComputer));
     mcp_server.register_tool(Box::new(computer::ComputerAction));
+    mcp_server.register_tool(Box::new(computer::ComputerFiles));
+    mcp_server.register_tool(Box::new(computer::ComputerShell));
+    mcp_server.register_tool(Box::new(computer::ComputerSystem));
+    mcp_server.register_tool(Box::new(computer::ComputerWeb));
+    mcp_server.register_tool(Box::new(computer::ComputerCapture));
     tokio::spawn(async {
         if let Err(error) = computer_pairing::discover().await {
             log::warn!("电脑配对发现服务不可用：{}", error);
@@ -174,14 +196,20 @@ async fn main() -> anyhow::Result<()> {
     // 交给核心自己处理的指令（目前是「把这段文字当一次说话」）。web 控制台与
     // GUI 都从这里进来，两边共用同一套合成 / 分包 / 节流逻辑。
     let (tx_core_cmd, mut rx_core_cmd) = mpsc::channel::<CoreCommand>(16);
+    /* The web listener starts before activation finishes, while the command
+     * receiver below cannot run until activation and all audio services are
+     * ready. Publish that lifecycle boundary so HTTP requests fail clearly
+     * instead of sitting in an unconsumed queue until they time out. */
+    let core_ready = Arc::new(AtomicBool::new(false));
 
     /* 聊天记录落盘：重启设备后接着上一次的对话，而不是从空白开始。
      * 记录本身仍是"只留一份"——界面与网页只是这份记录的显示器。 */
     let chat_hub = ChatHub::load();
-    let web_skill_manager = Arc::new(skill_manager);
+    let web_skill_manager = skill_manager;
     let web_net_tx = tx_net_cmd.clone();
     let web_chat_hub = chat_hub.clone();
     let web_core_cmd = tx_core_cmd.clone();
+    let web_core_ready = core_ready.clone();
     let web_smarthome = smarthome.clone();
 
     // 音频进程通道
@@ -241,39 +269,82 @@ async fn main() -> anyhow::Result<()> {
     // GUI 退出后网页仍可查看，所以它独立于任何页面运行（采样本身只读文件）。
     let performance = performance::PerformanceService::start(
         performance::MonitorConfig {
-            audio_enabled: std::env::var("QZDESK_AUDIO_DISABLED").is_err(),
+            audio_enabled: !audio::audio_disabled(),
         },
         gui_bridge.clone(),
     );
-
     // 网页控制台需要天气与性能句柄（/api/weather、/api/performance）：
     // 所以放在两个服务之后启动。
     let web_weather = weather.clone();
     let web_performance = performance.clone();
     let web_timer_store = timer_store.clone();
     let web_companion = companion_store.clone();
+    let diagnostics = Arc::new(diagnostics::DiagnosticService::new(
+        web_skill_manager.clone(),
+        web_smarthome.clone(),
+        web_weather.clone(),
+        web_performance.clone(),
+        web_timer_store.clone(),
+    ));
+    let device_sync =
+        device_sync::DeviceSyncService::start(web_skill_manager.clone(), web_core_cmd.clone());
+    let scene_scheduler = scene_service.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            scene_scheduler.tick_schedules(timers::unix_now()).await;
+        }
+    });
+    {
+        let scene_service = scene_service.clone();
+        let mut state_changes = web_smarthome.subscribe_state_changes();
+        tokio::spawn(async move {
+            loop {
+                match state_changes.recv().await {
+                    Ok(event) => scene_service.handle_state_change(&event).await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        log::warn!("场景状态订阅落后，丢弃 {} 个 MQTT 状态事件", skipped);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     tokio::spawn(async move {
         if let Err(error) = skill_web::run(
             web_skill_manager,
             web_net_tx,
             web_chat_hub,
             web_core_cmd,
+            web_core_ready,
             web_smarthome,
             web_weather,
             web_performance,
             web_timer_store,
             web_companion,
+            diagnostics,
+            scene_service,
+            device_sync,
         )
         .await
         {
             log::warn!("Skill web manager stopped: {}", error);
         }
     });
-    if let Some(ip) = device_ip() {
-        let port = std::env::var("QZDESK_SKILL_WEB_PORT")
-            .or_else(|_| std::env::var("XIAOZHI_SKILL_WEB_PORT"))
-            .unwrap_or_else(|_| "8080".to_string());
-        log::info!("QZdesk Skill 管理页: http://{}:{}", ip, port);
+    // 手机输入桥：GUI 一上来（或重启后）就该有扫码地址，不必等用户点开浮层
+    // 再问一次；换网后界面重新问即可（见 `handle_gui_event` 的 bridge_request）。
+    match bridge::web_url() {
+        Some(url) => {
+            log::info!("QZdesk Skill 管理页: {}", url);
+            let message = serde_json::json!({"type":"bridge", "ok":true, "url":url}).to_string();
+            if let Err(error) = gui_bridge.send_message(&message).await {
+                log::warn!("手机输入桥地址推送界面失败: {}", error);
+            }
+        }
+        None => log::warn!("QZdesk Skill 管理页: 无局域网地址，手机输入桥不可用"),
     }
 
     // 在启动 NetLink 前检查激活
@@ -311,7 +382,10 @@ async fn main() -> anyhow::Result<()> {
                  * retrying; otherwise it can remain on its initial
                  * "Starting ..." label indefinitely. */
                 if let Err(send_error) = gui_bridge.send_message(r#"{"state": 4}"#).await {
-                    log::debug!("Failed to send activation error state to GUI: {}", send_error);
+                    log::debug!(
+                        "Failed to send activation error state to GUI: {}",
+                        send_error
+                    );
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
@@ -330,13 +404,13 @@ async fn main() -> anyhow::Result<()> {
     // 启动音频桥（内置音频系统，无需外部进程）
     let audio_bridge = Arc::new(AudioBridge::start(&config, tx_audio_event)?);
 
-    // 本地文字转语音。模型在第一次用到时才加载，没配模型或者本构建没链接
-    // sherpa-onnx 时会自报不可用，不影响语音对话。
+    // 本地文字转语音只用于主动问候与存在检测。聊天输入始终直接发文字，
+    // 失败时不会改走 TTS；模型在第一次用到时才加载。
     let tts = Arc::new(TtsService::new(config.tts_config()));
     if tts.available() {
-        log::info!("文字转语音已就绪：GUI / web 的文字聊天会先合成语音再上行");
+        log::info!("文字直发已启用；本地文字转语音仅用于主动问候");
     } else {
-        log::warn!("文字转语音不可用：GUI / web 的文字聊天将无法发送");
+        log::warn!("本地文字转语音不可用：主动问候将跳过，文字聊天不受影响");
     }
 
     // 初始化控制器。聊天记录由它统一写入：GUI 与 web 看到的是同一份；
@@ -357,6 +431,7 @@ async fn main() -> anyhow::Result<()> {
     speech_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut care_poll = tokio::time::interval(std::time::Duration::from_secs(60));
     care_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    core_ready.store(true, Ordering::Release);
 
     loop {
         tokio::select! {
@@ -382,8 +457,8 @@ async fn main() -> anyhow::Result<()> {
             Some(event) = rx_gui_event.recv() => controller.handle_gui_event(event).await,
             Some(command) = rx_core_cmd.recv() => {
                 match command {
-                    CoreCommand::TextAsSpeech(text, reply) => {
-                        let result = controller.send_text_as_speech(text).await;
+                    CoreCommand::TextTurn(text, reply) => {
+                        let result = controller.send_text_turn(text).await;
                         let _ = reply.send(result);
                     }
                     CoreCommand::AbortTurn(reply) => {

@@ -10,7 +10,7 @@
 //!
 //! 不支持（都有明确报错，不会悄悄降级）：TLS、QoS1/2、遗嘱消息、持久会话。
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -223,7 +223,9 @@ impl MqttClient {
         encode_str("MQTT", &mut payload);
         payload.push(0x04); // 协议级别 3.1.1
         payload.push(flags);
-        payload.extend_from_slice(&(self.keep_alive.as_secs().min(u16::MAX as u64) as u16).to_be_bytes());
+        payload.extend_from_slice(
+            &(self.keep_alive.as_secs().min(u16::MAX as u64) as u16).to_be_bytes(),
+        );
         encode_str(client_id, &mut payload);
         if !username.is_empty() {
             encode_str(username, &mut payload);
@@ -307,7 +309,10 @@ impl MqttClient {
     /// 发心跳。
     pub async fn ping(&mut self) -> Result<()> {
         let packet = encode_packet(TYPE_PINGREQ, 0, &[]);
-        self.stream.write_all(&packet).await.context("发送 PINGREQ 失败")
+        self.stream
+            .write_all(&packet)
+            .await
+            .context("发送 PINGREQ 失败")
     }
 
     /// 心跳间隔：MQTT 服务端按 1.5 倍 keep-alive 判死，客户端按一半发比较稳。
@@ -406,11 +411,23 @@ mod tests {
 
     #[test]
     fn broker_url_forms() {
-        assert_eq!(parse_broker("mqtt://192.168.1.10:1883").unwrap(), ("192.168.1.10".into(), 1883));
-        assert_eq!(parse_broker("tcp://broker.lan").unwrap(), ("broker.lan".into(), 1883));
+        assert_eq!(
+            parse_broker("mqtt://192.168.1.10:1883").unwrap(),
+            ("192.168.1.10".into(), 1883)
+        );
+        assert_eq!(
+            parse_broker("tcp://broker.lan").unwrap(),
+            ("broker.lan".into(), 1883)
+        );
         assert_eq!(parse_broker("10.0.0.5").unwrap(), ("10.0.0.5".into(), 1883));
-        assert_eq!(parse_broker("mqtt://host:8883/").unwrap(), ("host".into(), 8883));
-        assert_eq!(parse_broker("[fd00::1]:1883").unwrap(), ("fd00::1".into(), 1883));
+        assert_eq!(
+            parse_broker("mqtt://host:8883/").unwrap(),
+            ("host".into(), 8883)
+        );
+        assert_eq!(
+            parse_broker("[fd00::1]:1883").unwrap(),
+            ("fd00::1".into(), 1883)
+        );
         assert!(parse_broker("mqtts://host:8883").is_err());
         assert!(parse_broker("  ").is_err());
         assert!(parse_broker("mqtt://host:notaport").is_err());

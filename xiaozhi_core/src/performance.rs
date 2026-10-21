@@ -11,7 +11,7 @@
 
 use crate::gui_bridge::GuiBridge;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -227,10 +227,7 @@ impl PerformanceService {
         let mut value = serde_json::to_value(&guard.snapshot).unwrap_or_else(|_| json!({}));
         if let Value::Object(map) = &mut value {
             // 有一份能看的采样就算 ok：单项不可用由 status/errors 表达
-            map.insert(
-                "ok".to_string(),
-                Value::Bool(guard.snapshot.timestamp > 0),
-            );
+            map.insert("ok".to_string(), Value::Bool(guard.snapshot.timestamp > 0));
         }
         value
     }
@@ -296,7 +293,11 @@ async fn run(
                 if outcome.snapshot.errors.is_empty() {
                     "各指标正常".to_string()
                 } else {
-                    format!("{} 项不可用：{}", outcome.snapshot.errors.len(), outcome.snapshot.errors.join("；"))
+                    format!(
+                        "{} 项不可用：{}",
+                        outcome.snapshot.errors.len(),
+                        outcome.snapshot.errors.join("；")
+                    )
                 }
             );
         }
@@ -329,7 +330,9 @@ async fn sample_once(
      * 可能阻塞，放到这里至少不会拖住 tokio 的调度线程，而且能加超时。 */
     let files = tokio::time::timeout(
         SAMPLE_INTERVAL,
-        tokio::task::spawn_blocking(move || read_files(previous_cpu_clone, previous_processes_clone)),
+        tokio::task::spawn_blocking(move || {
+            read_files(previous_cpu_clone, previous_processes_clone)
+        }),
     )
     .await;
 
@@ -350,11 +353,20 @@ async fn sample_once(
         (Some(current), Some(previous)) => cpu_usage(previous, current),
         (Some(_), None) => Cpu {
             usage_percent: 0.0,
-            cores: files.cpu_raw.as_ref().map(|raw| vec![0.0; raw.cores.len()]).unwrap_or_default(),
+            cores: files
+                .cpu_raw
+                .as_ref()
+                .map(|raw| vec![0.0; raw.cores.len()])
+                .unwrap_or_default(),
             level: level_of(0.0, CPU_THRESHOLDS).to_string(),
         },
         (None, _) => {
-            errors.push(files.cpu_error.clone().unwrap_or_else(|| "CPU 读数不可用".to_string()));
+            errors.push(
+                files
+                    .cpu_error
+                    .clone()
+                    .unwrap_or_else(|| "CPU 读数不可用".to_string()),
+            );
             Cpu::default()
         }
     };
@@ -367,7 +379,12 @@ async fn sample_once(
             memory
         }
         None => {
-            errors.push(files.memory_error.clone().unwrap_or_else(|| "内存读数不可用".to_string()));
+            errors.push(
+                files
+                    .memory_error
+                    .clone()
+                    .unwrap_or_else(|| "内存读数不可用".to_string()),
+            );
             Memory::default()
         }
     };
@@ -417,8 +434,16 @@ async fn sample_once(
     // —— 进程 ——
     let services = Services {
         qzdesk_core: "running".to_string(),
-        ui: if files.ui_running { "running".to_string() } else { "stopped".to_string() },
-        audio: if config.audio_enabled { "running".to_string() } else { "disabled".to_string() },
+        ui: if files.ui_running {
+            "running".to_string()
+        } else {
+            "stopped".to_string()
+        },
+        audio: if config.audio_enabled {
+            "running".to_string()
+        } else {
+            "disabled".to_string()
+        },
     };
     let processes = select_processes(&files.processes, services.ui == "running");
 
@@ -457,7 +482,12 @@ fn device_payload(state: &Shared) -> String {
         .map(|point| scaled(point.cpu_percent))
         .collect();
     let process_text: Vec<String> = snapshot.processes.iter().map(process_row).collect();
-    let cores: Vec<i64> = snapshot.cpu.cores.iter().map(|value| scaled(*value)).collect();
+    let cores: Vec<i64> = snapshot
+        .cpu
+        .cores
+        .iter()
+        .map(|value| scaled(*value))
+        .collect();
 
     json!({
         "type": "performance",
@@ -623,7 +653,9 @@ fn read_cpu_raw() -> Result<RawCpu, String> {
         }
         let mut parts = line.split_whitespace();
         let name = parts.next().unwrap_or("");
-        let values: Vec<u64> = parts.filter_map(|value| value.parse::<u64>().ok()).collect();
+        let values: Vec<u64> = parts
+            .filter_map(|value| value.parse::<u64>().ok())
+            .collect();
         if values.len() < 4 {
             continue;
         }
@@ -651,7 +683,10 @@ fn cpu_usage(previous: &RawCpu, current: &RawCpu) -> Cpu {
         let idle = current.1.saturating_sub(previous.1);
         ((total - idle.min(total)) as f64 * 100.0 / total as f64).clamp(0.0, 100.0)
     };
-    let usage_percent = usage((previous.total, previous.idle), (current.total, current.idle));
+    let usage_percent = usage(
+        (previous.total, previous.idle),
+        (current.total, current.idle),
+    );
     let cores = previous
         .cores
         .iter()
@@ -711,7 +746,11 @@ fn read_load() -> Result<Load, String> {
     if values.len() < 3 {
         return Err("格式异常".to_string());
     }
-    Ok(Load { one: values[0], five: values[1], fifteen: values[2] })
+    Ok(Load {
+        one: values[0],
+        five: values[1],
+        fifteen: values[2],
+    })
 }
 
 /// 温度：`/sys/class/thermal/thermal_zone*/temp`，第一个读得出来的就用。
@@ -738,7 +777,11 @@ fn read_temperature() -> Temperature {
             continue;
         };
         // 多数驱动给毫摄氏度；也有直接给摄氏度的，按量级判断
-        let celsius = if value > 1000.0 { value / 1000.0 } else { value };
+        let celsius = if value > 1000.0 {
+            value / 1000.0
+        } else {
+            value
+        };
         if !(-40.0..=150.0).contains(&celsius) {
             continue;
         }
@@ -769,9 +812,21 @@ fn parse_wireless_line(line: &str) -> Option<i64> {
     let mut parts = line.split_whitespace();
     parts.next()?; // 接口名
     parts.next()?; // status
-    parts.next()?; // link quality
-    let level = parts.next()?.trim_end_matches('.');
-    level.parse::<i64>().ok().filter(|value| *value < 0)
+    let quality = parse_wireless_metric(parts.next()?)?;
+    let level = parse_wireless_metric(parts.next()?)?;
+
+    // 常规无线扩展报告 dBm；部分驱动（RTL8723BS）在这里报 0..100 的质量。
+    if (-100..=-1).contains(&level) {
+        return Some(level);
+    }
+    if (0..=100).contains(&quality) {
+        return Some((quality as f64 / 2.0 - 100.0).round() as i64);
+    }
+    None
+}
+
+fn parse_wireless_metric(raw: &str) -> Option<i64> {
+    raw.trim_end_matches('.').parse::<i64>().ok()
 }
 
 fn read_wifi_with_iwconfig() -> Option<i64> {
@@ -811,27 +866,43 @@ fn read_storage_statvfs() -> Result<Storage, String> {
     })
 }
 
-/// statvfs 失败时的退路：`df -P -B1 /`（命令与参数都写死）。
+/// statvfs 失败时的退路：`df -P -k /`（命令与参数都写死）。
+///
+/// BusyBox 的 `df` 不支持 GNU 的 `-B1`，但支持 POSIX `-P` 和 1 KiB 块。
 async fn read_storage_with_df() -> Result<Storage, String> {
     let output = tokio::time::timeout(
         COMMAND_TIMEOUT,
         tokio::process::Command::new("df")
-            .args(["-P", "-B1", ROOT_PATH])
+            .args(["-P", "-k", ROOT_PATH])
             .kill_on_drop(true)
             .output(),
     )
     .await
     .map_err(|_| "df 超时".to_string())?
     .map_err(|error| format!("df 无法执行: {}", error))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("df 执行失败: {}", message.trim()));
+    }
     let text = String::from_utf8_lossy(&output.stdout);
     let line = text.lines().nth(1).ok_or("df 输出为空")?;
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() < 4 {
         return Err("df 输出格式异常".to_string());
     }
-    let total = fields[1].parse::<u64>().map_err(|_| "df 总量无法解析")?;
-    let used = fields[2].parse::<u64>().map_err(|_| "df 已用无法解析")?;
-    let available = fields[3].parse::<u64>().map_err(|_| "df 可用无法解析")?;
+    let kib = |value: &str, label: &str| {
+        value
+            .parse::<u64>()
+            .map_err(|_| format!("df {}无法解析", label))?
+            .checked_mul(1024)
+            .ok_or_else(|| format!("df {}超出范围", label))
+    };
+    let total = kib(fields[1], "总量")?;
+    let used = kib(fields[2], "已用")?;
+    let available = kib(fields[3], "可用")?;
+    if total == 0 {
+        return Err("df 返回 0 容量".to_string());
+    }
     Ok(Storage {
         path: ROOT_PATH.to_string(),
         total_bytes: total,
@@ -842,57 +913,38 @@ async fn read_storage_with_df() -> Result<Storage, String> {
     })
 }
 
-#[cfg(target_pointer_width = "64")]
+#[cfg(unix)]
 fn statvfs_bytes(path: &str) -> Result<(u64, u64), String> {
-    /// `statvfs` 的最小 FFI 声明。
-    ///
-    /// 为了一个调用去引 libc（还会牵动 Cargo.lock 与交叉编译环境）不划算。
-    /// 字段布局取自 64 位 Linux 的 `struct statvfs`：10 个 u64 加 6 个 i32 保留位。
-    #[repr(C)]
-    struct Statvfs {
-        f_bsize: u64,
-        f_frsize: u64,
-        f_blocks: u64,
-        f_bfree: u64,
-        f_bavail: u64,
-        f_files: u64,
-        f_ffree: u64,
-        f_favail: u64,
-        f_fsid: u64,
-        f_flag: u64,
-        f_namemax: u64,
-        __f_spare: [i32; 6],
-    }
-
-    unsafe extern "C" {
-        fn statvfs(path: *const std::os::raw::c_char, buffer: *mut Statvfs) -> std::os::raw::c_int;
-    }
-
-    let mut cpath: Vec<u8> = path.as_bytes().to_vec();
-    cpath.push(0);
-    let mut buffer = std::mem::MaybeUninit::<Statvfs>::uninit();
-    // SAFETY: 路径是以 NUL 结尾的 C 字符串；buffer 大小与布局与 libc 的
-    // struct statvfs 一致（64 位 Linux）。调用失败时我们不看 buffer。
-    let result = unsafe { statvfs(cpath.as_ptr() as *const _, buffer.as_mut_ptr()) };
+    let cpath =
+        std::ffi::CString::new(path).map_err(|_| "statvfs 路径包含 NUL 字节".to_string())?;
+    let mut buffer = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: cpath 是以 NUL 结尾的 C 字符串，buffer 与目标平台 libc 的结构体布局一致。
+    let result = unsafe { libc::statvfs(cpath.as_ptr(), buffer.as_mut_ptr()) };
     if result != 0 {
-        return Err(format!("statvfs 失败（errno {}）", std::io::Error::last_os_error()));
+        return Err(format!(
+            "statvfs 失败（errno {}）",
+            std::io::Error::last_os_error()
+        ));
     }
     // SAFETY: 上面的调用返回 0，buffer 已被 libc 完整写入。
     let stat = unsafe { buffer.assume_init() };
-    let block = if stat.f_frsize > 0 { stat.f_frsize } else { stat.f_bsize };
+    let block = if stat.f_frsize > 0 {
+        stat.f_frsize as u64
+    } else {
+        stat.f_bsize as u64
+    };
     if block == 0 || stat.f_blocks == 0 {
         return Err("statvfs 返回 0 容量".to_string());
     }
     Ok((
-        stat.f_blocks.saturating_mul(block),
-        stat.f_bavail.saturating_mul(block),
+        (stat.f_blocks as u64).saturating_mul(block),
+        (stat.f_bavail as u64).saturating_mul(block),
     ))
 }
 
-#[cfg(not(target_pointer_width = "64"))]
+#[cfg(not(unix))]
 fn statvfs_bytes(_path: &str) -> Result<(u64, u64), String> {
-    // 32 位平台上结构体布局不同，解析风险大：直接交给 df 那条路
-    Err("32 位平台使用 df 读取磁盘".to_string())
+    Err("当前平台没有 statvfs，使用 df 读取磁盘".to_string())
 }
 
 /// 进程：CPU 占比按「本进程 jiffies / 整机 jiffies」算，和 `top` 的口径一致。
@@ -910,7 +962,9 @@ fn read_processes(
     for entry in entries.filter_map(|entry| entry.ok()) {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Ok(pid) = name.parse::<i32>() else { continue };
+        let Ok(pid) = name.parse::<i32>() else {
+            continue;
+        };
 
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
             continue;
@@ -921,8 +975,14 @@ fn read_processes(
         };
         let fields: Vec<&str> = rest.split_whitespace().collect();
         // 去掉 comm 之后，utime 是第 12 项、stime 是第 13 项
-        let utime = fields.get(11).and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
-        let stime = fields.get(12).and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
+        let utime = fields
+            .get(11)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let stime = fields
+            .get(12)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
         let jiffies = utime + stime;
         current.insert(pid, jiffies);
 
@@ -981,16 +1041,25 @@ fn select_processes(all: &[Process], ui_running: bool) -> Vec<Process> {
         }
     };
 
-    take(all.iter().find(|item| item.pid == own_pid), "core", &mut selected);
     take(
-        all.iter().find(|item| item.name == UI_PROCESS && ui_running),
+        all.iter().find(|item| item.pid == own_pid),
+        "core",
+        &mut selected,
+    );
+    take(
+        all.iter()
+            .find(|item| item.name == UI_PROCESS && ui_running),
         "ui",
         &mut selected,
     );
     let top_cpu = all
         .iter()
         .filter(|item| item.cpu_percent > 0.0)
-        .max_by(|a, b| a.cpu_percent.partial_cmp(&b.cpu_percent).unwrap_or(std::cmp::Ordering::Equal));
+        .max_by(|a, b| {
+            a.cpu_percent
+                .partial_cmp(&b.cpu_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     take(top_cpu, "top_cpu", &mut selected);
     let top_memory = all.iter().max_by_key(|item| item.memory_bytes);
     take(top_memory, "top_memory", &mut selected);
@@ -1018,7 +1087,10 @@ async fn ping_latency() -> Option<f64> {
 fn parse_ping(output: &str) -> Option<f64> {
     let index = output.find("time=")?;
     let rest = &output[index + "time=".len()..];
-    let value: String = rest.chars().take_while(|ch| ch.is_ascii_digit() || *ch == '.').collect();
+    let value: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
     let parsed = value.parse::<f64>().ok()?;
     Some((parsed * 10.0).round() / 10.0)
 }
@@ -1087,8 +1159,16 @@ mod tests {
 
     #[test]
     fn cpu_usage_is_the_busy_share_of_two_readings() {
-        let previous = RawCpu { total: 1000, idle: 400, cores: vec![(500, 200), (500, 200)] };
-        let current = RawCpu { total: 2000, idle: 600, cores: vec![(1000, 300), (1000, 300)] };
+        let previous = RawCpu {
+            total: 1000,
+            idle: 400,
+            cores: vec![(500, 200), (500, 200)],
+        };
+        let current = RawCpu {
+            total: 2000,
+            idle: 600,
+            cores: vec![(1000, 300), (1000, 300)],
+        };
         let cpu = cpu_usage(&previous, &current);
         // 忙的时间 = 1000 - 200 = 800，占总量 1000 的 80%
         assert_eq!(cpu.usage_percent, 80.0);
@@ -1098,7 +1178,11 @@ mod tests {
 
     #[test]
     fn cpu_usage_does_not_divide_by_zero() {
-        let same = RawCpu { total: 10, idle: 5, cores: vec![(10, 5)] };
+        let same = RawCpu {
+            total: 10,
+            idle: 5,
+            cores: vec![(10, 5)],
+        };
         assert_eq!(cpu_usage(&same, &same).usage_percent, 0.0);
     }
 
@@ -1127,8 +1211,18 @@ mod tests {
 
     #[test]
     fn wireless_line_yields_signal_in_dbm() {
-        assert_eq!(parse_wireless_line("  wlan0: 0000   54.  -47.  -256        0      0  0  0  0  0"), Some(-47));
-        assert_eq!(parse_wireless_line("Inter-| sta-|   Quality        |   Discarded packets"), None);
+        assert_eq!(
+            parse_wireless_line("  wlan0: 0000   54.  -47.  -256        0      0  0  0  0  0"),
+            Some(-47)
+        );
+        assert_eq!(
+            parse_wireless_line(" wlan0: 0000   79.  100.     0.        0      0  0  0  0  0"),
+            Some(-61)
+        );
+        assert_eq!(
+            parse_wireless_line("Inter-| sta-|   Quality        |   Discarded packets"),
+            None
+        );
     }
 
     #[test]
@@ -1149,18 +1243,42 @@ mod tests {
     fn process_selection_marks_roles_without_duplicates() {
         let own = std::process::id() as i32;
         let all = vec![
-            Process { pid: own, name: "xiaozhi-linux-rs".to_string(), roles: vec![], cpu_percent: 42.0, memory_bytes: 9_000_000 },
-            Process { pid: 4242, name: UI_PROCESS.to_string(), roles: vec![], cpu_percent: 12.0, memory_bytes: 40_000_000 },
-            Process { pid: 777, name: "ffmpeg".to_string(), roles: vec![], cpu_percent: 3.0, memory_bytes: 1_000 },
+            Process {
+                pid: own,
+                name: "xiaozhi-linux-rs".to_string(),
+                roles: vec![],
+                cpu_percent: 42.0,
+                memory_bytes: 9_000_000,
+            },
+            Process {
+                pid: 4242,
+                name: UI_PROCESS.to_string(),
+                roles: vec![],
+                cpu_percent: 12.0,
+                memory_bytes: 40_000_000,
+            },
+            Process {
+                pid: 777,
+                name: "ffmpeg".to_string(),
+                roles: vec![],
+                cpu_percent: 3.0,
+                memory_bytes: 1_000,
+            },
         ];
         let selected = select_processes(&all, true);
         // 只有核心与 UI 进了榜：第三个进程不占任何角色，不该出现
         assert_eq!(selected.len(), 2);
-        let own_entry = selected.iter().find(|item| item.pid == own).expect("核心进程必须在列表里");
+        let own_entry = selected
+            .iter()
+            .find(|item| item.pid == own)
+            .expect("核心进程必须在列表里");
         assert!(own_entry.roles.contains(&"core".to_string()));
         // 核心同时是 CPU 最高：两条角色合并到同一条记录，不重复出现
         assert!(own_entry.roles.contains(&"top_cpu".to_string()));
-        let ui_entry = selected.iter().find(|item| item.pid == 4242).expect("UI 进程必须在列表里");
+        let ui_entry = selected
+            .iter()
+            .find(|item| item.pid == 4242)
+            .expect("UI 进程必须在列表里");
         assert!(ui_entry.roles.contains(&"top_memory".to_string()));
     }
 
@@ -1188,7 +1306,18 @@ mod tests {
         let value = service.api();
         // 还没采过样：ok=false，但字段齐全、仍是合法 JSON
         assert_eq!(value.get("ok").and_then(Value::as_bool), Some(false));
-        for key in ["cpu", "load", "memory", "storage", "temperature", "wifi", "network", "processes", "services", "errors"] {
+        for key in [
+            "cpu",
+            "load",
+            "memory",
+            "storage",
+            "temperature",
+            "wifi",
+            "network",
+            "processes",
+            "services",
+            "errors",
+        ] {
             assert!(value.get(key).is_some(), "缺少字段 {}", key);
         }
         assert_eq!(

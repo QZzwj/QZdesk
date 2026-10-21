@@ -1,8 +1,10 @@
 #include "wifi.h"
 #include <dirent.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -24,6 +26,19 @@
 #define IFACE_ENV "QZDESK_WIFI_IFACE"
 #define CONF_ENV "QZDESK_WPA_CONF"
 #define KO_DIR_ENV "QZDESK_WIFI_KO_DIR"
+#define VENDOR_CONF "/data/wpa_supplicant.conf"
+#define VENDOR_CFG_CONF "/data/cfg/wpa_supplicant.conf"
+
+static void wifi_log(const char *format, ...)
+{
+    va_list args;
+
+    va_start(args, format);
+    fputs("QZdesk Wi-Fi: ", stderr);
+    vfprintf(stderr, format, args);
+    fputc('\n', stderr);
+    va_end(args);
+}
 
 static char cached_iface[32];
 static bool iface_resolved;
@@ -47,9 +62,20 @@ enum {
     WIFI_CMD_NONE,
     WIFI_CMD_ENABLE,
     WIFI_CMD_DISABLE,
+    WIFI_CMD_AUTOCONNECT,
     WIFI_CMD_SCAN,
     WIFI_CMD_CONNECT,
+    WIFI_CMD_RECONNECT,
 };
+
+typedef enum {
+    AUTOCONNECT_NO_SAVED_NETWORK,
+    AUTOCONNECT_CONNECTED,
+    AUTOCONNECT_FAILED,
+} autoconnect_result_t;
+
+static autoconnect_result_t autoconnect_saved_network(void);
+static bool reconnect_saved_network(const char *ssid);
 
 static void set_worker_status(qz_wifi_state_t state, const char *ssid, const char *error)
 {
@@ -85,14 +111,50 @@ static void *wifi_worker_main(void *unused)
             if (qz_wifi_start() && qz_wifi_scan_start()) {
                 set_worker_status(QZ_WIFI_SCANNING, "", "");
             } else {
-                set_worker_status(QZ_WIFI_FAILED, "", "无法启动 Wi-Fi");
+                set_worker_status(QZ_WIFI_FAILED, "",
+                                  join_reason[0] ? join_reason : "无法启动 Wi-Fi");
             }
         } else if (command == WIFI_CMD_DISABLE) {
             qz_wifi_stop();
             set_worker_status(QZ_WIFI_OFF, "", "");
+        } else if (command == WIFI_CMD_AUTOCONNECT) {
+            autoconnect_result_t result = autoconnect_saved_network();
+            if (result == AUTOCONNECT_CONNECTED) {
+                char current[64];
+                qz_wifi_current(current, sizeof(current));
+                set_worker_status(QZ_WIFI_CONNECTED, current, "");
+            } else if (result == AUTOCONNECT_NO_SAVED_NETWORK) {
+                /* 没配过网时安静跳过，不能把正常的新设备标成故障。 */
+                set_worker_status(QZ_WIFI_IDLE, "", "");
+            } else {
+                set_worker_status(QZ_WIFI_FAILED, "",
+                                  join_reason[0] ? join_reason : "保存的 Wi-Fi 连接失败");
+            }
         } else if (command == WIFI_CMD_SCAN) {
+            char previous_ssid[64] = "";
+            bool had_live_link = qz_wifi_link_up();
+            if (had_live_link) qz_wifi_current(previous_ssid, sizeof(previous_ssid));
+
             if (qz_wifi_scan_start()) set_worker_status(QZ_WIFI_SCANNING, "", "");
             else set_worker_status(QZ_WIFI_FAILED, "", "无法扫描无线网络");
+
+            /* Some RTL8723BS firmware disassociates while scanning. If that
+             * happens during "search other networks", put the previously
+             * connected network back instead of stranding the device on a
+             * stale lease with no carrier. */
+            if (had_live_link && !qz_wifi_link_up()) {
+                if (previous_ssid[0] &&
+                    reconnect_saved_network(previous_ssid) &&
+                    qz_wifi_link_up()) {
+                    set_worker_status(QZ_WIFI_CONNECTED, previous_ssid, "");
+                } else {
+                    set_worker_status(QZ_WIFI_FAILED, previous_ssid,
+                                      join_reason[0] ? join_reason
+                                                     : "搜索后未能恢复原网络");
+                }
+            } else if (had_live_link) {
+                set_worker_status(QZ_WIFI_CONNECTED, previous_ssid, "");
+            }
         } else if (command == WIFI_CMD_CONNECT) {
             set_worker_status(QZ_WIFI_CONNECTING, ssid, "");
             if (qz_wifi_join(ssid, password)) {
@@ -100,6 +162,14 @@ static void *wifi_worker_main(void *unused)
             } else {
                 set_worker_status(QZ_WIFI_FAILED, ssid,
                                   join_reason[0] ? join_reason : "无法加入网络");
+            }
+        } else if (command == WIFI_CMD_RECONNECT) {
+            set_worker_status(QZ_WIFI_CONNECTING, ssid, "");
+            if (reconnect_saved_network(ssid)) {
+                set_worker_status(QZ_WIFI_CONNECTED, ssid, "");
+            } else {
+                set_worker_status(QZ_WIFI_FAILED, ssid,
+                                  join_reason[0] ? join_reason : "无法重新连接已保存网络");
             }
         }
     }
@@ -157,6 +227,11 @@ bool qz_wifi_enable_async(bool enabled)
     return submit_worker_command(enabled ? WIFI_CMD_ENABLE : WIFI_CMD_DISABLE, NULL, NULL);
 }
 
+bool qz_wifi_autoconnect_async(void)
+{
+    return submit_worker_command(WIFI_CMD_AUTOCONNECT, NULL, NULL);
+}
+
 bool qz_wifi_scan_async(void)
 {
     return submit_worker_command(WIFI_CMD_SCAN, NULL, NULL);
@@ -165,6 +240,12 @@ bool qz_wifi_scan_async(void)
 bool qz_wifi_connect_async(const char *ssid, const char *password)
 {
     return submit_worker_command(WIFI_CMD_CONNECT, ssid, password);
+}
+
+bool qz_wifi_reconnect_async(const char *ssid)
+{
+    if (!ssid || ssid[0] == '\0') return false;
+    return submit_worker_command(WIFI_CMD_RECONNECT, ssid, NULL);
 }
 
 bool qz_wifi_status(qz_wifi_status_t *output)
@@ -214,6 +295,10 @@ static void run_shell(const char *command)
     int status = system(command);
     (void)status;
 }
+
+static bool iface_ipv4(const char *iface, char *addr, size_t size);
+static bool has_default_route(const char *iface);
+static bool ensure_parent_dir(const char *path);
 
 static bool has_wireless_dir(const char *name)
 {
@@ -360,12 +445,16 @@ void qz_wifi_interface(char *output, unsigned int size)
     snprintf(output, size, "%.31s", cached_iface);
 }
 
+static const char *persist_conf_path(void);
+
 static const char *conf_path(void)
 {
     const char *forced = getenv(CONF_ENV);
     if (forced && forced[0] != '\0') return forced;
-    if (access("/etc/wpa_supplicant.conf", F_OK) == 0) return "/etc/wpa_supplicant.conf";
-    return "/etc/wpa_supplicant/wpa_supplicant.conf";
+    /* Always keep the supplicant's active config in the writable persistent
+     * location. The rootfs config is absent on this image, and falling back to
+     * it made the very first scan fail before any network had been saved. */
+    return persist_conf_path();
 }
 
 /** SSIDs and passwords are handed to the shell, so refuse anything that could
@@ -394,9 +483,27 @@ static bool interface_safe(const char *iface)
 /* supplicant lifecycle                                                       */
 /* ------------------------------------------------------------------------- */
 
-/* 入网段里的助手，启停也要用（声明在前，定义在后） */
-static const char *persist_conf_path(void);
-static void install_conf(void);
+/* 入网段里的助手，启停也要用（持久路径声明已提前到 conf_path 上方） */
+static bool install_conf(void);
+static bool sync_vendor_conf(void);
+static void stop_wifi_services(const char *iface);
+static bool config_has_network(const char *path);
+static bool bring_up(const char *iface, bool require_network);
+
+static bool process_running(const char *name)
+{
+    char command[96];
+    char buffer[128];
+
+    snprintf(command, sizeof(command), "pidof %s 2>/dev/null", name);
+    return run_capture(command, buffer, sizeof(buffer)) && buffer[0] != '\0';
+}
+
+static bool vendor_wifi_running(void)
+{
+    return process_running("rkwifi_server") ||
+           process_running("wpa_supplicant_nl80211");
+}
 
 static bool wpa_alive(const char *iface)
 {
@@ -441,8 +548,9 @@ static void ensure_conf_globals(void)
     }
     if (!missing) return;   /* nothing to do, and the file may not be writable */
 
+    if (!ensure_parent_dir(path)) return;
     file = fopen(path, "a");
-    if (!file) return;      /* read only rootfs: the vendor config is used as is */
+    if (!file) return;
     if (content[0] != '\0' && content[strlen(content) - 1] != '\n') fputc('\n', file);
     if (!strstr(content, "ctrl_interface=")) fprintf(file, "ctrl_interface=%s\n", CTRL_DIR);
     if (!strstr(content, "ap_scan=")) fprintf(file, "ap_scan=1\n");
@@ -454,9 +562,18 @@ bool qz_wifi_start(void)
 {
     char iface[32];
     char command[320];
+    bool saved_network;
+
     qz_wifi_interface(iface, sizeof(iface));
     if (!interface_safe(iface)) return false;
-    if (wpa_alive(iface)) return true;
+    join_reason[0] = '\0';
+    saved_network = config_has_network(persist_conf_path());
+
+    if (saved_network && !install_conf()) {
+        snprintf(join_reason, sizeof(join_reason), "无法安装保存的 Wi-Fi 配置");
+        wifi_log("安装保存配置失败");
+        return false;
+    }
 
     /* Bring the interface up and give wpa_cli its socket directory. */
     snprintf(command, sizeof(command),
@@ -466,27 +583,29 @@ bool qz_wifi_start(void)
     snprintf(command, sizeof(command), "mkdir -p %s >/dev/null 2>&1", CTRL_DIR);
     run_quiet(command);
 
-    /* 有持久副本（上次配过的网络）就先装回去，开机能自动回连 */
-    if (access(persist_conf_path(), F_OK) == 0) install_conf();
     ensure_conf_globals();
+    if (!sync_vendor_conf()) {
+        snprintf(join_reason, sizeof(join_reason), "无法同步厂商 Wi-Fi 配置");
+        wifi_log("同步厂商配置失败");
+        return false;
+    }
 
-    snprintf(command, sizeof(command),
-             "wpa_supplicant -B -c %s -i %s >/dev/null 2>&1", conf_path(), iface);
-    run_quiet(command);
-    return wpa_alive(iface);
+    /* 厂商服务会在开机后重新拉起自己的 supplicant，并可能覆盖运行配置。
+     * 即使当前 wpa_cli 有应答，也必须先收回控制权。 */
+    if (wpa_alive(iface) && !vendor_wifi_running()) {
+        return true;
+    }
+    return bring_up(iface, saved_network);
 }
 
 void qz_wifi_stop(void)
 {
     char iface[32];
-    char command[240];
+
     qz_wifi_interface(iface, sizeof(iface));
     if (!interface_safe(iface)) return;
-    /* Stop only the supplicant attached to this interface. A global
-     * killall can take down another network service on multi-interface boards. */
-    snprintf(command, sizeof(command),
-             "wpa_cli -i %s terminate >/dev/null 2>&1", iface);
-    run_quiet(command);
+    stop_wifi_services(iface);
+    char command[160];
     snprintf(command, sizeof(command), "ifconfig %s down >/dev/null 2>&1", iface);
     run_quiet(command);
     scan_pending = false;
@@ -516,6 +635,22 @@ static const char *tool_path(const char *name, char *buffer, size_t size)
     }
     snprintf(buffer, size, "%s", name);
     return buffer;
+}
+
+static void stop_wifi_services(const char *iface)
+{
+    char tool[64];
+    char command[160];
+
+    /* 先停厂商服务，避免它在我们重启 supplicant 后又把旧实例拉回来。 */
+    run_quiet("killall rkwifi_server >/dev/null 2>&1");
+    snprintf(command, sizeof(command), "%s -i %s terminate >/dev/null 2>&1",
+             tool_path("wpa_cli", tool, sizeof(tool)), iface);
+    run_quiet(command);
+    run_quiet("killall wpa_supplicant_nl80211 >/dev/null 2>&1");
+    run_quiet("killall wpa_supplicant >/dev/null 2>&1");
+    run_quiet("killall udhcpc >/dev/null 2>&1");
+    usleep(200000);
 }
 
 /** dBm -> 0..100（Echo-Mate 的公式：2*(dBm+100)）。 */
@@ -864,32 +999,49 @@ const char *qz_wifi_scan_note(void)
     return scan_note;
 }
 
-/** wlan0 上的 IPv4（Echo-Mate 的判定：有没有 IP 就是有没有连上），无则空串。 */
+/** Read carrier state without shelling out. Wireless interfaces commonly stay
+ *  UP after disassociation while retaining an old lease, so IFF_UP alone is not
+ *  enough when deciding whether the network is still live. */
+static bool interface_carrier_up(const char *iface)
+{
+    char path[128];
+    char text[16];
+    FILE *file;
+    int carrier = 0;
+
+    snprintf(path, sizeof(path), "/sys/class/net/%.31s/carrier", iface);
+    file = fopen(path, "r");
+    if (!file) return false;
+    bool ok = fgets(text, sizeof(text), file) != NULL &&
+              sscanf(text, "%d", &carrier) == 1;
+    fclose(file);
+    return ok && carrier == 1;
+}
+
+/** wlan0 上的有效 IPv4，无载波或只有 169.254.x.x 时返回空串。 */
 void qz_wifi_ipv4(char *output, unsigned int size)
 {
     char iface[32];
-    char command[200];
-    char buffer[2048];
-    const char *start;
-    const char *end;
+    char address[32];
 
     if (size == 0) return;
     output[0] = '\0';
     qz_wifi_interface(iface, sizeof(iface));
     if (!interface_safe(iface)) return;
-    snprintf(command, sizeof(command), "ifconfig %s 2>/dev/null", iface);
-    if (!run_capture(command, buffer, sizeof(buffer))) return;
-    start = strstr(buffer, "inet addr:");
-    if (start) start += 10;
-    else {
-        start = strstr(buffer, "inet ");
-        if (!start) return;
-        start += 5;
-    }
-    end = start;
-    while ((*end >= '0' && *end <= '9') || *end == '.') end++;
-    if (end == start) return;
-    snprintf(output, size, "%.*s", (int)(end - start), start);
+    if (!interface_carrier_up(iface)) return;
+    if (!iface_ipv4(iface, address, sizeof(address))) return;
+    snprintf(output, size, "%s", address);
+}
+
+bool qz_wifi_link_up(void)
+{
+    char iface[32];
+    char address[32];
+
+    qz_wifi_interface(iface, sizeof(iface));
+    if (!interface_safe(iface) || !interface_carrier_up(iface)) return false;
+    return iface_ipv4(iface, address, sizeof(address)) &&
+           has_default_route(iface);
 }
 
 /** wlan0 的 MAC 地址（读 sysfs，不需要任何外部工具），无则空串。 */
@@ -925,14 +1077,33 @@ void qz_wifi_current(char *output, unsigned int size)
     output[0] = '\0';
     qz_wifi_interface(iface, sizeof(iface));
     if (!interface_safe(iface)) return;
+    if (!interface_carrier_up(iface)) return;
     snprintf(command, sizeof(command), "wpa_cli -i %s status 2>/dev/null", iface);
-    if (!run_capture(command, buffer, sizeof(buffer))) return;
-
-    for (line = strtok_r(buffer, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-        if (strncmp(line, "ssid=", 5) != 0) continue;
-        snprintf(output, size, "%.63s", line + 5);
-        return;
+    if (run_capture(command, buffer, sizeof(buffer))) {
+        for (line = strtok_r(buffer, "\n", &save); line;
+             line = strtok_r(NULL, "\n", &save)) {
+            if (strncmp(line, "ssid=", 5) != 0) continue;
+            snprintf(output, size, "%.63s", line + 5);
+            return;
+        }
     }
+
+    /* Some vendor supplicants report INACTIVE while a valid lease and route
+     * remain active. Only use the saved SSID when the whole link is live. */
+    if (!qz_wifi_link_up()) return;
+    FILE *file = fopen(persist_conf_path(), "r");
+    if (!file) return;
+    while (fgets(buffer, sizeof(buffer), file)) {
+        char *value = strstr(buffer, "ssid=\"");
+        if (!value) continue;
+        value += 6;
+        char *end = strchr(value, '"');
+        if (!end) continue;
+        *end = '\0';
+        snprintf(output, size, "%.63s", value);
+        break;
+    }
+    fclose(file);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -993,24 +1164,163 @@ static bool write_supplicant_conf(const char *ssid, const char *password)
     fprintf(file, "\tscan_ssid=1\n");
     fprintf(file, "}\n");
     fclose(file);
+    chmod(path, 0600);
     return true;
 }
 
 /** 把持久副本装到 supplicant 实际读取的路径。 */
-static void install_conf(void)
+static bool ensure_parent_dir(const char *path)
 {
-    char command[400];
+    char dir[256];
+    char *slash;
 
-    snprintf(command, sizeof(command), "cp -f %s %s >/dev/null 2>&1",
-             persist_conf_path(), conf_path());
-    run_quiet(command);
+    if (!path || strlen(path) >= sizeof(dir)) return false;
+    snprintf(dir, sizeof(dir), "%s", path);
+    slash = strrchr(dir, '/');
+    if (!slash || slash == dir) return true;
+    *slash = '\0';
+
+    for (char *p = dir + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(dir, 0755) != 0 && access(dir, F_OK) != 0) return false;
+        *p = '/';
+    }
+    return mkdir(dir, 0755) == 0 || access(dir, F_OK) == 0;
+}
+
+/** 原子复制配置，避免 supplicant 读到半个文件；配置始终只允许 root 读取。 */
+static bool copy_config_atomic(const char *source, const char *target)
+{
+    char temporary[256];
+    char buffer[1024];
+    FILE *input;
+    FILE *output;
+    size_t count;
+    bool ok = true;
+
+    if (!source || !target || strcmp(source, target) == 0) return true;
+    if (snprintf(temporary, sizeof(temporary), "%s.qzdesk.tmp", target) >=
+        (int)sizeof(temporary)) {
+        return false;
+    }
+    if (!ensure_parent_dir(target)) return false;
+
+    input = fopen(source, "rb");
+    if (!input) return false;
+    output = fopen(temporary, "wb");
+    if (!output) {
+        fclose(input);
+        return false;
+    }
+
+    while ((count = fread(buffer, 1, sizeof(buffer), input)) > 0) {
+        if (fwrite(buffer, 1, count, output) != count) {
+            ok = false;
+            break;
+        }
+    }
+    if (ferror(input)) ok = false;
+    if (fflush(output) != 0 || fsync(fileno(output)) != 0) ok = false;
+    if (fclose(output) != 0) ok = false;
+    fclose(input);
+
+    if (ok && (chmod(temporary, 0600) != 0 || rename(temporary, target) != 0)) ok = false;
+    if (!ok) unlink(temporary);
+    return ok;
+}
+
+static bool install_conf(void)
+{
+    const char *source = persist_conf_path();
+    const char *target = conf_path();
+
+    /* 首次启用 Wi-Fi 时还没有保存的 network，继续使用系统的空配置扫描。 */
+    if (strcmp(source, target) == 0 || access(source, F_OK) != 0) return true;
+    return copy_config_atomic(source, target);
+}
+
+static bool config_has_network(const char *path)
+{
+    char line[192];
+    FILE *file;
+
+    if (!path || path[0] == '\0') return false;
+    file = fopen(path, "r");
+    if (!file) return false;
+    while (fgets(line, sizeof(line), file)) {
+        if (strstr(line, "network={")) {
+            fclose(file);
+            return true;
+        }
+    }
+    fclose(file);
+    return false;
+}
+
+static bool config_has_ssid(const char *path, const char *ssid)
+{
+    char line[192];
+    FILE *file;
+
+    if (!path || !ssid || ssid[0] == '\0') return false;
+    file = fopen(path, "r");
+    if (!file) return false;
+    while (fgets(line, sizeof(line), file)) {
+        const char *value = strstr(line, "ssid=\"");
+        if (!value) continue;
+        value += 6;
+        const char *end = strchr(value, '"');
+        size_t length = end ? (size_t)(end - value) : strlen(value);
+        if (length == strlen(ssid) && strncmp(value, ssid, length) == 0) {
+            fclose(file);
+            return true;
+        }
+    }
+    fclose(file);
+    return false;
+}
+
+bool qz_wifi_is_saved_network(const char *ssid)
+{
+    return config_has_ssid(persist_conf_path(), ssid);
+}
+
+/** 厂商逻辑优先读 /data/cfg，缺失时才用 /etc 覆盖 /data，故两处都同步。 */
+static bool sync_vendor_conf(void)
+{
+    const char *saved = persist_conf_path();
+
+    /* 单元/桌面测试用临时配置时不要碰真机 /data。 */
+    if (getenv(CONF_ENV) && getenv(CONF_ENV)[0] != '\0') return true;
+    if (!config_has_network(saved)) return true;
+    if (!copy_config_atomic(saved, VENDOR_CONF)) return false;
+    if (!copy_config_atomic(saved, VENDOR_CFG_CONF)) return false;
+    return true;
 }
 
 /** 起网：ifconfig up -> 重启 supplicant 与 udhcpc（Echo-Mate 的路线）。 */
-static bool bring_up(const char *iface)
+static bool bring_up(const char *iface, bool require_network)
 {
     char command[300];
     char tool[64];
+    const char *path = conf_path();
+
+    if (require_network && !config_has_network(path)) {
+        snprintf(join_reason, sizeof(join_reason), "保存的 Wi-Fi 配置不完整");
+        wifi_log("配置文件缺少 network 块");
+        return false;
+    }
+    if (!install_conf()) {
+        snprintf(join_reason, sizeof(join_reason), "无法安装 Wi-Fi 配置");
+        wifi_log("安装运行配置失败");
+        return false;
+    }
+    if (!sync_vendor_conf()) {
+        snprintf(join_reason, sizeof(join_reason), "无法同步厂商 Wi-Fi 配置");
+        wifi_log("同步厂商配置失败");
+        return false;
+    }
 
     snprintf(command, sizeof(command), "mkdir -p %s >/dev/null 2>&1", CTRL_DIR);
     run_quiet(command);
@@ -1019,16 +1329,21 @@ static bool bring_up(const char *iface)
              iface, iface);
     run_quiet(command);
 
-    /* 只收掉 DHCP 客户端与 supplicant 本身，按进程名精确匹配，不误伤别的服务 */
-    run_quiet("killall udhcpc >/dev/null 2>&1");
-    snprintf(command, sizeof(command), "%s -i %s terminate >/dev/null 2>&1",
-             tool_path("wpa_cli", tool, sizeof(tool)), iface);
-    run_quiet(command);
-    run_quiet("killall wpa_supplicant >/dev/null 2>&1");
+    stop_wifi_services(iface);
 
     snprintf(command, sizeof(command), "%s -B -c %s -i %s >/dev/null 2>&1",
-             tool_path("wpa_supplicant", tool, sizeof(tool)), conf_path(), iface);
+             tool_path("wpa_supplicant", tool, sizeof(tool)), path, iface);
     run_quiet(command);
+
+    for (int attempt = 0; attempt < 80; attempt++) {
+        if (wpa_alive(iface)) break;
+        usleep(50000);
+    }
+    if (!wpa_alive(iface)) {
+        snprintf(join_reason, sizeof(join_reason), "wpa_supplicant 启动失败");
+        wifi_log("wpa_supplicant 未就绪");
+        return false;
+    }
 
     /* DHCP 放后台跑，前台只等结果 */
     snprintf(command, sizeof(command), "%s -i %s -b -q -n -t 4 >/dev/null 2>&1 &",
@@ -1040,16 +1355,11 @@ static bool bring_up(const char *iface)
 void qz_wifi_disconnect(void)
 {
     char iface[32];
-    char command[300];
-    char tool[64];
+    char command[160];
 
     qz_wifi_interface(iface, sizeof(iface));
     if (!interface_safe(iface)) return;
-    run_quiet("killall udhcpc >/dev/null 2>&1");
-    snprintf(command, sizeof(command), "%s -i %s terminate >/dev/null 2>&1",
-             tool_path("wpa_cli", tool, sizeof(tool)), iface);
-    run_quiet(command);
-    run_quiet("killall wpa_supplicant >/dev/null 2>&1");
+    stop_wifi_services(iface);
     snprintf(command, sizeof(command), "ifconfig %s down >/dev/null 2>&1", iface);
     run_quiet(command);
     scan_pending = false;
@@ -1057,12 +1367,11 @@ void qz_wifi_disconnect(void)
 
 bool qz_wifi_forget(void)
 {
-    char command[400];
-
     qz_wifi_disconnect();
     unlink(persist_conf_path());
-    snprintf(command, sizeof(command), "rm -f %s >/dev/null 2>&1", conf_path());
-    run_quiet(command);
+    unlink(VENDOR_CONF);
+    unlink(VENDOR_CFG_CONF);
+    if (strcmp(conf_path(), persist_conf_path()) != 0) unlink(conf_path());
     return true;
 }
 
@@ -1142,25 +1451,10 @@ static bool wpa_completed(const char *iface)
     return strstr(text, "wpa_state=COMPLETED") != NULL;
 }
 
-bool qz_wifi_join(const char *ssid, const char *password)
+/** 等待关联、IPv4 与默认路由同时成立；失败原因留在 join_reason。 */
+static bool wait_for_network(const char *iface, int attempts)
 {
-    char iface[32];
-
-    qz_wifi_interface(iface, sizeof(iface));
-    if (!interface_safe(iface)) return false;
-    if (!ssid || ssid[0] == '\0' || !shell_safe(ssid)) return false;
-    if (!shell_safe(password ? password : "")) return false;
-    /* WPA-PSK 的合法长度是 8..63；短于此一定是输错了，早点报错省 15 秒等待 */
-    if (password && password[0] != '\0' &&
-        (strlen(password) < 8 || strlen(password) > 63)) {
-        return false;
-    }
-
-    if (!write_supplicant_conf(ssid, password)) return false;
-    install_conf();
-    bring_up(iface);
-
-    /* 判定改成三件事同时成立才算连上（20 秒窗口）：
+    /* 判定是三件事同时成立才算连上：
      *   ① 关联成功（wpa_state=COMPLETED）
      *   ② 拿到真地址（不是 169.254 的自分配地址）
      *   ③ 存在默认路由
@@ -1168,7 +1462,7 @@ bool qz_wifi_join(const char *ssid, const char *password)
     join_reason[0] = '\0';
     bool associated = false;
     bool dhcp_retried = false;
-    for (int attempt = 0; attempt < 80; attempt++) {
+    for (int attempt = 0; attempt < attempts; attempt++) {
         char address[32];
         bool has_ip = iface_ipv4(iface, address, sizeof(address));
 
@@ -1199,4 +1493,98 @@ bool qz_wifi_join(const char *ssid, const char *password)
         }
     }
     return false;
+}
+
+static autoconnect_result_t autoconnect_saved_network(void)
+{
+    char iface[32] = "";
+    const char *saved = persist_conf_path();
+
+    join_reason[0] = '\0';
+    if (!config_has_network(saved)) return AUTOCONNECT_NO_SAVED_NETWORK;
+
+    /* 驱动和固件可能比界面晚出现；在 worker 里等，不阻塞首帧。 */
+    for (int attempt = 0; attempt < 180; attempt++) {
+        qz_wifi_interface(iface, sizeof(iface));
+        if (interface_safe(iface)) break;
+        if (!qz_wifi_nic_pending()) return AUTOCONNECT_FAILED;
+        usleep(250000);
+    }
+    if (!interface_safe(iface)) {
+        snprintf(join_reason, sizeof(join_reason), "无线网卡未就绪");
+        return AUTOCONNECT_FAILED;
+    }
+
+    ensure_conf_globals();
+    if (!bring_up(iface, true)) return AUTOCONNECT_FAILED;
+    if (wait_for_network(iface, 120)) {
+        /* RkLunch 的 post_chk 比 rcS 晚几秒，可能在我们连上后才拉起厂商
+         * supplicant。留一个短窗口，发现它晚到就收回控制权。 */
+        for (int attempt = 0; attempt < 20; attempt++) {
+            if (vendor_wifi_running()) {
+                wifi_log("厂商 Wi-Fi 服务晚启动，正在收回控制权");
+                if (!bring_up(iface, true) || !wait_for_network(iface, 120)) {
+                    return AUTOCONNECT_FAILED;
+                }
+            }
+            usleep(500000);
+        }
+        if (!vendor_wifi_running()) {
+            wifi_log("已从保存配置连接到 Wi-Fi");
+            return AUTOCONNECT_CONNECTED;
+        }
+        snprintf(join_reason, sizeof(join_reason), "厂商 Wi-Fi 服务仍在运行");
+        return AUTOCONNECT_FAILED;
+    }
+    if (join_reason[0] == '\0') {
+        snprintf(join_reason, sizeof(join_reason), "保存的 Wi-Fi 连接超时");
+    }
+    return AUTOCONNECT_FAILED;
+}
+
+static bool reconnect_saved_network(const char *ssid)
+{
+    char iface[32];
+
+    join_reason[0] = '\0';
+    if (!config_has_ssid(persist_conf_path(), ssid)) {
+        snprintf(join_reason, sizeof(join_reason), "该网络没有保存的凭据");
+        return false;
+    }
+    qz_wifi_interface(iface, sizeof(iface));
+    if (!interface_safe(iface)) {
+        snprintf(join_reason, sizeof(join_reason), "无线网卡未就绪");
+        return false;
+    }
+    ensure_conf_globals();
+    if (!bring_up(iface, true)) return false;
+    if (!wait_for_network(iface, 80)) {
+        if (join_reason[0] == '\0')
+            snprintf(join_reason, sizeof(join_reason), "重新连接超时");
+        return false;
+    }
+    wifi_log("已使用保存的配置重新连接 Wi-Fi");
+    return true;
+}
+
+bool qz_wifi_join(const char *ssid, const char *password)
+{
+    char iface[32];
+
+    qz_wifi_interface(iface, sizeof(iface));
+    if (!interface_safe(iface)) return false;
+    if (!ssid || ssid[0] == '\0' || !shell_safe(ssid)) return false;
+    if (!shell_safe(password ? password : "")) return false;
+    /* WPA-PSK 的合法长度是 8..63；短于此一定是输错了，早点报错省等待 */
+    if (password && password[0] != '\0' &&
+        (strlen(password) < 8 || strlen(password) > 63)) {
+        return false;
+    }
+
+    if (!write_supplicant_conf(ssid, password)) return false;
+    ensure_conf_globals();
+    if (!bring_up(iface, true)) return false;
+    if (!wait_for_network(iface, 80)) return false;
+    wifi_log("Wi-Fi 已连接");
+    return true;
 }

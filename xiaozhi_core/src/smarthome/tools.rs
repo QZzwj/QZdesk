@@ -6,7 +6,7 @@
 use super::SmartHomeHub;
 use crate::mcp_gateway::tool::McpTool;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub struct DeviceListTool {
@@ -71,10 +71,7 @@ impl McpTool for DeviceControlTool {
     }
 
     async fn call(&self, params: Value) -> Result<Value, String> {
-        let id = params
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("缺少 id")?;
+        let id = params.get("id").and_then(Value::as_str).ok_or("缺少 id")?;
         let action = params
             .get("action")
             .and_then(Value::as_str)

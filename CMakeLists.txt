@@ -47,8 +47,8 @@ add_executable(qzdesk_screen
     app/main.c
     app/scale.c
     app/theme.c
+    app/gestures.c
     app/ai_face.c
-    app/otto_emoji.c
     app/icon_assets.c
     app/config.c
     app/wifi.c
@@ -115,6 +115,18 @@ add_custom_target(qzdesk_mcp_tools ALL
     COMMENT "Installing QZdesk MCP tool scripts"
 )
 add_dependencies(qzdesk_screen qzdesk_mcp_tools)
+
+add_custom_target(qzdesk_face_notices ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/licenses/aora-bot
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/aora-bot/LICENSE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/aora-bot/NOTICE.md
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/aora-bot/README.md
+            ${CMAKE_CURRENT_BINARY_DIR}/licenses/aora-bot/
+    COMMENT "Installing aora-bot attribution and license"
+)
+add_dependencies(qzdesk_screen qzdesk_face_notices)
 
 if(QZDESK_BUILD_CORE)
     find_program(QZDESK_CARGO_EXECUTABLE cargo HINTS "$ENV{HOME}/.cargo/bin")

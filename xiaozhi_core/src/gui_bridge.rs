@@ -37,6 +37,20 @@ impl GuiBridge {
             let (len, _) = self.socket.recv_from(&mut buf).await?;
             if len > 0 {
                 if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
+                    // 手机输入桥必须在控制器启动前也能回答。设备未联网时核心会
+                    // 停在 OTA/激活重试，这个请求若继续转发就会一直排队，界面
+                    // 只能等到超时并误报“核心没有回应”。
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(msg) {
+                        if value.get("type").and_then(|item| item.as_str())
+                            == Some("bridge_request")
+                        {
+                            let response = crate::bridge::response();
+                            if let Err(error) = self.send_message(&response).await {
+                                log::warn!("手机输入桥应答发送失败: {}", error);
+                            }
+                            continue;
+                        }
+                    }
                     if let Err(e) = self.tx.send(GuiEvent::Message(msg.to_string())).await {
                         log::error!("Failed to send GUI event: {}", e);
                         break;

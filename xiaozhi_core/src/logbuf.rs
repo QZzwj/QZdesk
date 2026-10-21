@@ -45,7 +45,12 @@ pub fn tail(limit: usize) -> Vec<String> {
 pub fn len() -> usize {
     BUFFER
         .get()
-        .map(|buffer| buffer.lock().unwrap_or_else(|error| error.into_inner()).len())
+        .map(|buffer| {
+            buffer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len()
+        })
         .unwrap_or(0)
 }
 
@@ -87,12 +92,7 @@ impl Log for Tee {
         }
         self.inner.log(record);
 
-        let line = format!(
-            "[{} {:<5}] {}",
-            timestamp(),
-            record.level(),
-            record.args()
-        );
+        let line = format!("[{} {:<5}] {}", timestamp(), record.level(), record.args());
         let line = if line.chars().count() > MAX_LINE_CHARS {
             let mut truncated: String = line.chars().take(MAX_LINE_CHARS).collect();
             truncated.push('…');
@@ -100,7 +100,10 @@ impl Log for Tee {
         } else {
             line
         };
-        let mut buffer = self.buffer.lock().unwrap_or_else(|error| error.into_inner());
+        let mut buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if buffer.len() >= CAPACITY {
             buffer.pop_front();
         }

@@ -158,34 +158,50 @@ impl TimerEvent {
 }
 
 /// 本地时间。提醒是"给人看的钟点"，必须按设备时区判断——和界面上的时钟同源。
-struct LocalNow {
-    date: String,
-    hour: u32,
-    minute: u32,
+pub(crate) struct LocalNow {
+    pub(crate) date: String,
+    pub(crate) hour: u32,
+    pub(crate) minute: u32,
+    /// ISO weekday: Monday = 1, Sunday = 7.
+    pub(crate) weekday: u8,
 }
 
 /// 走 libc 的 `localtime_r`：TZ 由设置页写进环境（与界面时钟一致），核心只需跟随。
-static TIMEZONE_OVERRIDE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+static TIMEZONE_OVERRIDE: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(i32::MIN);
 
 pub fn set_timezone(zone: &str) -> bool {
     let hours = match zone {
-        "PST8" => -8, "EST5" => -5, "GMT0" => 0, "CET-1" => 1,
-        "UZT-5" => 5, "ICT-7" => 7, "CST-8" => 8, "JST-9" => 9, "AEST-10" => 10,
+        "PST8" => -8,
+        "EST5" => -5,
+        "GMT0" => 0,
+        "CET-1" => 1,
+        "UZT-5" => 5,
+        "ICT-7" => 7,
+        "CST-8" => 8,
+        "JST-9" => 9,
+        "AEST-10" => 10,
         _ => return false,
     };
     TIMEZONE_OVERRIDE.store(hours * 3600, std::sync::atomic::Ordering::Relaxed);
     true
 }
 
-fn local_now(now: u64) -> Option<LocalNow> {
+pub(crate) fn local_now(now: u64) -> Option<LocalNow> {
     let offset = TIMEZONE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
-    let seconds = if offset == i32::MIN { now as libc::time_t }
-        else { (now as i64 + offset as i64) as libc::time_t };
+    let seconds = if offset == i32::MIN {
+        now as libc::time_t
+    } else {
+        (now as i64 + offset as i64) as libc::time_t
+    };
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: `localtime_r` 只写我们提供的 `tm`，不做全局状态写入之外的副作用。
     let converted = unsafe {
-        if offset == i32::MIN { libc::localtime_r(&seconds, &mut tm) }
-        else { libc::gmtime_r(&seconds, &mut tm) }
+        if offset == i32::MIN {
+            libc::localtime_r(&seconds, &mut tm)
+        } else {
+            libc::gmtime_r(&seconds, &mut tm)
+        }
     };
     if converted.is_null() {
         return None;
@@ -199,6 +215,10 @@ fn local_now(now: u64) -> Option<LocalNow> {
         ),
         hour: tm.tm_hour as u32,
         minute: tm.tm_min as u32,
+        weekday: match tm.tm_wday {
+            0 => 7,
+            value => value as u8,
+        },
     })
 }
 
@@ -324,7 +344,8 @@ impl TimerStore {
             }
         }
         if write_pomodoro {
-            if let Err(error) = write_json_atomic(&self.pomodoro_dir.join(POMODORO_FILE), &pomodoro) {
+            if let Err(error) = write_json_atomic(&self.pomodoro_dir.join(POMODORO_FILE), &pomodoro)
+            {
                 self.lock().dirty_pomodoro = true;
                 errors.push(error);
             }
@@ -394,7 +415,11 @@ impl TimerStore {
             minute: minute as u8,
             label,
             daily,
-            date: if daily { String::new() } else { date.trim().to_string() },
+            date: if daily {
+                String::new()
+            } else {
+                date.trim().to_string()
+            },
             // 与脚本一致：新建的当天不再触发，避免"刚建好就立刻响/刚建完就错过"
             last_date: if daily { today } else { String::new() },
             enabled: true,
@@ -411,26 +436,47 @@ impl TimerStore {
     }
 
     pub fn update_reminder(
-        &self, id: u64, hour: u32, minute: u32, label: &str,
-        daily: bool, date: &str, enabled: bool,
+        &self,
+        id: u64,
+        hour: u32,
+        minute: u32,
+        label: &str,
+        daily: bool,
+        date: &str,
+        enabled: bool,
     ) -> Result<Reminder, String> {
         if hour > 23 || minute > 59 {
             return Err("时间超出范围".to_string());
         }
         let mut inner = self.lock();
-        let label: String = if label.trim().is_empty() { "提醒".to_string() }
-            else { label.trim().chars().take(24).collect() };
-        if inner.reminders.iter().any(|item| item.id != id && item.hour as u32 == hour
-            && item.minute as u32 == minute && item.label == label && item.daily == daily) {
+        let label: String = if label.trim().is_empty() {
+            "提醒".to_string()
+        } else {
+            label.trim().chars().take(24).collect()
+        };
+        if inner.reminders.iter().any(|item| {
+            item.id != id
+                && item.hour as u32 == hour
+                && item.minute as u32 == minute
+                && item.label == label
+                && item.daily == daily
+        }) {
             return Err("已存在相同提醒".to_string());
         }
-        let item = inner.reminders.iter_mut().find(|item| item.id == id)
+        let item = inner
+            .reminders
+            .iter_mut()
+            .find(|item| item.id == id)
             .ok_or_else(|| format!("提醒 {} 不存在", id))?;
         item.hour = hour as u8;
         item.minute = minute as u8;
         item.label = label;
         item.daily = daily;
-        item.date = if daily { String::new() } else { date.trim().to_string() };
+        item.date = if daily {
+            String::new()
+        } else {
+            date.trim().to_string()
+        };
         item.enabled = enabled;
         let result = item.clone();
         inner.dirty_reminders = true;
@@ -465,9 +511,18 @@ impl TimerStore {
 
         match action {
             "start" | "restart" => {
-                let focus = options.focus_minutes.unwrap_or(DEFAULT_FOCUS_MINUTES).clamp(1, MAX_MINUTES);
-                let pause = options.break_minutes.unwrap_or(DEFAULT_BREAK_MINUTES).clamp(1, MAX_MINUTES);
-                let cycles = options.cycles.unwrap_or(DEFAULT_CYCLES).clamp(1, MAX_CYCLES);
+                let focus = options
+                    .focus_minutes
+                    .unwrap_or(DEFAULT_FOCUS_MINUTES)
+                    .clamp(1, MAX_MINUTES);
+                let pause = options
+                    .break_minutes
+                    .unwrap_or(DEFAULT_BREAK_MINUTES)
+                    .clamp(1, MAX_MINUTES);
+                let cycles = options
+                    .cycles
+                    .unwrap_or(DEFAULT_CYCLES)
+                    .clamp(1, MAX_CYCLES);
                 inner.pomodoro = Pomodoro {
                     active: true,
                     paused: false,
@@ -598,7 +653,10 @@ fn settle_pomodoro(state: &mut Pomodoro, now: u64) -> Option<TimerEvent> {
                 });
             }
             event = Some(TimerEvent::Pomodoro {
-                text: format!("☕ 第 {} 轮专注完成，休息 {} 分钟", state.completed_cycles, state.break_minutes),
+                text: format!(
+                    "☕ 第 {} 轮专注完成，休息 {} 分钟",
+                    state.completed_cycles, state.break_minutes
+                ),
             });
         }
     }
@@ -740,11 +798,17 @@ mod tests {
     fn reminder_edit_preserves_id_and_rejects_invalid_input() {
         let (store, dir) = store();
         let original = store.add_reminder(7, 30, "喝水", true, "").unwrap();
-        let edited = store.update_reminder(original.id, 8, 17, "喝水", true, "", false).unwrap();
+        let edited = store
+            .update_reminder(original.id, 8, 17, "喝水", true, "", false)
+            .unwrap();
         assert_eq!(edited.id, original.id);
         assert_eq!(edited.minute, 17);
         assert!(!edited.enabled);
-        assert!(store.update_reminder(original.id, 25, 0, "喝水", true, "", true).is_err());
+        assert!(
+            store
+                .update_reminder(original.id, 25, 0, "喝水", true, "", true)
+                .is_err()
+        );
         let reloaded = TimerStore::load_in(dir.clone(), dir.clone());
         assert_eq!(reloaded.reminders()[0].hour, 8);
         assert!(!reloaded.reminders()[0].enabled);
@@ -797,6 +861,7 @@ mod tests {
             date: "2026-10-06".into(),
             hour: 7,
             minute: 30,
+            weekday: 2,
         };
         let first = fire_due_reminders(&mut reminders, &local);
         assert_eq!(first.len(), 1);
@@ -823,6 +888,7 @@ mod tests {
             date: "2026-10-06".into(),
             hour: 9,
             minute: 0,
+            weekday: 2,
         };
         assert_eq!(fire_due_reminders(&mut reminders, &local).len(), 1);
         assert!(reminders.is_empty(), "一次性提醒响过之后应当撤掉");
@@ -843,10 +909,17 @@ mod tests {
 
     #[test]
     fn manual_break_waits_for_confirmation() {
-        let mut state = Pomodoro { active: true, phase: "focus".into(),
-            remaining_seconds: 60, updated_at: 1000, total_cycles: 2,
-            focus_minutes: 1, break_minutes: 2, auto_break: false,
-            ..Pomodoro::default() };
+        let mut state = Pomodoro {
+            active: true,
+            phase: "focus".into(),
+            remaining_seconds: 60,
+            updated_at: 1000,
+            total_cycles: 2,
+            focus_minutes: 1,
+            break_minutes: 2,
+            auto_break: false,
+            ..Pomodoro::default()
+        };
         assert!(settle_pomodoro(&mut state, 1060).is_some());
         assert!(state.paused);
         assert!(state.is_break());
@@ -922,13 +995,21 @@ mod tests {
         // cycles 超上限被夹到 12，与脚本一致
         assert_eq!(started.total_cycles, MAX_CYCLES);
 
-        store.pomodoro_action("pause", PomodoroOptions::default()).unwrap();
+        store
+            .pomodoro_action("pause", PomodoroOptions::default())
+            .unwrap();
         let reloaded = TimerStore::load_in(dir.clone(), dir.clone());
         assert!(reloaded.pomodoro().paused);
 
-        store.pomodoro_action("stop", PomodoroOptions::default()).unwrap();
+        store
+            .pomodoro_action("stop", PomodoroOptions::default())
+            .unwrap();
         assert!(!store.pomodoro().active);
-        assert!(store.pomodoro_action("frobnicate", PomodoroOptions::default()).is_err());
+        assert!(
+            store
+                .pomodoro_action("frobnicate", PomodoroOptions::default())
+                .is_err()
+        );
     }
 
     #[test]

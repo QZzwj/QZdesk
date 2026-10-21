@@ -1,8 +1,8 @@
+use crate::mcp_gateway::ExternalToolConfig;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fs, path::Path};
 use uuid::Uuid;
-use crate::mcp_gateway::ExternalToolConfig;
 
 const CONFIG_FILE_NAME: &str = "xiaozhi_config.json";
 
@@ -349,9 +349,7 @@ impl Config {
                 log::info!("音频流格式校验通过: opus");
             }
             AudioStreamFormat::Mp3 => {
-                anyhow::bail!(
-                    "配置错误：当前版本尚未支持 mp3 格式解码，请改回 opus"
-                );
+                anyhow::bail!("配置错误：当前版本尚未支持 mp3 格式解码，请改回 opus");
             }
             AudioStreamFormat::Pcm => {
                 log::info!("音频流格式校验通过: pcm (原始PCM直通)");
@@ -437,8 +435,7 @@ impl Config {
         config.broker = env_or("QZDESK_SMARTHOME_BROKER", &config.broker);
         config.username = env_or("QZDESK_SMARTHOME_USER", &config.username);
         config.password = env_or("QZDESK_SMARTHOME_PASSWORD", &config.password);
-        config.zigbee2mqtt_topic =
-            env_or("QZDESK_SMARTHOME_Z2M_TOPIC", &config.zigbee2mqtt_topic);
+        config.zigbee2mqtt_topic = env_or("QZDESK_SMARTHOME_Z2M_TOPIC", &config.zigbee2mqtt_topic);
         config
     }
 
@@ -493,7 +490,12 @@ impl Config {
         };
         let mut added = 0;
         for tool in baked.tools {
-            if self.mcp.tools.iter().any(|existing| existing.name == tool.name) {
+            if self
+                .mcp
+                .tools
+                .iter()
+                .any(|existing| existing.name == tool.name)
+            {
                 continue;
             }
             self.mcp.tools.push(tool);

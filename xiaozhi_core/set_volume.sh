@@ -2,7 +2,8 @@
 #
 # MCP 工具：设置扬声器音量（0-100）。
 #
-# 与界面走同一路混音器（见 app/config.c）：card 0 的 'DAC LINEOUT Volume'，硬件范围 0-30。
+# 与界面走同一路混音器（见 app/config.c）：card 0 的 numid=24，硬件范围 0-30。
+# 这块板的 amixer 按 name 查找会失败，numid 才是稳定入口。
 # 界面每次进设置页都重新 amixer 读一次，所以这里改了不会和界面显示打架。
 #   QZDESK_MIXER_CARD / QZDESK_MIXER_CONTROL / QZDESK_MIXER_MAX 可覆盖（便于换板/测试）
 #
@@ -27,7 +28,11 @@ fi
 [ "$percent" -gt 100 ] && percent=100
 
 card=${QZDESK_MIXER_CARD:-0}
-control=${QZDESK_MIXER_CONTROL:-DAC LINEOUT Volume}
+control=${QZDESK_MIXER_CONTROL:-numid=24}
+case "$control" in
+	numid=*|name=*) ;;
+	*) control="name=$control" ;;
+esac
 max=${QZDESK_MIXER_MAX:-30}
 case "$max" in
 	''|*[!0-9]*) max=30 ;;
@@ -36,13 +41,13 @@ esac
 command -v amixer >/dev/null 2>&1 || { printf '没有 amixer（缺 alsa-utils）\n' >&2; exit 1; }
 
 raw=$(( (percent * max + 50) / 100 ))
-amixer -c "$card" cset name="$control" "$raw" >/dev/null 2>&1 || {
+amixer -c "$card" cset "$control" "$raw" >/dev/null 2>&1 || {
 	printf 'amixer 设置失败：card %s / %s / %s\n' "$card" "$control" "$raw" >&2
 	exit 1
 }
 
 # 回读实际值（amixer cget 的范围在 "type=" 行，当前值在 ": values=" 行，只认后者）
-now=$(amixer -c "$card" cget name="$control" 2>/dev/null \
+now=$(amixer -c "$card" cget "$control" 2>/dev/null \
 	| sed -n 's/.*: values=\(-\{0,1\}[0-9][0-9]*\).*/\1/p' | head -1)
 case "$now" in
 	''|*[!0-9]*) now=$raw ;;

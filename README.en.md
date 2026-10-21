@@ -27,9 +27,10 @@ A skill is a directory with a `SKILL.md`, imported from the web console; once im
 | --- | --- |
 | Real-time voice chat | WebSocket to the XiaoZhi cloud; Opus encode/decode and ALSA capture/playback locally, with push-to-talk and interruption |
 | Local skills | Import a `SKILL.md` (or a ZIP containing it): a primary skill changes the persona directly, secondary skills are retrieved on demand, and imports take effect immediately |
+| Cross-device skill bundles | Export every self-installed skill, nested reference file and role into one offline ZIP, then import it on another device |
 | MCP gateway | Exposes 13 tools to the cloud: 4 configurable external tools + 7 skill tools + 2 smart-home tools, over subprocess / HTTP / TCP |
 | Smart home | A built-in MQTT client talks to zigbee2mqtt or hand-written topics directly; controllable from both the web console and voice |
-| Text chat | The GUI input box and the web console share one path: text is synthesized locally and sent upstream in exactly the same frames as the microphone |
+| Text chat | The GUI input box and the web console share one path: text is sent directly as `listen/detect/text` with no local TTS, and failures are reported instead of being replaced with synthesized audio |
 | Web console | A single-page console served by the device (default `:8080`): skills, live chat, weather, performance, smart home |
 | Device data | Weather comes straight from Open-Meteo (no API key) and performance samples `/proc` and `statvfs` every 2 seconds; the device UI and the web page read the same snapshot |
 | Board-free development | The same code runs on a PC through the LVGL SDL simulator (default 320×240 window); Wi-Fi / backlight / volume / timezone use the real interfaces and can all be overridden by environment variables |
@@ -122,6 +123,8 @@ A skill is a directory containing `SKILL.md`, and it defines the assistant's per
 3. A newly imported skill **becomes the primary skill**, effective from the next turn; switch it to secondary or off later on the device's **Skills** page or in the web list;
 4. **You can switch mid-conversation too**: say "switch to ×× mode" / "answer with the ×× skill" / "drop that persona" and the assistant calls `skill_use` to swap the primary skill on the spot (the old one becomes secondary), with the body delivered in the tool result — **no session rebuild, no dropped connection**.
 
+Use **Cross-device skill bundle** above the web skill list to move the complete user-installed pool between devices. The ZIP contains `qzdesk-skills.json` plus `skills/<id>/`, including nested references and `primary` / `secondary` / `none` selections. OEM and source-tree skills stay out of the package, as do hidden files and cache directories such as `__pycache__`, `node_modules` and `target`.
+
 | Role | Behaviour |
 | --- | --- |
 | Primary | Its body goes straight into the model context and shapes persona and format from the first sentence |
@@ -154,6 +157,8 @@ Configuration lives in two layers: `xiaozhi_core/config.toml` holds compile-time
 | `QZDESK_WIFI_IFACE` / `QZDESK_WPA_CONF` / `QZDESK_BACKLIGHT` / `QZDESK_TZ_PROFILE` | Override hardware paths on a different board or for local testing |
 | `QZDESK_AUDIO_DISABLED=1` | Do not start ALSA capture/playback (on by default in the simulator) |
 
+Temporary device-wide mute: create `/userdata/qzdesk/audio-muted` and restart `S30qzdesk`. The startup script writes muted ACODEC controls, exports `QZDESK_AUDIO_DISABLED=1`, and skips local KWS. Remove the marker to restore the normal audio path on the next start.
+
 > [!WARNING]
 > `config.toml` holds compile-time defaults and must be committed, so **never** put real cloud credentials in it. Pass every secret through the environment variables above and keep placeholders (such as `<YOUR_APP_ID>`) in the file.
 
@@ -167,10 +172,12 @@ Every capability of the web console is served by these JSON endpoints (`xiaozhi_
 | `GET` | `/api/skills` | Skill list, each skill's `role`, and `summary.{primary,secondary,version}` |
 | `POST` | `/api/skills` | Install/overwrite `SKILL.md` with JSON `{name, content}` |
 | `POST` | `/api/skills/upload` | Upload a ZIP containing `SKILL.md` |
+| `GET` | `/api/skills/export` | Download a cross-device skill bundle (ZIP) with all user-installed skills and roles |
+| `POST` | `/api/skills/import` | Import a skill bundle; name conflicts return `409` with `conflicts` |
 | `GET` | `/api/skills/<id>/content` | Read the raw `SKILL.md` |
 | `PUT` | `/api/skills/<id>/selection` | Set the role: `{"role":"primary"\|"secondary"\|"none"}` |
 | `DELETE` | `/api/skills/<id>` | Delete a user-installed skill |
-| `POST` | `/api/chat/send` | Send a text message (synthesized locally and sent upstream), returns `202` |
+| `POST` | `/api/chat/send` | Send text directly; incompatible endpoints return an explicit error instead of synthesizing speech; returns `202` when accepted |
 | `GET` | `/api/chat/stream` | Live chat stream (SSE) |
 | `GET` | `/api/chat/history` | Existing chat history |
 | `GET` | `/api/weather` | Weather snapshot |
@@ -185,6 +192,13 @@ Every capability of the web console is served by these JSON endpoints (`xiaozhi_
 | `DELETE` | `/api/timers/<id>` | Delete a reminder |
 | `GET` / `POST` | `/api/pomodoro` | Pomodoro state / action (`start`, `pause`, `resume`, `stop`, `status`) |
 | `GET` | `/api/logs?limit=` | Recent core logs (in-memory ring, 200 lines by default) |
+
+Text chat sends `{"type":"listen","state":"detect","text":"..."}` without local TTS. If the current cloud endpoint sends no `stt`, `llm` or `tts` event within the wait window, the core aborts that attempt and reports the error in chat; it never synthesizes and uploads audio behind your back. Set `QZDESK_DIRECT_TEXT=0` to disable direct text for diagnostics, or use `QZDESK_DIRECT_TEXT_TIMEOUT_SECS` to change the 3–60 second wait (12 seconds by default).
+
+Skill bundles never overwrite existing content unless the request explicitly carries
+`X-QZdesk-Replace: 1`. The web page asks first, then retries with that header; a
+confirmed replacement swaps both the skill files and its role. OEM preset skills are
+not exported, but a user-installed skill with the same name can override one on import.
 
 ## MCP Tools
 
@@ -242,7 +256,7 @@ Run `tools/check_layout.sh` after a simulator build to check real LVGL geometry 
 | Symptom | What to check |
 | --- | --- |
 | UI feels sluggish | Make sure it is a Release build (LVGL's software renderer is several times slower at `-O0`); delete and recreate an old `build/` directory |
-| Text chat does nothing | A working text-to-speech configuration is required (`QZDESK_TTS_*`); the UI reports it when synthesis is unavailable |
+| Text chat does nothing | Check whether the log shows an outgoing `listen/detect/text`; timeouts and cloud rejections appear in chat, and are never replaced by a local TTS fallback |
 | Web console unreachable | Check whether the port is taken (`run.sh` tries to free 8080) or set `QZDESK_SKILL_WEB_PORT` |
 | Core will not start | `QZDESK_CORE_AUTOSTART`, `QZDESK_CORE_BIN`, and `xiaozhi_config.json` next to the core |
 | No sound in the simulator | The simulator sets `QZDESK_AUDIO_DISABLED=1` by default (no ALSA devices) — expected |

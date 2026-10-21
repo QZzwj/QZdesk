@@ -27,9 +27,11 @@ QZdesk 是一台跑在 Linux 嵌入式板上的 AI 桌面终端，由两个进�
 | --- | --- |
 | 实时语音对话 | 经 WebSocket 接小智云端，本地做 Opus 编解码与 ALSA 采集/播放，支持按住说话与打断 |
 | 本地技能 | 导入 `SKILL.md`（或含它的 ZIP）：主技能直接改变人格，备用技能按需检索；导入即生效 |
-| MCP 网关 | 对云端暴露 13 个工具：4 个可配置外部工具 + 7 个技能工具 + 2 个智能家居工具，支持 subprocess / HTTP / TCP |
+| 跨设备技能包 | 一键导出全部自装 Skill、参考文件与主/备用/关闭角色，在另一台设备离线导入 |
+| 轻量记忆 | 跨会话保留 `activeTopics`、`pendingThoughts`、`memberImpressions`；短期限量、自动过期，成员印象需明确确认 |
+| MCP 网关 | 对云端暴露外部与内置工具，支持 subprocess / HTTP / TCP |
 | 智能家居 | 内置 MQTT 客户端，直连 zigbee2mqtt 或手写主题的局域网设备，网页与语音都能控制 |
-| 文字聊天 | GUI 输入框与网页共用一个入口：文字先在本地合成语音，再按麦克风同样的报文上行 |
+| 文字聊天 | GUI 输入框与网页共用一个入口：把文字以 `listen/detect/text` 直接发往云端，不需要本地 TTS；失败时只报告真实错误 |
 | 网页控制台 | 设备自带的单页控制台（默认 `:8080`）：技能、实时聊天、天气、性能、智能家居 |
 | 设备页数据 | 天气直连 Open-Meteo（免 Key）、性能每 2 秒采样 `/proc` 与 `statvfs`；设备页与网页读同一份快照 |
 | 无板开发 | 同一份代码在 PC 上用 LVGL SDL 模拟器跑（默认 320×240 窗口）；Wi-Fi / 背光 / 音量 / 时区走真实接口，且都可用环境变量覆盖 |
@@ -108,7 +110,7 @@ tools/build/build_image.sh --desk   # 编界面 + 交叉编核心，最后打包
 | 页面 | 内容 |
 | --- | --- |
 | 主页 | 状态栏（时间 / 设备地址 / Wi-Fi / 电量）+ AI 助手大卡片 + 天气、设置、应用卡片 |
-| AI 对话页 | 聊天框 ⇄ 全屏表情双模式；聊天框为气泡 + 输入栏，全屏表情用小智标准表情 GIF（10 种状态） |
+| AI 对话页 | 聊天框 ⇄ 全屏表情双模式；聊天框为气泡 + 输入栏，全屏表情用小智标准 GIF（15 种状态，待机时缓慢轮播） |
 | 应用 | 技能 / 性能监控 / 定时提醒 / 番茄钟 / 存在检测 / 设备控制 / 运动相机 |
 | 技能 | 列出每个 Skill 的主技能 / 备用 / 关闭状态 |
 | 设置 | WLAN 扫描与连接、声音、背光、时间与时区、关于 |
@@ -154,6 +156,8 @@ tools/build/build_image.sh --desk   # 编界面 + 交叉编核心，最后打包
 | `QZDESK_WIFI_IFACE` / `QZDESK_WPA_CONF` / `QZDESK_BACKLIGHT` / `QZDESK_TZ_PROFILE` | 换板或本地验证时覆盖硬件路径 |
 | `QZDESK_AUDIO_DISABLED=1` | 不启动 ALSA 采集/播放（模拟器默认开启） |
 
+设备端临时硬静音：创建 `/userdata/qzdesk/audio-muted` 后重启 `S30qzdesk`。启动脚本会把 ACODEC 输入与输出逐项写为静音，设置 `QZDESK_AUDIO_DISABLED=1`，并跳过本地 KWS；删除该文件后下一次启动恢复原有音频链路。
+
 > [!WARNING]
 > `config.toml` 是编译期默认值、需要入库，请**不要**在里面写真实的云服务密钥。密钥一律用上面的环境变量传入，文件里保留占位符（如 `<YOUR_APP_ID>`）。
 
@@ -167,10 +171,12 @@ tools/build/build_image.sh --desk   # 编界面 + 交叉编核心，最后打包
 | `GET` | `/api/skills` | 技能列表、每个技能的 `role`、`summary.{primary,secondary,version}` |
 | `POST` | `/api/skills` | 以 JSON `{name, content}` 安装/覆盖 `SKILL.md` |
 | `POST` | `/api/skills/upload` | 上传含 `SKILL.md` 的 ZIP |
+| `GET` | `/api/skills/export` | 下载跨设备技能包（ZIP），包含全部用户自装 Skill 与角色 |
+| `POST` | `/api/skills/import` | 导入跨设备技能包；同名冲突返回 `409` 和 `conflicts` |
 | `GET` | `/api/skills/<id>/content` | 读取 `SKILL.md` 原文 |
 | `PUT` | `/api/skills/<id>/selection` | 设置角色：`{"role":"primary"\|"secondary"\|"none"}` |
 | `DELETE` | `/api/skills/<id>` | 删除用户安装的技能 |
-| `POST` | `/api/chat/send` | 发一条文字（本地合成语音后上行），返回 `202` |
+| `POST` | `/api/chat/send` | 发一条文字：直接上行文本，服务端不支持时返回明确错误，不生成语音 |
 | `GET` | `/api/chat/stream` | 聊天记录实时流（SSE） |
 | `GET` | `/api/chat/history` | 现有聊天记录 |
 | `GET` | `/api/weather` | 天气快照 |
@@ -185,10 +191,18 @@ tools/build/build_image.sh --desk   # 编界面 + 交叉编核心，最后打包
 | `DELETE` | `/api/timers/<id>` | 删除一条提醒 |
 | `GET` / `POST` | `/api/pomodoro` | 番茄钟状态 / 操作（`start`、`pause`、`resume`、`stop`、`status`） |
 | `GET` | `/api/logs?limit=` | 核心最近日志（内存环形缓冲，默认返回 200 行） |
+| `GET` | `/api/companion` | 陪伴能力目录 |
+| `POST` | `/api/companion/memory` | 轻量记忆：`snapshot`、`upsert`、`delete`、`clear` |
+
+文字聊天发送 `{"type":"listen","state":"detect","text":"..."}`，不经过本地 TTS。若当前云端在等待窗口内没有返回 `stt`、`llm` 或 `tts`，核心会中止这次尝试并在聊天与提示中报告错误，不会偷偷合成本地语音再上传。可用 `QZDESK_DIRECT_TEXT=0` 关闭直发做诊断，或用 `QZDESK_DIRECT_TEXT_TIMEOUT_SECS` 调整等待时间（3–60 秒，默认 12 秒）。
+
+技能包默认不会覆盖已有内容。网页在收到同名冲突后会先确认；确认重试时发送
+`X-QZdesk-Replace: 1`，此时同名 Skill 的文件和角色会整体替换。OEM
+预置技能不会被打包，但导入同名技能时会形成用户覆盖版本。
 
 ## MCP 工具
 
-核心对云端暴露 13 个 MCP 工具（`tools/list`），由 `config.toml` 的 `[mcp]` 与内置模块注册：
+核心通过 `tools/list` 对云端暴露 MCP 工具，由 `config.toml` 的 `[mcp]` 与内置模块注册：
 
 | 工具 | 来源 | 说明 |
 | --- | --- | --- |
@@ -200,6 +214,11 @@ tools/build/build_image.sh --desk   # 编界面 + 交叉编核心，最后打包
 | `skill_use` | 内置 | 会话内切换技能：说「换成中医模式」即切，正文随本次返回下发，不用重建会话 |
 | `skill_status` / `skill_validate` / `skill_reload` | 内置 | 技能体检、校验与重新扫描 |
 | `device_list` / `device_control` | 内置 | 智能家居设备列表与控制 |
+| `companion_memory` | 内置 | 维护 `activeTopics` / `pendingThoughts` / `memberImpressions` 三类轻量记忆 |
+
+轻量记忆有硬上限与有效期：进行中话题 20 条 / 14 天，待跟进事项 20 条 / 7 天，成员印象 50 条 / 180 天。读取时会自动清理过期项，避免变成无限增长的隐私日志。
+
+如果同时注册了 `qq_wait_for_messages` 与 `qq_set_wake_config`，核心会自动追加 QQ 群聊的潜水观察与唤醒规则；未提供这组工具时不会注入，避免模型调用不存在的工具。
 
 外部工具的传输方式、执行模式（`sync` / `background`）与超时都在 `config.toml` 里声明，详见 [`xiaozhi_core/docs/MCP功能说明.md`](./xiaozhi_core/docs/MCP功能说明.md)。
 
@@ -246,7 +265,7 @@ QZ_LAYOUT_PANELS="320x240 480x320 320x320 480x240" tools/check_layout.sh
 | 现象 | 排查方向 |
 | --- | --- |
 | 界面卡顿 | 确认是 Release 构建（`-O0` 下 LVGL 软件渲染会慢数倍）；旧 `build/` 目录请删掉重建 |
-| 文字聊天没反应 | 需要可用的语音合成配置（`QZDESK_TTS_*`）；合成不可用时界面会提示 |
+| 文字聊天没反应 | 先看日志是否发出了 `listen/detect/text`；超时或云端拒绝会直接写进聊天记录，不会自动回退本地 TTS |
 | 网页控制台打不开 | 检查端口是否被占用（`run.sh` 会尝试释放 8080），或改 `QZDESK_SKILL_WEB_PORT` |
 | 核心起不来 | `QZDESK_CORE_AUTOSTART`、`QZDESK_CORE_BIN` 与核心同目录的 `xiaozhi_config.json` |
 | 模拟器无声 | 模拟器默认 `QZDESK_AUDIO_DISABLED=1`（无 ALSA 设备），属预期 |

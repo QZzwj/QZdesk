@@ -182,6 +182,68 @@ static inline int32_t qz_scale_font(int32_t px)
     return scaled < QZ_MIN_FONT_PX ? QZ_MIN_FONT_PX : scaled;
 }
 
+/* ------------------------------------------------------------------------- *
+ * 触控命中区：**物理像素**的下限，不随设计稿缩放
+ *
+ * 设计稿按 2/3 缩到 320×240 之后，原来 30 设计像素的按钮只剩 20 实像素，
+ * 手指根本点不中（这是"小屏点不到"的根因）。所以可点控件除了视觉尺寸，
+ * 还要有一个按实机像素算的最小命中区：40px 在 240 高、约 167dpi 的屏上是
+ * 约 6mm 的方框，比 Apple 44pt / Material 48dp 收了一点，是这块屏塞得下的
+ * 折中值。
+ * ------------------------------------------------------------------------- */
+#ifndef QZ_MIN_TOUCH_PX
+#define QZ_MIN_TOUCH_PX 40
+#endif
+
+/** 当前面板的触控下限（= QZ_MIN_TOUCH_PX）。 */
+static inline int32_t qz_touch_min(void)
+{
+    return QZ_MIN_TOUCH_PX;
+}
+
+/**
+ * 反向换算：要在当前面板上得到至少 `px` 个**实像素**，设计稿里该写多少。
+ *
+ * "至少 40px 高"这类按实机像素定的尺寸用它反推：320×240 上 40 实像素是 54
+ * 设计像素（横向 60），480×320 上就是 40。设计像素 → 实像素那一步是四舍五入，
+ * 所以这里向上取整，保证换算回去不会少一像素。
+ */
+static inline int32_t qz_design_x(int32_t px)
+{
+    return (int32_t)(((int64_t)px * QZ_DESIGN_W + qz_panel_w - 1) / qz_panel_w);
+}
+
+static inline int32_t qz_design_y(int32_t px)
+{
+    return (int32_t)(((int64_t)px * QZ_DESIGN_H + qz_panel_h - 1) / qz_panel_h);
+}
+
+/**
+ * 单值量的反向换算：圆角、线宽、图标这类只走 `qz_scale_px()` 的值。
+ *
+ * 单值量取两个方向里较小的比例。要把图标做成至少 24 实像素，必须按这个
+ * 比例反推设计稿尺寸；直接用 `qz_design_x()` 会在窄而高的面板上算小。
+ */
+static inline int32_t qz_design_px(int32_t px)
+{
+    int64_t num = qz_scale_minnum();
+    return (int32_t)(((int64_t)px * QZ_SCALE_DEN + num - 1) / num);
+}
+
+/**
+ * 把可点控件补到物理最小命中区，返回它现在的命中区外扩量。
+ *
+ * 视觉尺寸不动，只改 LVGL 的 ext_click_pad；已经存在的更大命中区不会被缩小。
+ * 尺寸从**样式**读（`lv_obj_set_size()` 之后立刻就能读），所以构造器里紧接着
+ * 设置尺寸调用即可；撑满父级 / 自适应内容的对象要等一次布局，那种情况请在
+ * 自己的布局跑完之后再调一次。
+ *
+ * ext_click_pad 是四边同一个数，只在**四周没有别的可点对象**时才安全：紧挨着
+ * 的两行都得点得中时，正确做法是把行本身做够高（用 qz_design_y 反算 40 实像素
+ * 对应多少设计像素），而不是各自外扩一圈互相抢点击。
+ */
+int32_t qz_touch_target(lv_obj_t *obj);
+
 /**
  * `lv_obj_set_style_size(obj, w, h, sel)`：宽高一起设。
  *

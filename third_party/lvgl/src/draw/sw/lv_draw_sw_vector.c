@@ -40,6 +40,11 @@ typedef struct {
     uint8_t a;
 } _tvg_color;
 
+typedef struct {
+    Tvg_Canvas * canvas;
+    lv_point_t origin;
+} _tvg_draw_context;
+
 /**********************
  *  STATIC PROTOTYPES
  **********************/
@@ -56,8 +61,8 @@ static void lv_area_to_tvg(_tvg_rect * rect, const lv_area_t * area)
 {
     rect->x = area->x1;
     rect->y = area->y1;
-    rect->w = lv_area_get_width(area) - 1;
-    rect->h = lv_area_get_height(area) - 1;
+    rect->w = lv_area_get_width(area);
+    rect->h = lv_area_get_height(area);
 }
 
 static void lv_color_to_tvg(_tvg_color * color, const lv_color32_t * c, lv_opa_t opa)
@@ -367,13 +372,21 @@ static void _set_paint_blend_mode(Tvg_Paint * obj, lv_vector_blend_t blend)
 
 static void _task_draw_cb(void * ctx, const lv_vector_path_t * path, const lv_vector_draw_dsc_t * dsc)
 {
-    Tvg_Canvas * canvas = (Tvg_Canvas *)ctx;
+    _tvg_draw_context * context = ctx;
+    Tvg_Canvas * canvas = context->canvas;
+    lv_matrix_t matrix;
+    /* Paths use display coordinates; ThorVG targets a layer-local buffer. */
+    lv_matrix_identity(&matrix);
+    lv_matrix_translate(&matrix, -context->origin.x, -context->origin.y);
+    lv_matrix_multiply(&matrix, &dsc->matrix);
 
     Tvg_Paint * obj = tvg_shape_new();
 
     if(!path) {  /*clear*/
         _tvg_rect rc;
         lv_area_to_tvg(&rc, &dsc->scissor_area);
+        rc.x -= context->origin.x;
+        rc.y -= context->origin.y;
 
         _tvg_color c;
         lv_color_to_tvg(&c, &dsc->fill_dsc.color, dsc->fill_dsc.opa);
@@ -389,12 +402,12 @@ static void _task_draw_cb(void * ctx, const lv_vector_path_t * path, const lv_ve
     }
     else {
         Tvg_Matrix mtx;
-        lv_matrix_to_tvg(&mtx, &dsc->matrix);
+        lv_matrix_to_tvg(&mtx, &matrix);
         _set_paint_matrix(obj, &mtx);
 
         _set_paint_shape(obj, path);
 
-        _set_paint_fill(obj, canvas, &dsc->fill_dsc, &dsc->matrix);
+        _set_paint_fill(obj, canvas, &dsc->fill_dsc, &matrix);
         _set_paint_stroke(obj, &dsc->stroke_dsc);
         _set_paint_blend_mode(obj, dsc->blend_mode);
     }
@@ -426,18 +439,21 @@ void lv_draw_sw_vector(lv_draw_unit_t * draw_unit, const lv_draw_vector_task_dsc
     }
 
     void * buf = draw_buf->data;
-    int32_t width = lv_area_get_width(&layer->buf_area) - 1;
-    int32_t height = lv_area_get_height(&layer->buf_area) - 1;
+    int32_t width = lv_area_get_width(&layer->buf_area);
+    int32_t height = lv_area_get_height(&layer->buf_area);
     uint32_t stride = draw_buf->header.stride;
     Tvg_Canvas * canvas = tvg_swcanvas_create();
     tvg_swcanvas_set_target(canvas, buf, stride / 4, width, height, TVG_COLORSPACE_ARGB8888);
 
     _tvg_rect rc;
     lv_area_to_tvg(&rc, draw_unit->clip_area);
+    rc.x -= layer->buf_area.x1;
+    rc.y -= layer->buf_area.y1;
     tvg_canvas_set_viewport(canvas, (int32_t)rc.x, (int32_t)rc.y, (int32_t)rc.w, (int32_t)rc.h);
 
     lv_ll_t * task_list = dsc->task_list;
-    lv_vector_for_each_destroy_tasks(task_list, _task_draw_cb, canvas);
+    _tvg_draw_context context = {canvas, {layer->buf_area.x1, layer->buf_area.y1}};
+    lv_vector_for_each_destroy_tasks(task_list, _task_draw_cb, &context);
 
     if(tvg_canvas_draw(canvas) == TVG_RESULT_SUCCESS) {
         tvg_canvas_sync(canvas);

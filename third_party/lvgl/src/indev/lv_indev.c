@@ -1678,6 +1678,7 @@ static lv_result_t send_event(lv_event_code_t code, void * param)
     lv_indev_t * indev = indev_act;
 
     if(code == LV_EVENT_PRESSED ||
+       code == LV_EVENT_PRESSING ||
        code == LV_EVENT_SHORT_CLICKED ||
        code == LV_EVENT_CLICKED ||
        code == LV_EVENT_RELEASED ||

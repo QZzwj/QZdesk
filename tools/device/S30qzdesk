@@ -27,17 +27,38 @@ LOG=/var/log/qzdesk.log
 PIDFILE=/var/run/qzdesk.pid
 WIFI_KO=/oem/usr/lib/wifi   # RTL8723BS 驱动模块（镜像里没带时目录不存在，静默跳过）
 CAM_KO=/oem/usr/lib/camera  # SC3336 + rkcif/rkisp 驱动模块
+WIFI_CONF=${QZDESK_WIFI_PERSIST_CONF:-/userdata/qzdesk/wpa_supplicant.conf}
+DEFAULT_WIFI_CONF=${QZDESK_DEFAULT_WIFI_CONF:-/oem/usr/etc/qzdesk/wpa_supplicant.default.conf}
 KWS_BIN=/oem/usr/bin/qzdesk-kws # 本地唤醒词进程（NPU KWS，独立进程；没编出来就静默跳过）
 KWS_SOCK=/var/run/qzdesk-kws.sock
+KWS_PIDFILE=/var/run/qzdesk-kws-child.pid
+KWS_SUPERVISOR_PIDFILE=/var/run/qzdesk-kws-supervisor.pid
 FW_SRC=/oem/usr/lib/firmware # WiFi 固件（开机补进 /lib/firmware）
 READY_WAIT=50           # 就绪等待轮数：50 × 100ms = 5 秒
 LOG_MAX=$((512 * 1024)) # 日志超过 512KB 就在启动时截断（免得越写越大拖慢写盘）
+MIC_CARD=
+MIC_FAILED=0
+AUDIO_MUTE_MARKER=/userdata/qzdesk/audio-muted
 
 export QZDESK_FONT=${QZDESK_FONT:-/oem/usr/share/fonts/NanoTikBazHei-Bold.ttf}
 export QZDESK_FB=${QZDESK_FB:-/dev/fb0}
 export QZDESK_TOUCH=${QZDESK_TOUCH:-/dev/input/event0}
 export ALSA_CONFIG_PATH=${ALSA_CONFIG_PATH:-/usr/share/alsa/alsa.conf}
 export ALSA_CONFIG_DIR=${ALSA_CONFIG_DIR:-/usr/share/alsa}
+
+# 临时硬静音开关：存在该文件时不打开 ALSA 采集/播放，也不启动本地 KWS。
+# 混音器仍会在启动时逐项写为静音，避免上一次异常退出留下可闻输出。
+audio_disabled() {
+	case "$(printf '%s' "${QZDESK_AUDIO_DISABLED:-0}" | tr 'A-Z' 'a-z')" in
+		1|true|yes) return 0 ;;
+	esac
+	return 1
+}
+
+if [ -f "$AUDIO_MUTE_MARKER" ]; then
+	export QZDESK_AUDIO_DISABLED=1
+fi
+
 # 唤醒词旁路：核心与 qzdesk-kws 用同一个 socket 路径（两边都读这个变量）。
 # 不想用唤醒词就把这行注释掉 —— 核心侧就不会建旁路 socket，KWS 进程也起不来。
 export QZDESK_KWS_SOCKET=${QZDESK_KWS_SOCKET:-/var/run/qzdesk-kws.sock}
@@ -45,6 +66,17 @@ export QZDESK_KWS_SOCKET=${QZDESK_KWS_SOCKET:-/var/run/qzdesk-kws.sock}
 #   mode2（默认）= 唤醒词 "小和小和" + 19 条命令词（打电话给爸爸…）
 #   mode1        = 8 条一次性命令词（我要拍照 / 打开关闭热点、录音、屏幕）
 export QZDESK_KWS_MODE=${QZDESK_KWS_MODE:-mode2}
+# 核心旁路是单声道 24 kHz；mode2 的双麦 BF 算法需要双声道，由 qzdesk-kws 复制。
+export QZDESK_KWS_INPUT_CHANNELS=${QZDESK_KWS_INPUT_CHANNELS:-1}
+export QZDESK_KWS_INPUT_RATE=${QZDESK_KWS_INPUT_RATE:-24000}
+# 低风险麦克风诊断：默认关闭。创建 mic-dump.enable 后，下一次核心启动会
+# 把真实左声道和 Speex 处理后的 24 kHz/mono/s16le PCM 写到 /tmp，供拉回
+# 本机做频谱与离线识别。PCM 没有文件头，读取参数见 core 日志。
+if ! audio_disabled && [ -f /userdata/qzdesk/mic-dump.enable ]; then
+	export QZDESK_MIC_RAW_DUMP=${QZDESK_MIC_RAW_DUMP:-/tmp/qzdesk-mic-raw.pcm}
+	export QZDESK_MIC_DUMP=${QZDESK_MIC_DUMP:-/tmp/qzdesk-mic-processed.pcm}
+fi
+export QZDESK_WIFI_PERSIST_CONF=$WIFI_CONF
 mkdir -p /userdata/qzdesk
 export QZDESK_COMPUTER_CONFIG=${QZDESK_COMPUTER_CONFIG:-/userdata/qzdesk/computer.json}
 if [ -r /etc/qzdesk/computer-url ]; then
@@ -64,11 +96,207 @@ running() {
 	fi
 	# 2) 兜底：按进程名判断。两个启动脚本（rcS 与 RkLunch）会同时跑，
 	#    只看 PID 文件会竞态起两份，两个进程抢 framebuffer/触摸 → 闪屏+误触。
-	[ -n "$(ps | grep '[q]zdesk_screen')" ]
+	#    不能 grep ps 输出：通过 adb 执行本脚本时，adb shell 的命令行本身就含有
+	#    qzdesk_screen，会把自己误判成界面进程。读取 /proc/PID/comm 只匹配
+	#    可执行文件名，不受 shell 参数影响。
+	for comm in /proc/[0-9]*/comm; do
+		[ -r "$comm" ] || continue
+		[ "$(cat "$comm" 2>/dev/null)" = "qzdesk_screen" ] && return 0
+	done
+	return 1
 }
 
 ready() {
 	[ -x "$DAEMON" ] && [ -e "$QZDESK_FB" ] && [ -e "$QZDESK_FONT" ]
+}
+
+mic_log() {
+	mkdir -p /var/log 2>/dev/null
+	echo "qzdesk mic: $*" >>"$LOG"
+}
+
+find_mic_card() {
+	card=0
+	while [ "$card" -lt 4 ]; do
+		if amixer -c "$card" sget 'ADC Mode' >/dev/null 2>&1; then
+			MIC_CARD=$card
+			return 0
+		fi
+		card=$((card + 1))
+	done
+	return 1
+}
+
+read_mic_numid() {
+	amixer -c "$MIC_CARD" cget numid="$1" 2>/dev/null |
+		awk -F= '/: values=/{print $2; exit}' |
+		tr -d '[:space:]\r'
+}
+
+set_mic_numid() {
+	numid=$1
+	name=$2
+	value=$3
+	if ! amixer -c "$MIC_CARD" cset numid="$numid" "$value" >/dev/null 2>&1; then
+		MIC_FAILED=$((MIC_FAILED + 1))
+		mic_log "设置 $name（numid $numid）为 '$value' 失败（card $MIC_CARD）"
+		return 1
+	fi
+	actual=$(read_mic_numid "$numid")
+	if [ "$actual" != "$value" ]; then
+		MIC_FAILED=$((MIC_FAILED + 1))
+		mic_log "$name（numid $numid）回读 '$actual'，期望 '$value'"
+		return 1
+	fi
+	return 0
+}
+
+# RV1106 ACODEC 必须按这块板子的实际模拟电路配置。Echo-Mate 使用同一块板，
+# 已验证的语音链路是：DiffadcL、右声道 Mute、MIC 12 dB、数字增益 211，并关闭
+# 硬件 ALC AGC（软件侧 Speex 继续做降噪/AGC）。DAC 还必须在每次播放前强制
+# 手动导通，否则 PCM 在正常工作但扬声器没有声音。
+#
+# 这里在核心打开 PCM 之前做一次幂等预检并逐项回读，避免 S25 开机脚本缺失时
+# 静音、削顶或音量被重置却仍显示"音频正常"。
+configure_mic() {
+	command -v amixer >/dev/null 2>&1 || {
+		mic_log "amixer 不可用，无法初始化麦克风"
+		return 1
+	}
+	tries=0
+	while [ "$tries" -lt 50 ]; do
+		find_mic_card && break
+		tries=$((tries + 1))
+		usleep 100000 2>/dev/null || sleep 1
+	done
+	[ -n "$MIC_CARD" ] || {
+		mic_log "找不到 ACODEC 混音控件，麦克风未初始化"
+		return 1
+	}
+
+	MIC_FAILED=0
+	set_mic_numid 20 'ADC MICBIAS Voltage' '7'
+	set_mic_numid 21 'ADC Main MICBIAS' '1'
+	# 与 Echo-Mate 的 S99start_echo_defconfig 保持一致。
+	set_mic_numid 19 'ADC Mode' '0'
+	set_mic_numid 22 'ADC MIC Left Switch' '0'
+	set_mic_numid 23 'ADC MIC Right Switch' '1'
+	set_mic_numid 2 'ADC MIC Left Gain' '3'
+	set_mic_numid 3 'ADC MIC Right Gain' '3'
+	set_mic_numid 4 'ADC ALC Left Volume' '16'
+	set_mic_numid 5 'ADC ALC Right Volume' '16'
+	set_mic_numid 15 'ALC AGC Left Switch' '0'
+	set_mic_numid 16 'ALC AGC Right Switch' '0'
+	set_mic_numid 8 'ADC HPF Cut-off' '1'
+	set_mic_numid 6 'ADC Digital Left Volume' '211'
+	set_mic_numid 7 'ADC Digital Right Volume' '211'
+	# HPMIX 先给满，再强制打开 DAC。numid 稳定且 name 在部分 uClibc 镜像上
+	# 会被 amixer 的控件匹配逻辑拒绝。
+	set_mic_numid 24 'DAC LINEOUT Volume' '30'
+	set_mic_numid 25 'DAC HPMIX Volume' '2'
+	set_mic_numid 26 'DAC Control Manually' '2'
+
+	if [ "$MIC_FAILED" -eq 0 ]; then
+		mic_log "初始化并回读验证通过（card $MIC_CARD）"
+		return 0
+	fi
+	mic_log "初始化完成，但有 $MIC_FAILED 项失败"
+	return 1
+}
+
+# 与 configure_mic 使用同一组稳定的 numid，但把所有输入增益、MICBIAS 和
+# 输出音量压到零。DAC Control Manually=Off 会关闭手动 DAC 通路。
+configure_muted_audio() {
+	command -v amixer >/dev/null 2>&1 || {
+		mic_log "amixer 不可用，无法确认硬件静音"
+		return 1
+	}
+	tries=0
+	while [ "$tries" -lt 50 ]; do
+		find_mic_card && break
+		tries=$((tries + 1))
+		usleep 100000 2>/dev/null || sleep 1
+	done
+	[ -n "$MIC_CARD" ] || {
+		mic_log "找不到 ACODEC 混音控件，无法写静音"
+		return 1
+	}
+
+	MIC_FAILED=0
+	set_mic_numid 21 'ADC Main MICBIAS' '0'
+	set_mic_numid 22 'ADC MIC Left Switch' '1'
+	set_mic_numid 23 'ADC MIC Right Switch' '1'
+	# 增益枚举的可用档位从 1 起；0 虽出现在 ALSA 描述里，写入会被驱动拒绝。
+	set_mic_numid 2 'ADC MIC Left Gain' '1'
+	set_mic_numid 3 'ADC MIC Right Gain' '1'
+	set_mic_numid 4 'ADC ALC Left Volume' '0'
+	set_mic_numid 5 'ADC ALC Right Volume' '0'
+	set_mic_numid 6 'ADC Digital Left Volume' '0'
+	set_mic_numid 7 'ADC Digital Right Volume' '0'
+	set_mic_numid 9 'ALC AGC Left Volume' '0'
+	set_mic_numid 10 'ALC AGC Right Volume' '0'
+	set_mic_numid 15 'ALC AGC Left Switch' '0'
+	set_mic_numid 16 'ALC AGC Right Switch' '0'
+	set_mic_numid 24 'DAC LINEOUT Volume' '0'
+	set_mic_numid 25 'DAC HPMIX Volume' '1'
+	set_mic_numid 26 'DAC Control Manually' '1'
+
+	if [ "$MIC_FAILED" -eq 0 ]; then
+		mic_log "硬件静音已逐项回读确认（card $MIC_CARD，ALSA 与 KWS 均已禁用）"
+		return 0
+	fi
+	mic_log "硬件静音完成，但有 $MIC_FAILED 项失败"
+	return 1
+}
+
+# 厂商 rkwifi_server 在 /data/cfg 缺失时会拿 /etc 的 dummy 配置覆盖
+# /data/wpa_supplicant.conf。启动早期先把持久配置原子同步到两处，让它即使抢先
+# 启动也读到正确网络；后续由 qzdesk_screen 接管 supplicant。
+sync_wifi_conf() {
+	[ -f "$WIFI_CONF" ] || return 0
+	if ! grep -q 'network[[:space:]]*=' "$WIFI_CONF" 2>/dev/null; then
+		echo "qzdesk: Wi-Fi 配置缺少 network 块，未同步" >>"$LOG"
+		return 1
+	fi
+	if ! mkdir -p /data/cfg 2>/dev/null; then
+		echo "qzdesk: 无法创建 /data/cfg，Wi-Fi 配置未同步" >>"$LOG"
+		return 1
+	fi
+	for target in /data/wpa_supplicant.conf /data/cfg/wpa_supplicant.conf; do
+		tmp="$target.qzdesk.tmp"
+		if cp -f "$WIFI_CONF" "$tmp" 2>/dev/null &&
+		   chmod 600 "$tmp" 2>/dev/null &&
+		   mv -f "$tmp" "$target" 2>/dev/null; then
+			continue
+		fi
+		rm -f "$tmp" 2>/dev/null
+		echo "qzdesk: 同步 Wi-Fi 配置到 $target 失败" >>"$LOG"
+		return 1
+	done
+	chmod 600 "$WIFI_CONF" 2>/dev/null
+	echo "qzdesk: 保存的 Wi-Fi 配置已同步" >>"$LOG"
+}
+
+# 首次启动（尤其是擦除 userdata 或新板子）时写入出厂 Wi-Fi。已有任意
+# network 块就完全保留用户配置，绝不在后续升级时覆盖。
+ensure_default_wifi_conf() {
+	[ -r "$DEFAULT_WIFI_CONF" ] || return 0
+	if [ -s "$WIFI_CONF" ] && grep -q '^[[:space:]]*network[[:space:]]*=' "$WIFI_CONF"; then
+		return 0
+	fi
+
+	dir=${WIFI_CONF%/*}
+	tmp="$WIFI_CONF.qzdesk.tmp"
+	mkdir -p "$dir" 2>/dev/null || return 1
+	if cp -f "$DEFAULT_WIFI_CONF" "$tmp" 2>/dev/null &&
+	   chmod 600 "$tmp" 2>/dev/null &&
+	   mv -f "$tmp" "$WIFI_CONF" 2>/dev/null; then
+		echo "qzdesk: 已写入出厂 Wi-Fi 配置" >>"$LOG"
+		return 0
+	fi
+	rm -f "$tmp" 2>/dev/null
+	echo "qzdesk: 写取出厂 Wi-Fi 配置失败" >>"$LOG"
+	return 1
 }
 
 # WiFi：这块板子是 RTL8723BS（SDIO WiFi+BT），驱动模块放在 /oem/usr/lib/wifi。
@@ -149,29 +377,96 @@ wait_ready() {
 # 它绑定一个 Unix socket，等核心把采集到的 PCM 旁路过来（核心侧见 audio/kws_tap.rs）；
 # 命中唤醒词就往核心的 UDP 口发 {"type":"listen","state":"start"}，核心随即进入
 # Listening —— 后面就是原本的语音链路，这个进程不参与说话，只负责"叫人"。
+kws_supervisor() {
+	echo $$ >"$KWS_SUPERVISOR_PIDFILE"
+	child=
+	stopping=0
+	trap 'stopping=1; [ -n "$child" ] && kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; rm -f "$KWS_PIDFILE" "$KWS_SOCK" "$KWS_SUPERVISOR_PIDFILE"; exit 0' TERM INT
+	# adb shell 退出时会给它的作业发 HUP；supervisor 已经脱离会话，
+	# 只有明确的 TERM/INT 才应该结束它。
+	trap '' HUP
+	while [ "$stopping" -eq 0 ]; do
+		rm -f "$KWS_SOCK"
+		LD_LIBRARY_PATH=/oem/usr/lib "$KWS_BIN" >>"$LOG" 2>&1 &
+		child=$!
+		echo "$child" >"$KWS_PIDFILE"
+		wait "$child"
+		status=$?
+		rm -f "$KWS_PIDFILE" "$KWS_SOCK"
+		[ "$stopping" -eq 1 ] && break
+		echo "qzdesk: 唤醒词进程退出（status=$status），2 秒后重启" >>"$LOG"
+		sleep 2
+	done
+}
+
 start_kws() {
+	audio_disabled && return 0
 	[ -x "$KWS_BIN" ] || return 0
 	# 唤醒库按 mode 各自命名装在 lib/qzdesk/（进程自己 dlopen，不链接），所以这里只需
 	# 确认要用的那一套在。目录不在 = 这版固件没编唤醒，静默跳过。
 	[ -f "/oem/usr/lib/qzdesk/libaec_bf_process_${QZDESK_KWS_MODE:-mode2}.so" ] || return 0
-	rm -f "$KWS_SOCK"
+	if [ -f "$KWS_SUPERVISOR_PIDFILE" ]; then
+		supervisor=$(cat "$KWS_SUPERVISOR_PIDFILE" 2>/dev/null)
+		[ -n "$supervisor" ] && kill -0 "$supervisor" 2>/dev/null && return 0
+	fi
+	rm -f "$KWS_SOCK" "$KWS_PIDFILE" "$KWS_SUPERVISOR_PIDFILE"
 	# LD_LIBRARY_PATH 要给的是**库自己的依赖**（librknnmrt.so / librkaudio_common.so 在
 	# /oem/usr/lib），不是唤醒库本身 —— 它是 dlopen 指定完整路径加载的。
-	LD_LIBRARY_PATH=/oem/usr/lib "$KWS_BIN" >>"$LOG" 2>&1 &
-	echo "qzdesk: 唤醒词进程已启动（pid $!，模式 ${QZDESK_KWS_MODE:-mode2}），日志 $LOG"
+	if command -v setsid >/dev/null 2>&1; then
+		# BusyBox setsid 没有 -f。让一个短命的中间 shell 进入新会话，
+		# 再把真正的 supervisor 放到它后面并立即退出，避免 adb shell
+		# 在命令结束时收走同一个作业组里的后台进程。
+		setsid sh -c 'nohup "$0" kws-supervise >>"$1" 2>&1 </dev/null &' \
+			"$0" "$LOG" </dev/null >>"$LOG" 2>&1
+	else
+		nohup "$0" kws-supervise >>"$LOG" 2>&1 </dev/null &
+	fi
+	# PID 由 supervisor 自己写。这里再写 $! 会覆盖成中间 shell 的 PID，
+	# 下一次检查就会误判进程已退出。
+	i=0
+	while [ "$i" -lt 20 ]; do
+		supervisor=$(cat "$KWS_SUPERVISOR_PIDFILE" 2>/dev/null)
+		if [ -n "$supervisor" ] && kill -0 "$supervisor" 2>/dev/null; then
+			echo "qzdesk: 唤醒词监督进程已启动（pid $supervisor，模式 ${QZDESK_KWS_MODE:-mode2}），日志 $LOG"
+			return 0
+		fi
+		usleep 100000 2>/dev/null || sleep 1
+		i=$((i + 1))
+	done
+	echo "qzdesk: 唤醒词监督进程启动失败（检查 $LOG）" >>"$LOG"
+	return 1
 }
 
 start() {
-	running && { echo "qzdesk: 已在运行（pid $pid），跳过"; return 0; }
+	mkdir -p /var/log /var/run
+	ensure_default_wifi_conf
+	sync_wifi_conf
+	if running; then
+		echo "qzdesk: 已在运行（pid ${pid:-?}），检查唤醒词进程"
+		start_kws
+		return 0
+	fi
 	wait_ready || echo "qzdesk: 就绪等待超时，仍尝试启动（显示节点或字体可能还没到）"
 	[ -x "$DAEMON" ] || { echo "qzdesk: 找不到 $DAEMON"; return 1; }
-	mkdir -p /var/log /var/run
 	[ -f "$LOG" ] && [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -gt "$LOG_MAX" ] && : >"$LOG"
 	cd "$WORKDIR" || return 1
 	# 开机耗时基线：这里记一条 uptime，界面出图时自己再记一条，相减就是启动耗时
 	echo "qzdesk: 启动 uptime=$(cut -d' ' -f1 /proc/uptime)" >>"$LOG"
+	if audio_disabled; then
+		configure_muted_audio || echo "qzdesk: 硬件静音未完全通过，继续以无 ALSA 模式启动（详情见 $LOG）" >>"$LOG"
+	else
+		configure_mic || echo "qzdesk: 麦克风混音预检未完全通过，继续启动（详情见 $LOG）" >>"$LOG"
+	fi
 	load_wifi
-	"$DAEMON" >>"$LOG" 2>&1 &
+	sync_wifi_conf
+	# 从 adb shell 里手动 start 时，界面会跟着调用者的会话一起被清掉（终端
+	# 挂断发 SIGHUP），表现是"部署后跑一两分钟屏幕就没了"。开机路径本来
+	# 没有这个父会话，但两种入口都用 setsid 起，行为一致。
+	if command -v setsid >/dev/null 2>&1; then
+		setsid "$DAEMON" >>"$LOG" 2>&1 &
+	else
+		"$DAEMON" >>"$LOG" 2>&1 &
+	fi
 	echo $! > "$PIDFILE"
 	echo "qzdesk: 已启动（pid $(cat $PIDFILE)），日志 $LOG"
 	start_kws
@@ -180,8 +475,19 @@ start() {
 }
 
 stop() {
+	if [ -f "$KWS_SUPERVISOR_PIDFILE" ]; then
+		pid=$(cat "$KWS_SUPERVISOR_PIDFILE" 2>/dev/null)
+		[ -n "$pid" ] && kill "$pid" 2>/dev/null
+		rm -f "$KWS_SUPERVISOR_PIDFILE"
+	fi
+	if [ -f "$KWS_PIDFILE" ]; then
+		pid=$(cat "$KWS_PIDFILE" 2>/dev/null)
+		[ -n "$pid" ] && kill "$pid" 2>/dev/null
+		rm -f "$KWS_PIDFILE"
+	fi
 	if [ -f "$PIDFILE" ]; then
-		kill "$(cat $PIDFILE)" 2>/dev/null
+		pid=$(cat "$PIDFILE" 2>/dev/null)
+		[ -n "$pid" ] && kill "$pid" 2>/dev/null
 		rm -f "$PIDFILE"
 	fi
 	killall qzdesk_screen 2>/dev/null
@@ -195,5 +501,6 @@ case "$1" in
 	stop)    stop ;;
 	restart) stop; sleep 1; start ;;
 	status)  running && echo "qzdesk: 运行中（pid $pid）" || echo "qzdesk: 未运行" ;;
+	kws-supervise) kws_supervisor ;;
 	*)       echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac

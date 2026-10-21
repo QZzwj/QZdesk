@@ -4,9 +4,10 @@
 //! references.  The directory is scanned on every request, so installing or
 //! removing a Skill takes effect without rebuilding the Rust binary.
 
+use crate::archive::StoredZip;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
@@ -14,7 +15,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
 use super::tool::McpTool;
@@ -27,6 +28,12 @@ const MAX_INSTRUCTIONS_CHARS: usize = 24_000;
 /// 同一个 Skill 最多返回几条：结果列表要说清「哪个技能、哪一节」，
 /// 不能被单个技能的相邻章节占满。
 const MAX_HITS_PER_SKILL: usize = 2;
+const BUNDLE_FORMAT: &str = "qzdesk.skills";
+const BUNDLE_VERSION: u32 = 1;
+const BUNDLE_MANIFEST: &str = "qzdesk-skills.json";
+/// 技能包要整个读进内存再通过网页返回，因此与单 Skill ZIP 共用 64 MiB 上限。
+const MAX_BUNDLE_CONTENT_BYTES: u64 = 60 * 1024 * 1024;
+const MAX_BUNDLE_FILES: usize = 4_096;
 
 /// 内容摘要：SHA-256 前 16 位十六进制。够区分内容，日志里也读得下去。
 fn digest(input: &str) -> String {
@@ -118,7 +125,9 @@ impl Default for SkillSelection {
     fn default() -> Self {
         /* 磁盘上扫到、但用户从未选过的 Skill（OEM / 预置）默认关闭；
          * 网页新导入的会被显式设为主技能，见 `activate_new_skill`。 */
-        Self { role: SkillRole::None }
+        Self {
+            role: SkillRole::None,
+        }
     }
 }
 
@@ -126,6 +135,58 @@ impl Default for SkillSelection {
 struct SkillState {
     #[serde(default)]
     skills: BTreeMap<String, SkillSelection>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillBundleManifest {
+    format: String,
+    version: u32,
+    #[serde(default)]
+    exported_at: u64,
+    skills: Vec<SkillBundleEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SkillBundleEntry {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    role: SkillRole,
+    #[serde(default)]
+    files: usize,
+    #[serde(default)]
+    bytes: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct SkillBundleImportError {
+    pub(crate) message: String,
+    pub(crate) conflicts: Vec<String>,
+}
+
+impl SkillBundleImportError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            conflicts: Vec::new(),
+        }
+    }
+}
+
+struct BundleFile {
+    relative: String,
+    path: PathBuf,
+    size: u64,
+}
+
+struct BundleImportPlan {
+    id: String,
+    role: SkillRole,
+    source: PathBuf,
 }
 
 /// 一个按标题切分出来的 Markdown 章节，检索以章节为最小单位
@@ -161,6 +222,8 @@ struct SkillIndex {
 #[derive(Clone)]
 pub struct SkillManager {
     roots: Vec<PathBuf>,
+    /// 测试里把“用户安装池”固定到临时目录；生产环境按配置或默认路径推导。
+    install_root_override: Option<PathBuf>,
     /// 角色选择的落盘位置。`None` = 按安装根目录推（生产路径，可被
     /// `XIAOZHI_SKILL_STATE_FILE` 覆盖）；测试里显式给一个临时文件，
     /// 免得测试把用户真实的 `skill_state.json` 覆盖掉。
@@ -194,6 +257,7 @@ impl SkillManager {
         }
         Self {
             roots: unique_roots,
+            install_root_override: None,
             state_file: None,
             index: Arc::new(Mutex::new(SkillIndex::default())),
         }
@@ -207,6 +271,7 @@ impl SkillManager {
     pub(crate) fn for_test_dir(dir: PathBuf) -> Self {
         Self {
             roots: vec![dir.clone()],
+            install_root_override: Some(dir.clone()),
             state_file: Some(dir.join("skill_state.json")),
             index: Arc::new(Mutex::new(SkillIndex::default())),
         }
@@ -310,8 +375,8 @@ impl SkillManager {
         let path = self.state_path();
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(|e| format!("无法创建 Skill 状态目录: {}", e))?;
-        let content = serde_json::to_vec_pretty(state)
-            .map_err(|e| format!("无法编码 Skill 状态: {}", e))?;
+        let content =
+            serde_json::to_vec_pretty(state).map_err(|e| format!("无法编码 Skill 状态: {}", e))?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, content).map_err(|e| format!("无法保存 Skill 状态: {}", e))?;
         fs::rename(&temporary, &path).map_err(|e| format!("无法提交 Skill 状态: {}", e))
@@ -347,7 +412,11 @@ impl SkillManager {
                     text.clear();
                 }
                 let heading = trimmed.trim_start_matches('#').trim();
-                title = if heading.is_empty() { String::from("概述") } else { heading.to_string() };
+                title = if heading.is_empty() {
+                    String::from("概述")
+                } else {
+                    heading.to_string()
+                };
                 line_start = line_no;
                 continue;
             }
@@ -435,7 +504,11 @@ impl SkillManager {
         let mut terms: Vec<String> = Vec::new();
 
         for token in query_lower.split(|c: char| {
-            c.is_whitespace() || matches!(c, ',' | '，' | '。' | '、' | '?' | '？' | '!' | '！' | ':' | '：' | ';' | '；')
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    ',' | '，' | '。' | '、' | '?' | '？' | '!' | '！' | ':' | '：' | ';' | '；'
+                )
         }) {
             let token = token.trim();
             if !token.is_empty() {
@@ -595,8 +668,7 @@ impl SkillManager {
                 (rank, dir_name, value)
             })
             .filter(|(_, _, value)| {
-                include_disabled
-                    || value.get("role").and_then(Value::as_str) != Some("none")
+                include_disabled || value.get("role").and_then(Value::as_str) != Some("none")
             })
             .collect();
 
@@ -637,10 +709,45 @@ impl SkillManager {
     /// OEM files remain available as read-only defaults; user files take
     /// precedence because `/userdata` is writable across firmware updates.
     pub(crate) fn install_root(&self) -> PathBuf {
+        if let Some(path) = &self.install_root_override {
+            return path.clone();
+        }
         if let Some(path) = configured_skill_root() {
             return PathBuf::from(path);
         }
         default_user_skill_root()
+    }
+
+    /// 用户安装池里的 Skill。导出必须直接从这里取，不能走 `skill_dirs`：
+    /// 后者允许只读源码目录按优先级覆盖同名项，可能把源码正文误当成用户版本。
+    fn user_skill_dirs(&self) -> Vec<(String, PathBuf)> {
+        let root = self.install_root();
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(_) => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if is_bundle_cache_component(name) || validate_skill_name(name).is_err() {
+                continue;
+            }
+            let path = entry.path();
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                _ => continue,
+            }
+            match fs::symlink_metadata(path.join("SKILL.md")) {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                _ => continue,
+            }
+            result.push((name.to_string(), path));
+        }
+        result.sort_by(|left, right| left.0.cmp(&right.0));
+        result
     }
 
     pub(crate) fn install(&self, name: &str, skill_md: &str) -> Result<(), String> {
@@ -659,10 +766,11 @@ impl SkillManager {
         fs::create_dir_all(&dir).map_err(|e| format!("无法创建 Skill: {}", e))?;
         let tmp = dir.join("SKILL.md.tmp");
         let mut file = fs::File::create(&tmp).map_err(|e| format!("无法写入 SKILL.md: {}", e))?;
-        file.write_all(skill_md.as_bytes()).map_err(|e| format!("无法写入 SKILL.md: {}", e))?;
-        file.sync_all().map_err(|e| format!("无法保存 SKILL.md: {}", e))?;
-        fs::rename(&tmp, dir.join("SKILL.md"))
-            .map_err(|e| format!("无法提交 SKILL.md: {}", e))?;
+        file.write_all(skill_md.as_bytes())
+            .map_err(|e| format!("无法写入 SKILL.md: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("无法保存 SKILL.md: {}", e))?;
+        fs::rename(&tmp, dir.join("SKILL.md")).map_err(|e| format!("无法提交 SKILL.md: {}", e))?;
         sync_directory(&dir).map_err(|e| format!("无法持久化 Skill 目录: {}", e))?;
         sync_directory(&root).map_err(|e| format!("无法持久化 Skill 根目录: {}", e))?;
         // 导入即生效：这一句保存完，下一句对话就该按它回答
@@ -693,7 +801,9 @@ impl SkillManager {
             return Err(format!("Skill '{}' 不存在", name));
         }
         let mut state = self.load_state();
-        state.skills.insert(name.to_string(), SkillSelection { role });
+        state
+            .skills
+            .insert(name.to_string(), SkillSelection { role });
         self.save_state(&state)
     }
 
@@ -728,7 +838,9 @@ impl SkillManager {
         let Some(role) = role_for_newly_installed(&state, name, existed_before) else {
             return;
         };
-        state.skills.insert(name.to_string(), SkillSelection { role });
+        state
+            .skills
+            .insert(name.to_string(), SkillSelection { role });
         match self.save_state(&state) {
             Ok(()) => log::info!("新导入的 Skill '{}' 已默认设为主技能", name),
             Err(error) => log::warn!(
@@ -768,6 +880,85 @@ impl SkillManager {
         fs::read_to_string(&path).map_err(|e| format!("SKILL.md 不是有效的 UTF-8 文件: {}", e))
     }
 
+    /// 把用户安装的全部 Skill 打包成一个可离线搬运的 ZIP。
+    ///
+    /// OEM / 源码目录里的技能不进入包内，避免把固件内容复制成用户覆盖层；
+    /// 用户安装池里的关闭项也会导出，因为角色选择本身就是迁移内容的一部分。
+    pub(crate) fn export_bundle(&self) -> Result<Vec<u8>, String> {
+        let state = self.load_state();
+        let exported_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let mut manifest = SkillBundleManifest {
+            format: BUNDLE_FORMAT.to_string(),
+            version: BUNDLE_VERSION,
+            exported_at,
+            skills: Vec::new(),
+        };
+        let mut archive = StoredZip::new();
+        let mut total_bytes = 0u64;
+        let mut total_files = 0usize;
+
+        for (id, dir) in self.user_skill_dirs() {
+            validate_skill_name(&id)?;
+            validate_skill_file(&dir.join("SKILL.md"))?;
+            let files = collect_bundle_files(&dir)?;
+            if !files.iter().any(|file| file.relative == "SKILL.md") {
+                return Err(format!("Skill '{}' 缺少 SKILL.md", id));
+            }
+            let skill_bytes = files.iter().try_fold(0u64, |total, file| {
+                total
+                    .checked_add(file.size)
+                    .ok_or_else(|| format!("Skill '{}' 体积超出限制", id))
+            })?;
+            total_bytes = total_bytes
+                .checked_add(skill_bytes)
+                .ok_or_else(|| "技能包体积超出限制".to_string())?;
+            total_files = total_files
+                .checked_add(files.len())
+                .ok_or_else(|| "技能包文件数超出限制".to_string())?;
+            if total_bytes > MAX_BUNDLE_CONTENT_BYTES || total_files > MAX_BUNDLE_FILES {
+                return Err(format!(
+                    "技能包超过 {} MiB / {} 个文件上限，请先移除过大的 Skill",
+                    MAX_BUNDLE_CONTENT_BYTES / 1024 / 1024,
+                    MAX_BUNDLE_FILES
+                ));
+            }
+
+            let metadata = parse_skill_metadata(&dir.join("SKILL.md"));
+            manifest.skills.push(SkillBundleEntry {
+                id: id.clone(),
+                name: metadata.name.unwrap_or_else(|| id.clone()),
+                description: metadata.description.unwrap_or_default(),
+                role: Self::selection(&state, &id).role,
+                files: files.len(),
+                bytes: skill_bytes,
+            });
+            for file in files {
+                let content = fs::read(&file.path).map_err(|error| {
+                    format!("读取 Skill 文件 '{}' 失败: {}", file.relative, error)
+                })?;
+                archive.add(&format!("skills/{}/{}", id, file.relative), &content)?;
+            }
+        }
+
+        if manifest.skills.is_empty() {
+            return Err("没有可导出的用户安装 Skill".to_string());
+        }
+        let manifest = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("无法编码技能包清单: {}", error))?;
+        archive.add(BUNDLE_MANIFEST, &manifest)?;
+        let bundle = archive.finish()?;
+        if bundle.len() as u64 > MAX_SKILL_ZIP_BYTES as u64 {
+            return Err(format!(
+                "技能包超过 {} MiB 上限",
+                MAX_SKILL_ZIP_BYTES / 1024 / 1024
+            ));
+        }
+        Ok(bundle)
+    }
+
     pub(crate) async fn install_zip(&self, name: &str, archive_data: &[u8]) -> Result<(), String> {
         validate_skill_name(name)?;
         // 覆盖安装不算“导入”，别把用户选过的角色改掉
@@ -802,8 +993,15 @@ impl SkillManager {
         let extract_dir = temp.join("extract");
         fs::create_dir_all(&extract_dir).map_err(|e| format!("无法创建临时解压目录: {}", e))?;
         let extract = Command::new("unzip")
-            .args(["-q", archive.to_str().unwrap_or("skill.zip"), "-d", extract_dir.to_str().unwrap_or("extract")])
-            .status().await.map_err(|e| format!("启动 unzip 失败: {}", e))?;
+            .args([
+                "-q",
+                archive.to_str().unwrap_or("skill.zip"),
+                "-d",
+                extract_dir.to_str().unwrap_or("extract"),
+            ])
+            .status()
+            .await
+            .map_err(|e| format!("启动 unzip 失败: {}", e))?;
         if !extract.success() {
             let _ = fs::remove_dir_all(&temp);
             return Err("ZIP 解压失败，请确认文件完整".to_string());
@@ -823,7 +1021,8 @@ impl SkillManager {
                 ));
             }
         }
-        let source = find_skill_root(&extract_dir).ok_or_else(|| "ZIP 中没有找到 SKILL.md".to_string())?;
+        let source =
+            find_skill_root(&extract_dir).ok_or_else(|| "ZIP 中没有找到 SKILL.md".to_string())?;
         validate_skill_file(&source.join("SKILL.md"))?;
         let root = self.install_root();
         fs::create_dir_all(&root).map_err(|e| format!("无法创建 Skill 目录: {}", e))?;
@@ -841,6 +1040,311 @@ impl SkillManager {
         // 导入即生效：ZIP 装完，下一句对话就该按它回答
         self.activate_new_skill(name, existed_before);
         Ok(())
+    }
+
+    /// 导入整套技能包。先完整预检，再复制到安装目录旁的 staging 区，最后逐项提交。
+    ///
+    /// 同名 Skill 默认返回冲突列表，网页确认后才带 `replace_existing = true`
+    /// 重试。旧版本会在提交后保留到备份区，状态落盘失败时用于回滚。
+    pub(crate) async fn import_bundle(
+        &self,
+        archive_data: &[u8],
+        replace_existing: bool,
+    ) -> Result<Value, SkillBundleImportError> {
+        if archive_data.is_empty() {
+            return Err(SkillBundleImportError::invalid("技能包为空"));
+        }
+        if archive_data.len() > MAX_SKILL_ZIP_BYTES {
+            return Err(SkillBundleImportError::invalid(format!(
+                "技能包超过 {} MiB 上限",
+                MAX_SKILL_ZIP_BYTES / 1024 / 1024
+            )));
+        }
+        validate_bundle_zip(archive_data).map_err(SkillBundleImportError::invalid)?;
+
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let install_root = self.install_root();
+        let temp = if booted_from_sd_card() {
+            install_root
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(std::env::temp_dir)
+                .join(format!(".qzdesk-bundle-import-{}", token))
+        } else {
+            std::env::temp_dir().join(format!("qzdesk-bundle-import-{}", token))
+        };
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).map_err(|error| {
+            SkillBundleImportError::invalid(format!("无法创建临时目录: {}", error))
+        })?;
+        let archive = temp.join("bundle.zip");
+        fs::write(&archive, archive_data).map_err(|error| {
+            SkillBundleImportError::invalid(format!("无法保存技能包: {}", error))
+        })?;
+
+        let extract_dir = temp.join("extract");
+        fs::create_dir_all(&extract_dir).map_err(|error| {
+            SkillBundleImportError::invalid(format!("无法创建解压目录: {}", error))
+        })?;
+        let extract = Command::new("unzip")
+            .arg("-q")
+            .arg("-o")
+            .arg(&archive)
+            .arg("-d")
+            .arg(&extract_dir)
+            .status()
+            .await;
+        match extract {
+            Ok(status) if status.success() => {}
+            Ok(_) => {
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(
+                    "技能包解压失败，请确认文件完整",
+                ));
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(format!(
+                    "启动 unzip 失败: {}",
+                    error
+                )));
+            }
+        }
+        if let Err(error) = validate_extracted_bundle_tree(&extract_dir) {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(error);
+        }
+
+        let manifest_path = extract_dir.join(BUNDLE_MANIFEST);
+        let manifest_size = fs::metadata(&manifest_path)
+            .map_err(|_| SkillBundleImportError::invalid("技能包缺少 qzdesk-skills.json 清单"))?
+            .len();
+        if manifest_size > MAX_FILE_BYTES {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid("技能包清单超过 1 MiB"));
+        }
+        let manifest_data = match fs::read(&manifest_path) {
+            Ok(data) => data,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(format!(
+                    "无法读取技能包清单: {}",
+                    error
+                )));
+            }
+        };
+        let manifest: SkillBundleManifest = match serde_json::from_slice(&manifest_data) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(format!(
+                    "技能包清单格式错误: {}",
+                    error
+                )));
+            }
+        };
+        if manifest.format != BUNDLE_FORMAT {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid("不是 QZdesk 技能包"));
+        }
+        if manifest.version != BUNDLE_VERSION {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid(format!(
+                "不支持技能包版本 {}，当前支持版本 {}",
+                manifest.version, BUNDLE_VERSION
+            )));
+        }
+        if manifest.skills.is_empty() {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid("技能包里没有技能"));
+        }
+        if manifest.skills.len() > MAX_BUNDLE_FILES {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid(
+                "技能包中的技能数量超出限制",
+            ));
+        }
+
+        let mut seen = BTreeMap::new();
+        let mut plans = Vec::with_capacity(manifest.skills.len());
+        for entry in &manifest.skills {
+            if let Err(error) = validate_skill_name(&entry.id) {
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(error));
+            }
+            if seen.insert(entry.id.clone(), ()).is_some() {
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(format!(
+                    "技能包中存在重复 Skill '{}'",
+                    entry.id
+                )));
+            }
+            let source = extract_dir.join("skills").join(&entry.id);
+            match fs::symlink_metadata(&source) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                _ => {
+                    let _ = fs::remove_dir_all(&temp);
+                    return Err(SkillBundleImportError::invalid(format!(
+                        "技能包缺少 Skill '{}' 的目录",
+                        entry.id
+                    )));
+                }
+            }
+            if let Err(error) = validate_bundle_skill_source(&source) {
+                let _ = fs::remove_dir_all(&temp);
+                return Err(error);
+            }
+            plans.push(BundleImportPlan {
+                id: entry.id.clone(),
+                role: entry.role,
+                source,
+            });
+        }
+        if let Err(error) = validate_bundle_layout(&extract_dir, &seen) {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(error);
+        }
+
+        let conflicts: Vec<String> = plans
+            .iter()
+            .filter(|plan| self.find_skill(&plan.id).is_some())
+            .map(|plan| plan.id.clone())
+            .collect();
+        if !replace_existing && !conflicts.is_empty() {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError {
+                message: format!(
+                    "{} 个同名 Skill 已存在，确认后会覆盖其文件和角色",
+                    conflicts.len()
+                ),
+                conflicts,
+            });
+        }
+
+        if let Err(error) = fs::create_dir_all(&install_root) {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid(format!(
+                "无法创建 Skill 目录: {}",
+                error
+            )));
+        }
+        let parent = install_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let staging_root = parent.join(format!(".qzdesk-bundle-stage-{}", token));
+        let backup_root = parent.join(format!(".qzdesk-bundle-backup-{}", token));
+        let _ = fs::remove_dir_all(&staging_root);
+        let _ = fs::remove_dir_all(&backup_root);
+        if let Err(error) = fs::create_dir_all(&staging_root) {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid(format!(
+                "无法创建导入暂存目录: {}",
+                error
+            )));
+        }
+        if let Err(error) = fs::create_dir_all(&backup_root) {
+            let _ = fs::remove_dir_all(&staging_root);
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid(format!(
+                "无法创建导入备份目录: {}",
+                error
+            )));
+        }
+
+        for plan in &plans {
+            let target = staging_root.join(&plan.id);
+            if let Err(error) = copy_bundle_skill(&plan.source, &target) {
+                let _ = fs::remove_dir_all(&staging_root);
+                let _ = fs::remove_dir_all(&backup_root);
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(format!(
+                    "准备 Skill '{}' 失败: {}",
+                    plan.id, error
+                )));
+            }
+            if let Err(error) = validate_skill_file(&target.join("SKILL.md")) {
+                let _ = fs::remove_dir_all(&staging_root);
+                let _ = fs::remove_dir_all(&backup_root);
+                let _ = fs::remove_dir_all(&temp);
+                return Err(SkillBundleImportError::invalid(error));
+            }
+        }
+
+        // OEM / 源码目录里的同名项也会在确认后被用户版本覆盖，计数要把它们
+        // 算进去，界面显示的“替换数量”才与冲突提示一致。
+        let replaced = conflicts.len();
+        let mut committed = Vec::with_capacity(plans.len());
+        let mut backups = Vec::new();
+        let mut commit_error = None;
+        for plan in &plans {
+            let target = install_root.join(&plan.id);
+            let backup = backup_root.join(&plan.id);
+            if path_exists(&target) {
+                if let Err(error) = fs::rename(&target, &backup) {
+                    commit_error = Some(format!("备份旧 Skill '{}' 失败: {}", plan.id, error));
+                    break;
+                }
+                backups.push(plan.id.clone());
+            }
+            if let Err(error) = fs::rename(staging_root.join(&plan.id), &target) {
+                commit_error = Some(format!("安装 Skill '{}' 失败: {}", plan.id, error));
+                break;
+            }
+            committed.push(plan.id.clone());
+        }
+        if let Some(error) = commit_error {
+            rollback_bundle_commit(&install_root, &backup_root, &committed, &backups);
+            let _ = fs::remove_dir_all(&staging_root);
+            let _ = fs::remove_dir_all(&backup_root);
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid(error));
+        }
+
+        let mut state = self.load_state();
+        for plan in &plans {
+            state
+                .skills
+                .insert(plan.id.clone(), SkillSelection { role: plan.role });
+        }
+        if let Err(error) = self.save_state(&state) {
+            rollback_bundle_commit(&install_root, &backup_root, &committed, &backups);
+            let _ = fs::remove_dir_all(&staging_root);
+            let _ = fs::remove_dir_all(&backup_root);
+            let _ = fs::remove_dir_all(&temp);
+            return Err(SkillBundleImportError::invalid(error));
+        }
+        if let Err(error) = sync_directory(&install_root) {
+            log::warn!("技能包已导入，但同步安装目录失败: {}", error);
+        }
+
+        let _ = fs::remove_dir_all(&staging_root);
+        let _ = fs::remove_dir_all(&backup_root);
+        let _ = fs::remove_dir_all(&temp);
+        let primary = plans
+            .iter()
+            .filter(|plan| plan.role == SkillRole::Primary)
+            .count();
+        let secondary = plans
+            .iter()
+            .filter(|plan| plan.role == SkillRole::Secondary)
+            .count();
+        let disabled = plans
+            .iter()
+            .filter(|plan| plan.role == SkillRole::None)
+            .count();
+        log::info!(
+            "Imported {} skills from bundle ({} replaced)",
+            plans.len(),
+            replaced
+        );
+        Ok(json!({
+            "imported": plans.len(),
+            "replaced": replaced,
+            "primary": primary,
+            "secondary": secondary,
+            "disabled": disabled
+        }))
     }
 
     /// 当前 Skill 配置的版本号（内容摘要，SHA-256 前 16 位）。
@@ -916,7 +1420,11 @@ impl SkillManager {
                         Ok(content) => primaries.push((dir_name, content)),
                         // 读不到正文的主技能等于没生效，必须留下日志
                         Err(error) => {
-                            log::warn!("主技能 {} 的 SKILL.md 读取失败，本次未注入：{}", dir_name, error)
+                            log::warn!(
+                                "主技能 {} 的 SKILL.md 读取失败，本次未注入：{}",
+                                dir_name,
+                                error
+                            )
                         }
                     }
                 }
@@ -941,9 +1449,9 @@ impl SkillManager {
             );
         }
 
-        // 主技能正文共用一个预算池：先给规则和备用目录留 2000 字符，剩下的按主
+        // 主技能正文共用一个预算池：先给规则和备用目录留 3000 字符，剩下的按主
         // 技能数量平分，避免靠后的主技能被整体截掉
-        let pool = MAX_INSTRUCTIONS_CHARS.saturating_sub(2_000);
+        let pool = MAX_INSTRUCTIONS_CHARS.saturating_sub(3_000);
         let per_primary = (pool / primaries.len()).clamp(2_000, pool);
 
         let mut sections = Vec::new();
@@ -977,7 +1485,16 @@ impl SkillManager {
             .map(|(name, _)| format!("`{}`", name))
             .collect::<Vec<_>>()
             .join("、");
-        sections.insert(0, format!("{}\n{}", crate::companion::INSTRUCTIONS, crate::companion::memory_instructions()));
+        sections.insert(
+            0,
+            format!(
+                "{}\n{}\n{}\n{}",
+                crate::companion::INSTRUCTIONS,
+                companion_style_rules(),
+                crate::companion::memory_instructions(),
+                crate::companion::light_memory_instructions()
+            ),
+        );
         sections.insert(0, skill_rules_header(&primary_names));
 
         Some(truncate_chars(
@@ -996,7 +1513,8 @@ impl SkillManager {
         start_line: Option<usize>,
         max_chars: Option<usize>,
     ) -> Result<Value, String> {
-        let dir = self.active_skill_dirs()
+        let dir = self
+            .active_skill_dirs()
             .into_iter()
             .find(|(candidate, _)| candidate == skill)
             .map(|(_, path)| path)
@@ -1004,24 +1522,24 @@ impl SkillManager {
         let relative = relative_path.unwrap_or("SKILL.md");
         let relative_path = Path::new(relative);
         if relative_path.is_absolute()
-            || relative_path.components().any(|component| {
-                matches!(component, std::path::Component::ParentDir)
-            })
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
         {
             return Err("Invalid Skill path".to_string());
         }
         let path = dir.join(relative_path);
         // Reject symlinks that escape the Skill directory, in addition to the
         // lexical `..` check above.
-        let canonical_dir = fs::canonicalize(&dir)
-            .map_err(|e| format!("Cannot access Skill directory: {}", e))?;
-        let canonical_path = fs::canonicalize(&path)
-            .map_err(|e| format!("Cannot read Skill file: {}", e))?;
+        let canonical_dir =
+            fs::canonicalize(&dir).map_err(|e| format!("Cannot access Skill directory: {}", e))?;
+        let canonical_path =
+            fs::canonicalize(&path).map_err(|e| format!("Cannot read Skill file: {}", e))?;
         if !canonical_path.starts_with(&canonical_dir) {
             return Err("Skill path escapes its directory".to_string());
         }
-        let metadata = fs::metadata(&canonical_path)
-            .map_err(|e| format!("Cannot read Skill file: {}", e))?;
+        let metadata =
+            fs::metadata(&canonical_path).map_err(|e| format!("Cannot read Skill file: {}", e))?;
         if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
             return Err("Skill file is missing or too large".to_string());
         }
@@ -1030,7 +1548,9 @@ impl SkillManager {
 
         let total_lines = content.lines().count();
         let start = start_line.unwrap_or(1).max(1);
-        let limit = max_chars.unwrap_or(MAX_READ_CHARS).clamp(200, MAX_READ_CHARS * 4);
+        let limit = max_chars
+            .unwrap_or(MAX_READ_CHARS)
+            .clamp(200, MAX_READ_CHARS * 4);
 
         // 支持按行续读：长文档不再只能读到前 16k 字符
         let picked: String = content
@@ -1088,8 +1608,7 @@ impl SkillManager {
             }
             for file in &indexed.files {
                 for chunk in &file.chunks {
-                    let (score, matched) =
-                        Self::score_chunk(&query_lower, &terms, chunk, &names);
+                    let (score, matched) = Self::score_chunk(&query_lower, &terms, chunk, &names);
                     if score == 0 {
                         continue;
                     }
@@ -1149,7 +1668,11 @@ impl SkillManager {
             result["hint"] = Value::String(format!(
                 "没有章节命中。检索词：{}；已扫描技能：{}。可换更短的关键词重试，先 skill_list 看有哪些技能，或直接用 skill_read 读取 SKILL.md 全文。",
                 shown.join(" / "),
-                if scanned.is_empty() { "（无）".to_string() } else { scanned.join(" / ") },
+                if scanned.is_empty() {
+                    "（无）".to_string()
+                } else {
+                    scanned.join(" / ")
+                },
             ));
         }
         Ok(result)
@@ -1266,7 +1789,9 @@ fn find_skill_root(root: &Path) -> Option<PathBuf> {
             let meta = fs::symlink_metadata(&path).ok()?;
             if meta.file_type().is_dir() {
                 stack.push(path);
-            } else if meta.file_type().is_file() && path.file_name().and_then(|v| v.to_str()) == Some("SKILL.md") {
+            } else if meta.file_type().is_file()
+                && path.file_name().and_then(|v| v.to_str()) == Some("SKILL.md")
+            {
                 return path.parent().map(Path::to_path_buf);
             }
         }
@@ -1298,7 +1823,8 @@ fn validate_skill_file(path: &Path) -> Result<(), String> {
     if metadata.len() > MAX_FILE_BYTES {
         return Err("SKILL.md 超过 1 MiB 限制".to_string());
     }
-    let content = fs::read_to_string(path).map_err(|e| format!("SKILL.md 不是有效的 UTF-8 文件: {}", e))?;
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("SKILL.md 不是有效的 UTF-8 文件: {}", e))?;
     if content.trim().is_empty() {
         return Err("SKILL.md 为空，无法安装 Skill".to_string());
     }
@@ -1313,8 +1839,507 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 || name == "." || name == ".." {
         return Err("Skill 名称长度必须为 1-64 个字符".to_string());
     }
-    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.') {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+    {
         return Err("Skill 名称只能包含字母、数字、下划线、短横线和点".to_string());
+    }
+    Ok(())
+}
+
+fn is_bundle_cache_component(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "__pycache__" | "node_modules" | "target" | "Thumbs.db"
+        )
+}
+
+fn collect_bundle_files(root: &Path) -> Result<Vec<BundleFile>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .map_err(|error| format!("无法读取目录 '{}': {}", dir.display(), error))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("无法读取目录 '{}': {}", dir.display(), error))?;
+            let name = entry.file_name();
+            let name_text = name
+                .to_str()
+                .ok_or_else(|| format!("文件路径不是有效 UTF-8: {}", entry.path().display()))?;
+            if is_bundle_cache_component(name_text) {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("无法读取 '{}': {}", path.display(), error))?;
+            if metadata.file_type().is_dir() {
+                stack.push(path);
+            } else if metadata.file_type().is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| format!("无法计算文件路径: {}", path.display()))?;
+                let mut parts = Vec::new();
+                for component in relative.components() {
+                    let value = component
+                        .as_os_str()
+                        .to_str()
+                        .ok_or_else(|| format!("文件路径不是有效 UTF-8: {}", path.display()))?;
+                    parts.push(value);
+                }
+                files.push(BundleFile {
+                    relative: parts.join("/"),
+                    path,
+                    size: metadata.len(),
+                });
+            }
+        }
+    }
+    files.sort_by(|left, right| left.relative.cmp(&right.relative));
+    Ok(files)
+}
+
+fn validate_bundle_skill_source(source: &Path) -> Result<(), SkillBundleImportError> {
+    validate_skill_file(&source.join("SKILL.md")).map_err(SkillBundleImportError::invalid)?;
+    let files = collect_bundle_files(source).map_err(SkillBundleImportError::invalid)?;
+    if !files.iter().any(|file| file.relative == "SKILL.md") {
+        return Err(SkillBundleImportError::invalid(
+            "技能包中的 Skill 缺少 SKILL.md",
+        ));
+    }
+    let bytes = files
+        .iter()
+        .try_fold(0u64, |total, file| total.checked_add(file.size))
+        .ok_or_else(|| SkillBundleImportError::invalid("Skill 体积超出限制"))?;
+    if let Some((max_bytes, max_files)) = unpacked_limits() {
+        if bytes > max_bytes || files.len() > max_files {
+            return Err(SkillBundleImportError::invalid(format!(
+                "单个 Skill 解压后过大（{} KB / {} 个文件），上限 {} MB / {} 个文件",
+                bytes / 1024,
+                files.len(),
+                max_bytes / 1024 / 1024,
+                max_files
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 技能包是版本化格式，目录结构必须严格匹配清单。这样拼错清单、夹带
+/// 未声明目录或在 `skills/` 下放普通文件都会在提交前得到明确错误。
+fn validate_bundle_layout(
+    root: &Path,
+    expected: &BTreeMap<String, ()>,
+) -> Result<(), SkillBundleImportError> {
+    let mut manifest_found = false;
+    let mut skills_dir = None;
+    let entries = fs::read_dir(root).map_err(|error| {
+        SkillBundleImportError::invalid(format!("无法读取技能包目录: {}", error))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            SkillBundleImportError::invalid(format!("无法读取技能包目录: {}", error))
+        })?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| SkillBundleImportError::invalid("技能包根目录含有非 UTF-8 路径"))?;
+        let file_type = fs::symlink_metadata(entry.path())
+            .map_err(|error| {
+                SkillBundleImportError::invalid(format!(
+                    "无法检查技能包路径 '{}': {}",
+                    entry.path().display(),
+                    error
+                ))
+            })?
+            .file_type();
+        if name == BUNDLE_MANIFEST && file_type.is_file() {
+            manifest_found = true;
+        } else if name == "skills" && file_type.is_dir() {
+            skills_dir = Some(entry.path());
+        } else {
+            return Err(SkillBundleImportError::invalid(format!(
+                "技能包根目录含有未支持的内容: {}",
+                name
+            )));
+        }
+    }
+    if !manifest_found {
+        return Err(SkillBundleImportError::invalid(
+            "技能包缺少 qzdesk-skills.json 清单",
+        ));
+    }
+    let skills_dir =
+        skills_dir.ok_or_else(|| SkillBundleImportError::invalid("技能包缺少 skills 目录"))?;
+
+    let mut found = BTreeMap::new();
+    let entries = fs::read_dir(&skills_dir)
+        .map_err(|error| SkillBundleImportError::invalid(format!("无法读取技能目录: {}", error)))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            SkillBundleImportError::invalid(format!("无法读取技能目录: {}", error))
+        })?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| SkillBundleImportError::invalid("技能目录含有非 UTF-8 路径"))?;
+        if !expected.contains_key(name) {
+            return Err(SkillBundleImportError::invalid(format!(
+                "技能包含有清单未声明的目录: {}",
+                name
+            )));
+        }
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            SkillBundleImportError::invalid(format!("无法检查 Skill '{}': {}", name, error))
+        })?;
+        if !metadata.file_type().is_dir() {
+            return Err(SkillBundleImportError::invalid(format!(
+                "Skill '{}' 不是目录",
+                name
+            )));
+        }
+        if found.insert(name.to_string(), ()).is_some() {
+            return Err(SkillBundleImportError::invalid(format!(
+                "技能包中存在重复 Skill '{}'",
+                name
+            )));
+        }
+    }
+    if found.len() != expected.len() {
+        let missing = expected
+            .keys()
+            .find(|name| !found.contains_key(*name))
+            .cloned()
+            .unwrap_or_default();
+        return Err(SkillBundleImportError::invalid(format!(
+            "技能包缺少 Skill '{}' 的目录",
+            missing
+        )));
+    }
+    Ok(())
+}
+
+fn copy_bundle_skill(source: &Path, target: &Path) -> std::io::Result<()> {
+    let files = collect_bundle_files(source)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    fs::create_dir_all(target)?;
+    for file in files {
+        let output = target.join(&file.relative);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&file.path, &output)?;
+    }
+    Ok(())
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn remove_path(path: &Path) {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            let _ = fs::remove_dir_all(path);
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(path);
+        }
+        Err(_) => {}
+    }
+}
+
+fn rollback_bundle_commit(
+    install_root: &Path,
+    backup_root: &Path,
+    committed: &[String],
+    backups: &[String],
+) {
+    for id in committed.iter().rev() {
+        remove_path(&install_root.join(id));
+    }
+    for id in backups.iter().rev() {
+        let _ = fs::rename(backup_root.join(id), install_root.join(id));
+    }
+}
+
+fn zip_bytes(data: &[u8], offset: usize, len: usize) -> Result<&[u8], String> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| "ZIP 结构超出文件边界".to_string())?;
+    data.get(offset..end)
+        .ok_or_else(|| "ZIP 结构超出文件边界".to_string())
+}
+
+fn zip_u16(data: &[u8], offset: usize) -> Result<u16, String> {
+    let bytes = zip_bytes(data, offset, 2)?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn zip_u32(data: &[u8], offset: usize) -> Result<u32, String> {
+    let bytes = zip_bytes(data, offset, 4)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// 在启动外部 `unzip` 前读取中央目录。嵌入式系统常只有 BusyBox
+/// `unzip`，它没有 Info-ZIP 的 `-Z1/-l` 参数；中央目录则能直接给出
+/// 条目名、声明体积和 Unix 文件类型，足够做解压前安全检查。
+fn validate_bundle_zip(data: &[u8]) -> Result<(), String> {
+    const EOCD_LEN: usize = 22;
+    if data.len() < EOCD_LEN {
+        return Err("ZIP 文件过短，无法读取目录".to_string());
+    }
+
+    let search_floor = data.len().saturating_sub(EOCD_LEN + u16::MAX as usize);
+    let mut eocd = None;
+    for offset in (search_floor..=data.len() - EOCD_LEN).rev() {
+        if zip_bytes(data, offset, 4)? != b"PK\x05\x06" {
+            continue;
+        }
+        let comment_len = zip_u16(data, offset + 20)? as usize;
+        let record_end = offset
+            .checked_add(EOCD_LEN)
+            .and_then(|value| value.checked_add(comment_len));
+        if record_end == Some(data.len()) {
+            eocd = Some(offset);
+            break;
+        }
+    }
+    let eocd = eocd.ok_or_else(|| "ZIP 文件缺少结束目录".to_string())?;
+
+    let disk = zip_u16(data, eocd + 4)?;
+    let central_disk = zip_u16(data, eocd + 6)?;
+    let disk_entries = zip_u16(data, eocd + 8)?;
+    let total_entries = zip_u16(data, eocd + 10)?;
+    let central_size = zip_u32(data, eocd + 12)?;
+    let central_offset = zip_u32(data, eocd + 16)?;
+    if total_entries == u16::MAX
+        || disk_entries == u16::MAX
+        || central_size == u32::MAX
+        || central_offset == u32::MAX
+    {
+        return Err("暂不支持 ZIP64 技能包".to_string());
+    }
+    if disk != 0 || central_disk != 0 || disk_entries != total_entries {
+        return Err("不支持分卷 ZIP 技能包".to_string());
+    }
+    if total_entries == 0 {
+        return Err("ZIP 文件为空".to_string());
+    }
+    if total_entries as usize > MAX_BUNDLE_FILES {
+        return Err(format!("技能包文件数超过 {} 个上限", MAX_BUNDLE_FILES));
+    }
+
+    let central_start = central_offset as usize;
+    let central_end = central_start
+        .checked_add(central_size as usize)
+        .ok_or_else(|| "ZIP 中央目录超出文件边界".to_string())?;
+    if central_end > eocd {
+        return Err("ZIP 中央目录超出文件边界".to_string());
+    }
+
+    let mut cursor = central_start;
+    let mut seen = BTreeMap::new();
+    let mut declared_bytes = 0u64;
+    for _ in 0..total_entries {
+        if zip_bytes(data, cursor, 4)? != b"PK\x01\x02" {
+            return Err("ZIP 中央目录条目标记错误".to_string());
+        }
+        zip_bytes(data, cursor, 46).map_err(|_| "ZIP 中央目录条目被截断".to_string())?;
+        let flags = zip_u16(data, cursor + 8)?;
+        if flags & 0x0041 != 0 {
+            return Err("暂不支持加密 ZIP 技能包".to_string());
+        }
+        let compressed_size = zip_u32(data, cursor + 20)?;
+        let uncompressed_size = zip_u32(data, cursor + 24)?;
+        let name_len = zip_u16(data, cursor + 28)? as usize;
+        let extra_len = zip_u16(data, cursor + 30)? as usize;
+        let comment_len = zip_u16(data, cursor + 32)? as usize;
+        let entry_disk = zip_u16(data, cursor + 34)?;
+        let external_attrs = zip_u32(data, cursor + 38)?;
+        let local_offset = zip_u32(data, cursor + 42)?;
+        if compressed_size == u32::MAX
+            || uncompressed_size == u32::MAX
+            || entry_disk == u16::MAX
+            || local_offset == u32::MAX
+        {
+            return Err("暂不支持 ZIP64 技能包".to_string());
+        }
+        if entry_disk != 0 {
+            return Err("不支持分卷 ZIP 技能包".to_string());
+        }
+
+        let name_start = cursor
+            .checked_add(46)
+            .ok_or_else(|| "ZIP 条目名超出文件边界".to_string())?;
+        let name_bytes = zip_bytes(data, name_start, name_len)?;
+        let name = std::str::from_utf8(name_bytes)
+            .map_err(|_| "技能包路径不是有效的 UTF-8".to_string())?;
+        validate_bundle_zip_path(name, &mut seen)?;
+
+        let unix_type = (external_attrs >> 16) & 0o170000;
+        if unix_type == 0o120000 {
+            return Err(format!("技能包含有不支持的符号链接: {}", name));
+        }
+        if unix_type != 0 && unix_type != 0o100000 && unix_type != 0o040000 {
+            return Err(format!("技能包含有不支持的文件类型: {}", name));
+        }
+
+        let local_start = local_offset as usize;
+        if local_start >= central_start || zip_bytes(data, local_start, 4)? != b"PK\x03\x04" {
+            return Err(format!("Skill ZIP 条目的本地文件头错误: {}", name));
+        }
+        let local_flags = zip_u16(data, local_start + 6)?;
+        if local_flags & 0x0041 != 0 {
+            return Err("暂不支持加密 ZIP 技能包".to_string());
+        }
+        let local_name_len = zip_u16(data, local_start + 26)? as usize;
+        let local_extra_len = zip_u16(data, local_start + 28)? as usize;
+        let local_name_start = local_start
+            .checked_add(30)
+            .ok_or_else(|| "ZIP 本地文件头超出边界".to_string())?;
+        if zip_bytes(data, local_name_start, local_name_len)? != name_bytes {
+            return Err(format!(
+                "ZIP 条目名在中央目录与本地文件头中不一致: {}",
+                name
+            ));
+        }
+        let data_start = local_name_start
+            .checked_add(local_name_len)
+            .and_then(|value| value.checked_add(local_extra_len))
+            .ok_or_else(|| "ZIP 数据偏移超出边界".to_string())?;
+        let data_end = data_start
+            .checked_add(compressed_size as usize)
+            .ok_or_else(|| "ZIP 数据长度超出边界".to_string())?;
+        if data_end > central_start {
+            return Err(format!("ZIP 条目数据超出边界: {}", name));
+        }
+
+        declared_bytes = declared_bytes
+            .checked_add(uncompressed_size as u64)
+            .ok_or_else(|| "技能包声明的解压体积超出限制".to_string())?;
+        if declared_bytes > MAX_BUNDLE_CONTENT_BYTES {
+            return Err(format!(
+                "技能包解压后约 {} MiB，超过 {} MiB 上限",
+                declared_bytes / 1024 / 1024,
+                MAX_BUNDLE_CONTENT_BYTES / 1024 / 1024
+            ));
+        }
+        cursor = name_start
+            .checked_add(name_len)
+            .and_then(|value| value.checked_add(extra_len))
+            .and_then(|value| value.checked_add(comment_len))
+            .ok_or_else(|| "ZIP 中央目录条目超出边界".to_string())?;
+    }
+    if cursor != central_end {
+        return Err("ZIP 中央目录含有未支持的内容".to_string());
+    }
+    Ok(())
+}
+
+fn validate_bundle_zip_path(name: &str, seen: &mut BTreeMap<String, ()>) -> Result<(), String> {
+    if name.starts_with('/') || name.starts_with('\\') || name.contains('\\') {
+        return Err(format!("技能包含有不安全路径: {}", name));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("技能包含有控制字符路径".to_string());
+    }
+    let path = name.trim_end_matches('/');
+    if path.is_empty() {
+        return Err("技能包含有空路径".to_string());
+    }
+    for component in path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(format!("技能包含有路径穿越: {}", name));
+        }
+    }
+    if seen.insert(path.to_string(), ()).is_some() {
+        return Err(format!("技能包含有重复路径: {}", name));
+    }
+    Ok(())
+}
+
+fn validate_extracted_bundle_tree(root: &Path) -> Result<(), SkillBundleImportError> {
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| SkillBundleImportError::invalid(format!("无法检查解压目录: {}", error)))?;
+    let mut total_bytes = 0u64;
+    let mut total_files = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir).map_err(|error| {
+            SkillBundleImportError::invalid(format!(
+                "无法读取解压目录 '{}': {}",
+                dir.display(),
+                error
+            ))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                SkillBundleImportError::invalid(format!(
+                    "无法读取解压目录 '{}': {}",
+                    dir.display(),
+                    error
+                ))
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                SkillBundleImportError::invalid(format!("无法读取 '{}': {}", path.display(), error))
+            })?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                return Err(SkillBundleImportError::invalid(format!(
+                    "技能包含有不支持的符号链接: {}",
+                    path.display()
+                )));
+            }
+            if file_type.is_dir() {
+                let canonical = fs::canonicalize(&path).map_err(|error| {
+                    SkillBundleImportError::invalid(format!(
+                        "无法检查 '{}': {}",
+                        path.display(),
+                        error
+                    ))
+                })?;
+                if !canonical.starts_with(&canonical_root) {
+                    return Err(SkillBundleImportError::invalid("技能包含有越界目录"));
+                }
+                stack.push(path);
+            } else if file_type.is_file() {
+                let canonical = fs::canonicalize(&path).map_err(|error| {
+                    SkillBundleImportError::invalid(format!(
+                        "无法检查 '{}': {}",
+                        path.display(),
+                        error
+                    ))
+                })?;
+                if !canonical.starts_with(&canonical_root) {
+                    return Err(SkillBundleImportError::invalid("技能包含有越界文件"));
+                }
+                total_bytes = total_bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| SkillBundleImportError::invalid("技能包体积超出限制"))?;
+                total_files += 1;
+            } else {
+                return Err(SkillBundleImportError::invalid(format!(
+                    "技能包含有不支持的文件类型: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if total_bytes > MAX_BUNDLE_CONTENT_BYTES {
+        return Err(SkillBundleImportError::invalid(format!(
+            "技能包解压后超过 {} MiB 上限",
+            MAX_BUNDLE_CONTENT_BYTES / 1024 / 1024
+        )));
+    }
+    if total_files > MAX_BUNDLE_FILES {
+        return Err(SkillBundleImportError::invalid(format!(
+            "技能包文件数超过 {} 个上限",
+            MAX_BUNDLE_FILES
+        )));
     }
     Ok(())
 }
@@ -1346,7 +2371,12 @@ struct SkillMetadata {
 fn parse_skill_metadata(path: &Path) -> SkillMetadata {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
-        Err(_) => return SkillMetadata { name: None, description: None },
+        Err(_) => {
+            return SkillMetadata {
+                name: None,
+                description: None,
+            };
+        }
     };
     let mut name = None;
     let mut description = None;
@@ -1410,15 +2440,25 @@ pub struct SkillListTool {
 }
 
 impl SkillListTool {
-    pub fn new(manager: SkillManager) -> Self { Self { manager } }
+    pub fn new(manager: SkillManager) -> Self {
+        Self { manager }
+    }
 }
 
 #[async_trait]
 impl McpTool for SkillListTool {
-    fn name(&self) -> &str { "skill_list" }
-    fn description(&self) -> &str { "列出本会话可用的本地 Skill：主技能（正文已随会话注入，必须执行）和备用技能（按需用 skill_search / skill_read 查阅）。用户在设备上关闭的 Skill 不会出现在这里。" }
-    fn input_schema(&self) -> Value { json!({ "type": "object", "properties": {} }) }
-    async fn call(&self, _params: Value) -> Result<Value, String> { Ok(self.manager.list_for_model()) }
+    fn name(&self) -> &str {
+        "skill_list"
+    }
+    fn description(&self) -> &str {
+        "列出本会话可用的本地 Skill：主技能（正文已随会话注入，必须执行）和备用技能（按需用 skill_search / skill_read 查阅）。用户在设备上关闭的 Skill 不会出现在这里。"
+    }
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    async fn call(&self, _params: Value) -> Result<Value, String> {
+        Ok(self.manager.list_for_model())
+    }
 }
 
 pub struct SkillSearchTool {
@@ -1426,13 +2466,19 @@ pub struct SkillSearchTool {
 }
 
 impl SkillSearchTool {
-    pub fn new(manager: SkillManager) -> Self { Self { manager } }
+    pub fn new(manager: SkillManager) -> Self {
+        Self { manager }
+    }
 }
 
 #[async_trait]
 impl McpTool for SkillSearchTool {
-    fn name(&self) -> &str { "skill_search" }
-    fn description(&self) -> &str { "按用户请求检索本地 Skill 的具体章节。主技能正文已在会话里，只有需要参考文件、或技能正文被截断的后半部分时才检索；备用技能在被明确需要时检索。返回结果按 Markdown 章节切分，包含 section（章节标题）、path（文件）与 line_start（起始行号），命中后用 skill_read 读取原文。" }
+    fn name(&self) -> &str {
+        "skill_search"
+    }
+    fn description(&self) -> &str {
+        "按用户请求检索本地 Skill 的具体章节。主技能正文已在会话里，只有需要参考文件、或技能正文被截断的后半部分时才检索；备用技能在被明确需要时检索。返回结果按 Markdown 章节切分，包含 section（章节标题）、path（文件）与 line_start（起始行号），命中后用 skill_read 读取原文。"
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -1445,9 +2491,15 @@ impl McpTool for SkillSearchTool {
         })
     }
     async fn call(&self, params: Value) -> Result<Value, String> {
-        let query = params.get("query").and_then(Value::as_str).unwrap_or_default();
+        let query = params
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let skill = params.get("skill").and_then(Value::as_str);
-        let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(MAX_SEARCH_RESULTS as u64);
+        let limit = params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(MAX_SEARCH_RESULTS as u64);
         self.manager.search(skill, query, limit as usize)
     }
 }
@@ -1457,13 +2509,19 @@ pub struct SkillReadTool {
 }
 
 impl SkillReadTool {
-    pub fn new(manager: SkillManager) -> Self { Self { manager } }
+    pub fn new(manager: SkillManager) -> Self {
+        Self { manager }
+    }
 }
 
 #[async_trait]
 impl McpTool for SkillReadTool {
-    fn name(&self) -> &str { "skill_read" }
-    fn description(&self) -> &str { "读取本地 Skill 的 SKILL.md 或检索结果指定的参考文件。只能读主技能与备用技能（用户在设备上关闭的 Skill 不可读）。支持用 start_line 从指定行开始续读，返回内容中会给出 total_lines / truncated / next_start_line，便于分次读完长文档。" }
+    fn name(&self) -> &str {
+        "skill_read"
+    }
+    fn description(&self) -> &str {
+        "读取本地 Skill 的 SKILL.md 或检索结果指定的参考文件。只能读主技能与备用技能（用户在设备上关闭的 Skill 不可读）。支持用 start_line 从指定行开始续读，返回内容中会给出 total_lines / truncated / next_start_line，便于分次读完长文档。"
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -1477,10 +2535,19 @@ impl McpTool for SkillReadTool {
         })
     }
     async fn call(&self, params: Value) -> Result<Value, String> {
-        let skill = params.get("skill").and_then(Value::as_str).ok_or("Missing skill name")?;
+        let skill = params
+            .get("skill")
+            .and_then(Value::as_str)
+            .ok_or("Missing skill name")?;
         let path = params.get("path").and_then(Value::as_str);
-        let start_line = params.get("start_line").and_then(Value::as_u64).map(|v| v as usize);
-        let max_chars = params.get("max_chars").and_then(Value::as_u64).map(|v| v as usize);
+        let start_line = params
+            .get("start_line")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize);
+        let max_chars = params
+            .get("max_chars")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize);
         self.manager.read(skill, path, start_line, max_chars)
     }
 }
@@ -1704,9 +2771,8 @@ impl McpTool for SkillValidateTool {
                 .trim()
                 .is_empty()
             {
-                problems.push(
-                    "缺少 description：模型只看得到名字，备用技能很难被检索到".to_string(),
-                );
+                problems
+                    .push("缺少 description：模型只看得到名字，备用技能很难被检索到".to_string());
             }
 
             if !problems.is_empty() {
@@ -1835,6 +2901,16 @@ fn skill_rules_header(primary_names: &str) -> String {
     )
 }
 
+/// 把“像真人聊天”的规则收窄到桌面陪伴场景。
+///
+/// 外部的群聊仿真提示词包含大量 QQ 发送、潜水、管理员权限等协议，不能直接
+/// 搬进本设备。这里只保留和语音陪伴有关的部分，并明确“闲聊可以不像客服，
+/// 明确任务仍要认真完成”，避免模型把反客服风格当成拒绝帮助的借口。
+fn companion_style_rules() -> &'static str {
+    "## 陪伴表达规则（在不违背主 Skill 人格与安全规则时执行）\n\
+     当前是语音优先的桌面陪伴场景，回复会直接播报或显示。这不是客服队列：先回应对方真正关心的事；闲聊默认一到三句自然口语，用户没要求细节时不列长清单、不写 Markdown、不复述问题、不总结对方刚说过的话，少用“非常推荐”“绝对好用”等推销词。可以有偏好、判断和不知道，不必机械附和；但明确任务仍要认真完成，不把装傻或反问当作逃避。拟人化不等于冒充真人：可以保持设定口吻，不虚构现实经历、感官或离线行为。主动开口只基于当前对话、用户已授权的主动关心或自然相关的轻量记忆；同一话题最多追问两次，没接住就放下。轻量记忆只记还值得捡回的具体上下文；话题结束、待办完成或用户说别记时及时删除，不把旧事硬塞进当前对话。工具调用是执行动作，不向用户复述工具名、参数或内部流程；只有真实返回才算完成，失败或未确认时如实说明。不要假装看过、在场或记得。"
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1842,17 +2918,53 @@ mod tests {
         let header = super::skill_rules_header("`HQQ`");
         // 主技能名字要出现，模型才知道它是谁
         assert!(header.contains("`HQQ`"));
-        for needle in ["身份优先", "QZdesk 的智能助手", "不假装调用工具", "不谎报状态"] {
+        for needle in [
+            "身份优先",
+            "QZdesk 的智能助手",
+            "不假装调用工具",
+            "不谎报状态",
+        ] {
             assert!(header.contains(needle), "规则里缺少「{}」", needle);
         }
         // 「已启用/已导入」必须要有工具结果支撑，这句话不能被改掉
         assert!(header.contains("skill_status"));
         assert!(header.contains("不得声称"));
-        for needle in ["每一轮、每一句", "语音回复", "主动问候", "工具执行后的说明",
-            "备用技能只补充", "不得覆盖主技能", "最新确认的主技能"] {
+        for needle in [
+            "每一轮、每一句",
+            "语音回复",
+            "主动问候",
+            "工具执行后的说明",
+            "备用技能只补充",
+            "不得覆盖主技能",
+            "最新确认的主技能",
+        ] {
             assert!(header.contains(needle), "人格覆盖规则缺少：{}", needle);
         }
     }
+
+    #[test]
+    fn companion_style_rules_fit_voice_first_and_keep_tasks_useful() {
+        let rules = super::companion_style_rules();
+        for needle in [
+            "语音优先",
+            "客服队列",
+            "明确任务仍要认真完成",
+            "不虚构现实经历",
+            "主动关心",
+            "轻量记忆",
+            "真实返回",
+        ] {
+            assert!(rules.contains(needle), "陪伴规则缺少：{}", needle);
+        }
+        for rejected in ["qq_", "mark_read", "ownerQQ", "群管理"] {
+            assert!(
+                !rules.contains(rejected),
+                "桌面陪伴规则不应包含群聊机器人协议：{}",
+                rejected
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1984,7 +3096,10 @@ mod tests {
     #[test]
     fn chinese_query_gets_bigrams_and_trigrams() {
         let terms = SkillManager::query_terms("查询天气预报");
-        assert!(terms.contains(&"查询天气预报".to_string()), "整句本身就是一个词");
+        assert!(
+            terms.contains(&"查询天气预报".to_string()),
+            "整句本身就是一个词"
+        );
         assert!(terms.contains(&"天气".to_string()), "二元组应保召回");
         assert!(terms.contains(&"天气预".to_string()), "三元组滑窗应保精度");
         // 去重后再没有重复项
@@ -2054,5 +3169,242 @@ mod tests {
         // 没有技能时版本也必须是确定值：调用两次应当一致（会话据此判断是否需要重建）
         let manager = SkillManager::new();
         assert_eq!(manager.version(), manager.version());
+    }
+
+    fn bundle_test_dir(label: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "qzdesk-{}-{}",
+            label,
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    fn write_bundle_test_skill(root: &Path, id: &str, content: &str) {
+        let dir = root.join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bundle_export_round_trips_files_and_roles() {
+        let source = bundle_test_dir("bundle-source");
+        let target = bundle_test_dir("bundle-target");
+        write_bundle_test_skill(&source, "alpha", "# Alpha\nprimary body\n");
+        write_bundle_test_skill(&source, "beta", "# Beta\nsecondary body\n");
+        write_bundle_test_skill(&source, "gamma", "# Gamma\nclosed body\n");
+        fs::create_dir_all(source.join("alpha/references/deep")).unwrap();
+        fs::write(
+            source.join("alpha/references/deep/guide.md"),
+            "keep this reference\n",
+        )
+        .unwrap();
+        fs::create_dir_all(source.join("alpha/__pycache__")).unwrap();
+        fs::write(source.join("alpha/__pycache__/ignored.pyc"), "cache").unwrap();
+        fs::create_dir_all(source.join("alpha/node_modules/pkg")).unwrap();
+        fs::write(source.join("alpha/node_modules/pkg/ignored.js"), "cache").unwrap();
+
+        let source_manager = SkillManager::for_test_dir(source.clone());
+        source_manager
+            .set_role("alpha", SkillRole::Primary)
+            .unwrap();
+        source_manager
+            .set_role("beta", SkillRole::Secondary)
+            .unwrap();
+        source_manager.set_role("gamma", SkillRole::None).unwrap();
+        let bundle = source_manager.export_bundle().unwrap();
+        assert_eq!(&bundle[..4], b"PK\x03\x04");
+
+        let archive = source.with_extension("zip");
+        fs::write(&archive, &bundle).unwrap();
+        let test_status = Command::new("unzip")
+            .arg("-t")
+            .arg(&archive)
+            .status()
+            .await
+            .unwrap();
+        assert!(test_status.success(), "导出包应通过 unzip -t");
+
+        let target_manager = SkillManager::for_test_dir(target.clone());
+        let result = target_manager.import_bundle(&bundle, false).await.unwrap();
+        assert_eq!(result["imported"], 3);
+        assert_eq!(result["replaced"], 0);
+        assert_eq!(result["primary"], 1);
+        assert_eq!(result["secondary"], 1);
+        assert_eq!(result["disabled"], 1);
+        assert_eq!(
+            fs::read_to_string(target.join("alpha/SKILL.md")).unwrap(),
+            "# Alpha\nprimary body\n"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("alpha/references/deep/guide.md")).unwrap(),
+            "keep this reference\n"
+        );
+        assert!(!target.join("alpha/__pycache__").exists());
+        assert!(!target.join("alpha/node_modules").exists());
+        let state = target_manager.load_state();
+        assert_eq!(
+            state.skills.get("alpha").map(|selection| selection.role),
+            Some(SkillRole::Primary)
+        );
+        assert_eq!(
+            state.skills.get("beta").map(|selection| selection.role),
+            Some(SkillRole::Secondary)
+        );
+        assert_eq!(
+            state.skills.get("gamma").map(|selection| selection.role),
+            Some(SkillRole::None)
+        );
+
+        let _ = fs::remove_dir_all(&source);
+        let _ = fs::remove_dir_all(&target);
+        let _ = fs::remove_file(&archive);
+    }
+
+    #[tokio::test]
+    async fn bundle_import_requires_confirmation_before_replacing() {
+        let source = bundle_test_dir("bundle-conflict-source");
+        let target = bundle_test_dir("bundle-conflict-target");
+        write_bundle_test_skill(&source, "alpha", "# Alpha\nnew body\n");
+        fs::create_dir_all(source.join("alpha/references")).unwrap();
+        fs::write(source.join("alpha/references/new.md"), "new reference\n").unwrap();
+        let source_manager = SkillManager::for_test_dir(source.clone());
+        source_manager
+            .set_role("alpha", SkillRole::Primary)
+            .unwrap();
+        let bundle = source_manager.export_bundle().unwrap();
+
+        write_bundle_test_skill(&target, "alpha", "# Alpha\nold body\n");
+        fs::write(target.join("alpha/obsolete.md"), "stale\n").unwrap();
+        let target_manager = SkillManager::for_test_dir(target.clone());
+        target_manager
+            .set_role("alpha", SkillRole::Secondary)
+            .unwrap();
+
+        let error = target_manager
+            .import_bundle(&bundle, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.conflicts, vec!["alpha"]);
+        assert_eq!(
+            fs::read_to_string(target.join("alpha/SKILL.md")).unwrap(),
+            "# Alpha\nold body\n"
+        );
+        assert_eq!(
+            target_manager.load_state().skills["alpha"].role,
+            SkillRole::Secondary
+        );
+
+        let result = target_manager.import_bundle(&bundle, true).await.unwrap();
+        assert_eq!(result["replaced"], 1);
+        assert_eq!(
+            fs::read_to_string(target.join("alpha/SKILL.md")).unwrap(),
+            "# Alpha\nnew body\n"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("alpha/references/new.md")).unwrap(),
+            "new reference\n"
+        );
+        assert!(!target.join("alpha/obsolete.md").exists());
+        assert_eq!(
+            target_manager.load_state().skills["alpha"].role,
+            SkillRole::Primary
+        );
+
+        let _ = fs::remove_dir_all(&source);
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    #[tokio::test]
+    async fn bundle_import_rejects_path_traversal_before_extracting() {
+        let target = bundle_test_dir("bundle-traversal");
+        let escape = env::temp_dir().join(format!(
+            "qzdesk-bundle-escape-{}.txt",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let escape_name = escape.file_name().and_then(|name| name.to_str()).unwrap();
+        let manifest = json!({
+            "format": BUNDLE_FORMAT,
+            "version": BUNDLE_VERSION,
+            "skills": [{
+                "id": "safe",
+                "role": "none"
+            }]
+        });
+        let mut archive = StoredZip::new();
+        archive
+            .add(BUNDLE_MANIFEST, &serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        archive
+            .add("skills/safe/SKILL.md", b"# Safe\nnot imported\n")
+            .unwrap();
+        // StoredZip refuses traversal paths before writing. Build a valid archive
+        // first, then rewrite every local/central-directory occurrence to model a
+        // hostile archive produced by a different ZIP writer.
+        let malicious_name = format!("../../{}", escape_name);
+        let placeholder = "x".repeat(malicious_name.len());
+        archive.add(&placeholder, b"escaped").unwrap();
+        let mut bundle = archive.finish().unwrap();
+        let mut cursor = 0;
+        let mut replacements = 0;
+        while let Some(offset) = bundle[cursor..]
+            .windows(placeholder.len())
+            .position(|window| window == placeholder.as_bytes())
+        {
+            let start = cursor + offset;
+            bundle[start..start + placeholder.len()].copy_from_slice(malicious_name.as_bytes());
+            cursor = start + placeholder.len();
+            replacements += 1;
+        }
+        assert_eq!(replacements, 2, "应同时改写本地与中央目录中的文件名");
+
+        let manager = SkillManager::for_test_dir(target.clone());
+        let error = manager.import_bundle(&bundle, false).await.unwrap_err();
+        assert!(error.message.contains("路径穿越"), "{}", error.message);
+        assert!(error.conflicts.is_empty());
+        assert!(!target.join("safe").exists());
+        assert!(!escape.exists(), "恶意条目不应写出安装目录");
+
+        let _ = fs::remove_dir_all(&target);
+        let _ = fs::remove_file(&escape);
+    }
+
+    #[test]
+    fn bundle_zip_rejects_unix_symlink_entries_before_extracting() {
+        let mut archive = StoredZip::new();
+        archive
+            .add(BUNDLE_MANIFEST, b"{\"format\":\"qzdesk.skills\"}")
+            .unwrap();
+        archive
+            .add("skills/safe/reference-link", b"/tmp/target")
+            .unwrap();
+        let mut bundle = archive.finish().unwrap();
+
+        let eocd = bundle
+            .windows(4)
+            .rposition(|window| window == b"PK\x05\x06")
+            .unwrap();
+        let central_offset =
+            u32::from_le_bytes(bundle[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let mut cursor = central_offset;
+        loop {
+            assert_eq!(&bundle[cursor..cursor + 4], b"PK\x01\x02");
+            let name_len =
+                u16::from_le_bytes(bundle[cursor + 28..cursor + 30].try_into().unwrap()) as usize;
+            let extra_len =
+                u16::from_le_bytes(bundle[cursor + 30..cursor + 32].try_into().unwrap()) as usize;
+            let comment_len =
+                u16::from_le_bytes(bundle[cursor + 32..cursor + 34].try_into().unwrap()) as usize;
+            let name_start = cursor + 46;
+            let name = &bundle[name_start..name_start + name_len];
+            if name == b"skills/safe/reference-link" {
+                let symlink_mode = (0o120777u32) << 16;
+                bundle[cursor + 38..cursor + 42].copy_from_slice(&symlink_mode.to_le_bytes());
+                break;
+            }
+            cursor = name_start + name_len + extra_len + comment_len;
+        }
+
+        let error = validate_bundle_zip(&bundle).unwrap_err();
+        assert!(error.contains("符号链接"), "{}", error);
     }
 }

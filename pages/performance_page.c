@@ -15,8 +15,12 @@
 #include <time.h>
 
 #define CARD_W (QZ_DESIGN_W - 2 * QZ_GUTTER) /* 452 */
-#define CONTENT_TOP 102
-#define CONTENT_H 208
+#define SUMMARY_Y 57
+#define SUMMARY_H 43
+#define TABS_Y 105
+#define TAB_H 29
+#define CONTENT_TOP 140
+#define CONTENT_H 172
 #define CORE_COLUMNS 4
 #define MAX_CORE_ROWS 4
 #define STATUS_LINES 4
@@ -237,11 +241,11 @@ static lv_obj_t *metric_bar(lv_obj_t *parent, int x, int y, int width, int heigh
     lv_obj_set_pos(bar, x, y);
     lv_bar_set_range(bar, 0, 1000);
     lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(bar, qz_color(QZ_FILL), LV_PART_MAIN);
+    qz_obj_set_bg_color(bar, QZ_FILL, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(bar, qz_color(QZ_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 1, LV_PART_INDICATOR);
+    qz_obj_set_bg_color(bar, QZ_ACCENT, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
@@ -265,43 +269,63 @@ static void bar_set(lv_obj_t *bar, int value_x10, qz_color_token_t color, bool a
 
 static void build_overview(lv_obj_t *content)
 {
-    lv_obj_t *plate = card(content, QZ_GUTTER, 0, CARD_W, 96);
-    int cell = (CARD_W - 2 * INSET) / 4;
-    for (int index = 0; index < 4; index++) {
-        int x = INSET + index * cell;
-        lv_obj_t *name = qz_text(plate, overview_title[index], 16, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_align(name, LV_ALIGN_TOP_LEFT, x, 6);
-        overview_value[index] = qz_text(plate, "--", 22, qz_color(QZ_TEXT));
-        lv_obj_align(overview_value[index], LV_ALIGN_TOP_LEFT, x, 30);
-        overview_note[index] = qz_text(plate, "", 16, qz_color(QZ_TEXT_SECONDARY));
-        lv_obj_align(overview_note[index], LV_ALIGN_TOP_LEFT, x, 61);
-        overview_bar[index] = metric_bar(plate, x, 86, cell - 12, 5);
-    }
-}
+    lv_obj_t *cpu_plate = card(content, QZ_GUTTER, 0, CARD_W, CONTENT_H);
+    caption(cpu_plate, "CPU / 实时负载");
+    cpu_value = qz_text(cpu_plate, "--", 45, qz_color(QZ_TEXT));
+    lv_obj_align(cpu_value, LV_ALIGN_TOP_LEFT, INSET, 37);
+    cpu_note = line(cpu_plate, INSET, 94, 122, QZ_TEXT_SECONDARY);
+    lv_obj_set_style_text_font(cpu_note, qz_font_size(10), 0);
+    lv_obj_set_height(cpu_note, 15);
+    lv_label_set_long_mode(cpu_note, LV_LABEL_LONG_DOT);
+    cpu_bar = metric_bar(cpu_plate, INSET, 125, 122, 4);
+    lv_obj_t *history_caption = qz_text(cpu_plate, "最近 60 秒", 11,
+                                        qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_align(history_caption, LV_ALIGN_TOP_LEFT, INSET, 140);
 
-static void build_cpu(lv_obj_t *content)
-{
-    lv_obj_t *plate = card(content, QZ_GUTTER, 104, CARD_W, 104);
-    caption(plate, "CPU / 负载");
-    cpu_value = qz_text(plate, "--", 22, qz_color(QZ_TEXT));
-    lv_obj_align(cpu_value, LV_ALIGN_TOP_LEFT, INSET, 28);
-    cpu_bar = metric_bar(plate, INSET, 58, 174, 5);
-    cpu_note = line(plate, INSET, 63, 186, QZ_TEXT_SECONDARY);
-
-    cpu_chart = lv_chart_create(plate);
-    lv_obj_set_size(cpu_chart, 232, 88);
-    lv_obj_align(cpu_chart, LV_ALIGN_TOP_RIGHT, -INSET, 8);
+    cpu_chart = lv_chart_create(cpu_plate);
+    lv_obj_set_size(cpu_chart, 286, CONTENT_H - 22);
+    lv_obj_align(cpu_chart, LV_ALIGN_TOP_RIGHT, -INSET, 10);
     lv_chart_set_type(cpu_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(cpu_chart, CHART_POINTS);
     lv_chart_set_range(cpu_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_chart_set_div_line_count(cpu_chart, 2, 0);
     lv_obj_set_style_bg_opa(cpu_chart, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(cpu_chart, 0, 0);
+    lv_obj_set_style_line_width(cpu_chart, 1, LV_PART_MAIN);
+    qz_obj_set_line_color(cpu_chart, QZ_SEPARATOR, LV_PART_MAIN);
+    lv_obj_set_style_line_opa(cpu_chart, LV_OPA_50, LV_PART_MAIN);
     lv_obj_set_style_line_width(cpu_chart, 2, LV_PART_ITEMS);
+    qz_obj_set_line_color(cpu_chart, QZ_ACCENT, LV_PART_ITEMS);
     lv_obj_set_style_size(cpu_chart, 0, 0, LV_PART_INDICATOR);
     lv_obj_clear_flag(cpu_chart, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(cpu_chart, LV_OBJ_FLAG_SCROLLABLE);
-    cpu_series = lv_chart_add_series(cpu_chart, qz_color(QZ_ACCENT), LV_CHART_AXIS_PRIMARY_Y);
+    cpu_series = lv_chart_add_series(cpu_chart, qz_color(QZ_ACCENT),
+                                     LV_CHART_AXIS_PRIMARY_Y);
+    qz_obj_set_chart_series_color(cpu_chart, cpu_series, QZ_ACCENT);
+}
+
+static void build_summary(lv_obj_t *parent)
+{
+    lv_obj_t *plate = card(parent, QZ_GUTTER, SUMMARY_Y, CARD_W, SUMMARY_H);
+    int cell = (CARD_W - 2 * INSET) / 4;
+    for (int index = 0; index < 4; index++) {
+        int x = INSET + index * cell;
+        lv_obj_t *name = qz_text(plate, overview_title[index], 11,
+                                 qz_color(QZ_TEXT_TERTIARY));
+        lv_obj_set_width(name, 42);
+        lv_obj_align(name, LV_ALIGN_TOP_LEFT, x, 3);
+        overview_note[index] = NULL;
+        overview_value[index] = qz_text(plate, "—", 16, qz_color(QZ_TEXT));
+        lv_obj_set_width(overview_value[index], cell - 46);
+        lv_obj_set_style_text_align(overview_value[index], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_long_mode(overview_value[index], LV_LABEL_LONG_DOT);
+        lv_obj_align(overview_value[index], LV_ALIGN_TOP_LEFT, x + 46, 3);
+        overview_bar[index] = metric_bar(plate, x, SUMMARY_H - 5, cell - 12, 2);
+        if (index > 0) {
+            lv_obj_t *rule = qz_separator(plate, SUMMARY_H - 12, true);
+            lv_obj_align(rule, LV_ALIGN_TOP_LEFT, x - 7, 6);
+        }
+    }
 }
 
 static void build_cores(lv_obj_t *content)
@@ -314,10 +338,10 @@ static void build_cores(lv_obj_t *content)
         int column = index % CORE_COLUMNS;
         int row = index / CORE_COLUMNS;
         int x = INSET + column * (cell_w + gap);
-        int y = 36 + row * 42;
-        core_label[index] = qz_text(plate, "", 16, qz_color(QZ_TEXT_SECONDARY));
+        int y = 35 + row * 32;
+        core_label[index] = qz_text(plate, "", 14, qz_color(QZ_TEXT_SECONDARY));
         lv_obj_align(core_label[index], LV_ALIGN_TOP_LEFT, x, y);
-        core_bar[index] = metric_bar(plate, x, y + 25, cell_w - 8, 5);
+        core_bar[index] = metric_bar(plate, x, y + 20, cell_w - 8, 3);
         lv_obj_add_flag(core_label[index], LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(core_bar[index], LV_OBJ_FLAG_HIDDEN);
     }
@@ -328,11 +352,11 @@ static void build_half(lv_obj_t *content, int x, int y, const char *title, lv_ob
 {
     lv_obj_t *plate = card(content, x, y, HALF_W, CONTENT_H);
     caption(plate, title);
-    *value = qz_text(plate, "--", 22, qz_color(QZ_TEXT));
-    lv_obj_align(*value, LV_ALIGN_TOP_LEFT, INSET, 44);
-    *detail = line(plate, INSET, 89, HALF_W - 2 * INSET, QZ_TEXT_SECONDARY);
-    lv_obj_set_style_text_line_space(*detail, 8, 0);
-    *bar = metric_bar(plate, INSET, 184, HALF_W - 2 * INSET, 8);
+    *value = qz_text(plate, "--", 25, qz_color(QZ_TEXT));
+    lv_obj_align(*value, LV_ALIGN_TOP_LEFT, INSET, 40);
+    *detail = line(plate, INSET, 84, HALF_W - 2 * INSET, QZ_TEXT_SECONDARY);
+    lv_obj_set_style_text_line_space(*detail, 7, 0);
+    *bar = metric_bar(plate, INSET, CONTENT_H - 18, HALF_W - 2 * INSET, 5);
 }
 
 static void build_status(lv_obj_t *content)
@@ -340,7 +364,7 @@ static void build_status(lv_obj_t *content)
     lv_obj_t *plate = card(content, QZ_GUTTER, 0, CARD_W, CONTENT_H);
     caption(plate, "设备状态");
     for (int index = 0; index < STATUS_LINES; index++) {
-        status_line[index] = line(plate, INSET, 38 + index * 42, CARD_W - 2 * INSET,
+        status_line[index] = line(plate, INSET, 35 + index * 32, CARD_W - 2 * INSET,
                                   QZ_TEXT_SECONDARY);
     }
 }
@@ -350,7 +374,7 @@ static void build_processes(lv_obj_t *content)
     lv_obj_t *plate = card(content, QZ_GUTTER, 0, CARD_W, CONTENT_H);
     caption(plate, "进程");
     for (int index = 0; index < PROCESS_LINES; index++) {
-        process_line[index] = line(plate, INSET, 38 + index * 42, CARD_W - 2 * INSET,
+        process_line[index] = line(plate, INSET, 35 + index * 32, CARD_W - 2 * INSET,
                                    QZ_TEXT_SECONDARY);
     }
 }
@@ -378,7 +402,7 @@ static void apply(const qzdesk_core_performance_t *data)
 {
     /* 中间结果各用容量明确的小缓冲，组合行才用大一点的 text：
      * 这样每个 snprintf 的容量上限都能被编译器算清楚，不会有截断告警。 */
-    char percent[12];
+    char percent[20];
     char used[16];
     char total[16];
     char swap[16];
@@ -396,15 +420,18 @@ static void apply(const qzdesk_core_performance_t *data)
 
     for (int index = 0; index < 4; index++) {
         if (!available[index]) {
-            lv_label_set_text(overview_value[index], "不可用");
-            lv_obj_set_style_text_color(overview_value[index], qz_color(QZ_TEXT_TERTIARY), 0);
-            lv_label_set_text(overview_note[index], "");
+            lv_label_set_text(overview_value[index], "—");
+            qz_obj_set_text_color(overview_value[index], QZ_TEXT_TERTIARY, 0);
         } else {
-            format_x10(percent, sizeof(percent), values[index], index == 3 ? "°" : "%");
+            const char *state = "";
+            qzdesk_level_t level = levels[index];
+            if (level == QZDESK_LEVEL_WARN) state = "高";
+            else if (level == QZDESK_LEVEL_CRITICAL) state = "危";
+            snprintf(percent, sizeof(percent), "%d%s%s",
+                     (values[index] + 5) / 10,
+                     index == 3 ? "°" : "%", state);
             lv_label_set_text(overview_value[index], percent);
-            lv_obj_set_style_text_color(overview_value[index],
-                                        qz_color(level_color(levels[index])), 0);
-            lv_label_set_text(overview_note[index], level_caption(levels[index]));
+            qz_obj_set_text_color(overview_value[index], level_color(level), 0);
         }
         bar_set(overview_bar[index], values[index], level_color(levels[index]), available[index]);
     }
@@ -412,25 +439,31 @@ static void apply(const qzdesk_core_performance_t *data)
     /* —— CPU：使用率 + 负载 + 曲线 —— */
     format_x10(percent, sizeof(percent), data->cpu_x10, "%");
     lv_label_set_text(cpu_value, percent);
-    lv_obj_set_style_text_color(cpu_value, qz_color(level_color(data->cpu_level)), 0);
+    qz_obj_set_text_color(cpu_value, level_color(data->cpu_level), 0);
     bar_set(cpu_bar, data->cpu_x10, level_color(data->cpu_level), true);
-    snprintf(text, sizeof(text), "%d.%02d / %d.%02d / %d.%02d",
+    snprintf(text, sizeof(text), "%d.%02d/%d.%02d/%d.%02d",
              data->load_x100[0] / 100, data->load_x100[0] % 100,
              data->load_x100[1] / 100, data->load_x100[1] % 100,
              data->load_x100[2] / 100, data->load_x100[2] % 100);
     lv_label_set_text(cpu_note, text);
 
     /* 曲线：第一次用核心给的历史填满，之后每次只追加最新一点 */
-    if (data->history_count > 0) {
-        if (!chart_seeded) {
-            chart_seeded = true;
+    if (!chart_seeded) {
+        chart_seeded = true;
+        if (data->history_count > 0) {
             for (int index = 0; index < data->history_count; index++) {
                 lv_chart_set_next_value(cpu_chart, cpu_series, data->history_x10[index] / 10);
             }
         } else {
-            lv_chart_set_next_value(cpu_chart, cpu_series,
-                                    data->history_x10[data->history_count - 1] / 10);
+            /* Before the history buffer has filled, keep a live baseline instead
+             * of leaving the focal graph blank. */
+            for (int index = 0; index < CHART_POINTS; index++) {
+                lv_chart_set_next_value(cpu_chart, cpu_series, data->cpu_x10 / 10);
+            }
         }
+    } else if (data->history_count > 0) {
+        lv_chart_set_next_value(cpu_chart, cpu_series,
+                                data->history_x10[data->history_count - 1] / 10);
     }
 
     /* —— 各核心：最多 16 核，四列四行 —— */
@@ -455,7 +488,7 @@ static void apply(const qzdesk_core_performance_t *data)
         format_x10(percent, sizeof(percent), data->memory_x10, "%");
         snprintf(text, sizeof(text), "内存 %s", percent);
         lv_label_set_text(memory_value, text);
-        lv_obj_set_style_text_color(memory_value, qz_color(level_color(data->memory_level)), 0);
+        qz_obj_set_text_color(memory_value, level_color(data->memory_level), 0);
         if (data->swap_total_kb > 0) {
             format_size(swap, sizeof(swap), data->swap_used_kb);
             snprintf(text, sizeof(text), "已用 %s / %s\nSwap %s", used, total, swap);
@@ -466,7 +499,7 @@ static void apply(const qzdesk_core_performance_t *data)
         bar_set(memory_bar, data->memory_x10, level_color(data->memory_level), true);
     } else {
         lv_label_set_text(memory_value, "内存 不可用");
-        lv_obj_set_style_text_color(memory_value, qz_color(QZ_TEXT_TERTIARY), 0);
+        qz_obj_set_text_color(memory_value, QZ_TEXT_TERTIARY, 0);
         lv_label_set_text(memory_detail, "");
         bar_set(memory_bar, 0, QZ_TEXT_TERTIARY, false);
     }
@@ -477,14 +510,14 @@ static void apply(const qzdesk_core_performance_t *data)
         format_x10(percent, sizeof(percent), data->storage_x10, "%");
         snprintf(text, sizeof(text), "磁盘 %s", percent);
         lv_label_set_text(storage_value, text);
-        lv_obj_set_style_text_color(storage_value, qz_color(level_color(data->storage_level)), 0);
+        qz_obj_set_text_color(storage_value, level_color(data->storage_level), 0);
         snprintf(text, sizeof(text), "已用 %s / %s\n%s", used, total,
                  level_caption(data->storage_level));
         lv_label_set_text(storage_detail, text);
         bar_set(storage_bar, data->storage_x10, level_color(data->storage_level), true);
     } else {
         lv_label_set_text(storage_value, "磁盘 不可用");
-        lv_obj_set_style_text_color(storage_value, qz_color(QZ_TEXT_TERTIARY), 0);
+        qz_obj_set_text_color(storage_value, QZ_TEXT_TERTIARY, 0);
         lv_label_set_text(storage_detail, "");
         bar_set(storage_bar, 0, QZ_TEXT_TERTIARY, false);
     }
@@ -591,29 +624,25 @@ lv_obj_t *qz_performance_create(lv_obj_t *apps_screen)
     lv_obj_add_event_cb(screen, on_screen_event, LV_EVENT_SCREEN_UNLOADED, NULL);
 
     /* 顶部：返回 + 标题 + 刷新状态与最近更新时间 */
-    lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 46);
-    lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
-    qz_style_toolbar(toolbar);
-
-    lv_obj_t *back = qz_back_button(toolbar);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_t *header = qz_page_header(screen, "性能监控");
+    lv_obj_t *back = qz_back_button(header);
+    lv_obj_align(back, LV_ALIGN_LEFT_MID, 4, 0);
     lv_obj_add_event_cb(back, back_to_apps, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *title = qz_text(toolbar, "性能监控", 18, qz_color(QZ_TEXT));
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
+    update_label = qz_text(header, "等待核心数据", 14, qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(update_label, 150);
+    lv_label_set_long_mode(update_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(update_label, LV_ALIGN_RIGHT_MID, -14, 0);
 
-    update_label = qz_text(toolbar, "等待核心数据", 16, qz_color(QZ_TEXT_SECONDARY));
-    lv_obj_align(update_label, LV_ALIGN_RIGHT_MID, -10, 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, -24, 0);
+    build_summary(screen);
 
     static const char *const names[SECTION_COUNT] = {"概览", "核心", "资源", "状态", "进程"};
     const int tab_gap = 6;
     const int tab_w = (CARD_W - (SECTION_COUNT - 1) * tab_gap) / SECTION_COUNT;
     for (unsigned index = 0; index < SECTION_COUNT; index++) {
-        section_buttons[index] = qz_card_button(screen, tab_w, 36);
+        section_buttons[index] = qz_card_button(screen, tab_w, TAB_H);
         lv_obj_align(section_buttons[index], LV_ALIGN_TOP_LEFT,
-                     QZ_GUTTER + index * (tab_w + tab_gap), 58);
+                     QZ_GUTTER + index * (tab_w + tab_gap), TABS_Y);
         qz_obj_set_bg_color(section_buttons[index], QZ_ACCENT_TINT, LV_STATE_CHECKED);
         lv_obj_t *label = qz_text(section_buttons[index], names[index], 17, qz_color(QZ_TEXT));
         lv_obj_center(label);
@@ -630,7 +659,6 @@ lv_obj_t *qz_performance_create(lv_obj_t *apps_screen)
     }
     lv_obj_add_state(section_buttons[0], LV_STATE_CHECKED);
     build_overview(sections[0]);
-    build_cpu(sections[0]);
     build_cores(sections[1]);
     build_half(sections[2], QZ_GUTTER, 0, "内存", &memory_value, &memory_detail, &memory_bar);
     build_half(sections[2], QZ_GUTTER + HALF_W + 10, 0, "存储", &storage_value,

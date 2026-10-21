@@ -33,19 +33,20 @@ bool qz_timezone_apply(const char *posix_tz);
 /* ------------------------------------------------------------------------- *
  * Appearance
  *
- * The dark-mode preference is a single line "QZDESK_DARK=1" written to a small
- * file under /etc (the device) or $HOME (the simulator, where /etc is usually
- * read-only). qz_style_init() reads QZDESK_DARK the same way it reads the
- * other env vars, so the file is only the persistence layer — the live state
- * always comes from the env var, set by qz_appearance_load() at startup and
- * by qz_appearance_save() when the user toggles the switch.
+ * The palette preference is "QZDESK_THEME=mineral|night|paper|ember" written
+ * to a small file under /etc (the device) or $HOME (the simulator, where /etc
+ * is usually read-only). Legacy "QZDESK_DARK=1" files and environment
+ * variables still work. qz_style_init() reads the env var, so the file is only
+ * the persistence layer.
  * ------------------------------------------------------------------------- */
 
-/** Read the persisted preference into the QZDESK_DARK env var. Called once
- *  before qz_style_init() so the first frame is already in the right theme. */
+/** Read the persisted preference into QZDESK_THEME (or legacy QZDESK_DARK).
+ *  Called before qz_style_init() so the first frame is already correct. */
 void qz_appearance_load(void);
-/** Persist the current preference (QZDESK_DARK env var) and return the new
- *  state, so the caller can hand it to qz_theme_set_dark(). */
+/** Persist a palette key. Returns false when the file cannot be written; the
+ *  live theme is still updated by the caller. */
+bool qz_appearance_save_theme(const char *theme_key);
+/** Legacy light/dark persistence, retained for external callers. */
 bool qz_appearance_save(bool dark);
 
 #endif

@@ -1,8 +1,9 @@
-//! 文字转语音：把 GUI / web 输入的文字变成云端接受的音频。
+//! 文字转语音：用于主动问候与存在检测的本地播报链路。
 //!
-//! 云端协议只接受**音频**作为用户输入，所以打字的聊天内容必须先变成声音。这里
-//! 用讯飞的在线语音合成 WebAPI（`wss://tts-api.xfyun.cn/v2/tts`），拿到
-//! 16k / 16bit / 单声道 PCM，再由 controller 按麦克风同样的 Opus 格式上行。
+//! GUI / web 的文字聊天始终以 `listen/detect/text` 直接发送；即使超时或云端
+//! 拒绝，也只报告错误，不会调用这里。主动问候使用讯飞的在线语音合成 WebAPI
+//! （`wss://tts-api.xfyun.cn/v2/tts`）拿到 16k / 16bit / 单声道 PCM，再由
+//! controller 按麦克风同样的 Opus 格式上行。
 //!
 //! 为什么是云端合成而不是本地引擎：设备是双核 A7，本地跑神经网络 TTS 既要背
 //! 上百 MB 的模型又要可观的 CPU；而这条链路本来就在联网工作，合成放在云端更合算。
@@ -13,9 +14,9 @@
 //!      signature=".."`；
 //!   3. 整串再 base64 作为 `authorization` 查询参数，和 `date`、`host` 一起挂到 URL 上。
 
-use anyhow::{anyhow, bail, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
+use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -142,7 +143,11 @@ fn http_date(time: SystemTime) -> String {
 /// 换成 (年, 月, 日)，负数天也能正确处理。
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let shifted = days + 719_468;
-    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
     let day_of_era = shifted - era * 146_097; // [0, 146096]
     let year_of_era =
         (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;

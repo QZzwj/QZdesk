@@ -8,13 +8,16 @@ pub mod tool;
 pub use config::ExternalToolConfig;
 pub use server::McpServer;
 
-use tool::DynamicTool;
 use skill::{
     SkillListTool, SkillManager, SkillReadTool, SkillReloadTool, SkillSearchTool, SkillStatusTool,
     SkillUseTool, SkillValidateTool,
 };
+use tool::DynamicTool;
 
-pub fn init_mcp_gateway(configs: Vec<ExternalToolConfig>, skill_manager: SkillManager) -> McpServer {
+pub fn init_mcp_gateway(
+    configs: Vec<ExternalToolConfig>,
+    skill_manager: SkillManager,
+) -> McpServer {
     let mut server = McpServer::new();
     server.set_instructions(skill_manager.instructions());
     server.set_skill_manager(skill_manager.clone());

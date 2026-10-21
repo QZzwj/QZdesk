@@ -41,6 +41,7 @@
 - **设备管理**：自动完成设备激活与绑定，持久化 Client ID / Device ID，并管理空闲、聆听、处理、说话和网络错误状态。
 - **GUI 解耦**：通过 UDP IPC 同步激活码、运行状态、Toast 和 TTS 字幕，GUI 也可向核心进程发送控制指令。
 - **MCP 扩展**：通过配置动态接入 Subprocess、HTTP、TCP 工具，支持同步和后台执行模式，无需修改核心代码。
+- **设备工具**：网页端提供一键体检、脱敏诊断包、本地场景引擎和局域网 Skill 包互传，全部在本机或局域网内完成。
 - **多架构构建**：提供 x86_64、ARMv7 GNU、ARMv7 uClibc 和 AArch64 GNU 构建脚本及 GitHub Actions 工作流。
 
 ---
@@ -175,32 +176,42 @@ aplay -l
 
 当前网络下发流支持 `opus` 和 `pcm`；`mp3` 配置项已预留，但尚未实现解码。
 
-### 文字转语音（GUI / web 的文字聊天）
+### 文字直发（GUI / web 的文字聊天）
 
-云端协议只接受**音频**作为用户输入，所以「打字聊天」不能把文本直接发上去。核心的做法是：
-先把文字在本地合成成语音，再按麦克风**完全一样的格式**发给云端——报文序列与按住说话一致
-（`listen start` → 裸 Opus 帧 → `listen stop`），服务器那一侧走的就是一次普通语音轮，
-不需要任何特殊分支。
+文字聊天默认把完整文本作为 `listen/detect/text` 直接发给云端，不经过本地 TTS。
+这个字段原本也用于唤醒词，部分服务端会把它当完整用户输入处理；当前云端是否接受
+长文本，以是否返回 `stt`、`llm` 或 `tts` 为准。文字聊天失败时不会改走本地 TTS。
 
 ```text
 GUI 输入框 ─┐
-            ├─→ chat_text / POST /api/chat/send ─→ 讯飞在线语音合成 ─→ 16k PCM ─→ Opus 20ms ─→ 云端
-web 控制台 ─┘
+            ├─→ chat_text / POST /api/chat/send ─→ listen/detect/text ─→ 云端
+web 控制台 ─┘                                      │
+                                                   └─ 超时或不支持
+                                                      → abort
+                                                      → 聊天与 Toast 明确报错
 ```
 
-- 合成引擎：讯飞在线语音合成 WebAPI（`wss://tts-api.xfyun.cn/v2/tts`，`aue=raw` → 16k/16bit 单声道 PCM）。
-  放在云端而不是设备本地，是因为双核 A7 上跑本地神经网络 TTS 既要背上百 MB 模型又要可观的 CPU。
-- 两个入口共用核心里的同一条路径（`CoreController::send_text_as_speech`），不存在两套实现：
+- 两个入口共用核心里的同一条路径（`CoreController::send_text_turn`），不存在两套实现：
   - GUI：`{"type":"chat_text","text":"…"}`（`qzdesk_core_send_text()` 发的就是这个）；
   - web 控制台：`POST /api/chat/send`，立刻回 `202` 并把文字转给核心。
-- 合成期间麦克风上行会被静音，避免把房间里的声音混进这一轮。
-- 账号密钥不必烧进二进制，运行时可用环境变量覆盖：
+- 默认等待 12 秒；完全没有云端响应时，先发送会话级 `abort`，再结束本轮并报告
+  真实错误。不会生成或上传本地语音，避免出现“看到文字但实际问了另一句”的情况。
+- 发送失败不会永久禁用后续消息。网络恢复或服务端重新接受文字后可以直接继续。
+- 文字直发期间麦克风上行会被静音；用户主动按下说话会立即结束这次等待。
+- 直发诊断控制：
+
+```bash
+QZDESK_DIRECT_TEXT=0                    # 关闭文字直发做诊断（不会改用 TTS）
+QZDESK_DIRECT_TEXT_TIMEOUT_SECS=12      # 等待云端起手的时间，范围 3-60 秒
+```
+
+- TTS 账号密钥不必烧进二进制，运行时可用环境变量覆盖：
 
 ```bash
 QZDESK_TTS_APP_ID=… QZDESK_TTS_API_KEY=… QZDESK_TTS_API_SECRET=… ./xiaozhi-linux-rs
 QZDESK_TTS_VOICE=x4_xiaoyan      # 发音人（vcn）
 QZDESK_TTS_SPEED=50              # 语速 0-100
-QZDESK_TTS_ENABLE=0              # 整体关掉（关掉后 GUI/web 打字聊天会提示不可用）
+QZDESK_TTS_ENABLE=0              # 关闭主动问候；文字直发仍可用
 QZDESK_TTS_DUMP=/tmp/tts.wav     # 把送出去的这段音频存一份，便于排查
 ```
 
@@ -257,6 +268,93 @@ cp SKILL.md /oem/usr/share/xiaozhi/skills/my_skill/SKILL.md
 网页管理端把安装的 Skill 先放入本地可调用池，再为每个 Skill 设置“启用/停用”和角色：最多一个主 Skill，主 Skill 的 `SKILL.md` 会在 MCP `initialize`（聊天会话开始前）加载；副 Skill 只提供名称和描述，模型需要时才调用 `skill_search` / `skill_read` 获取内容。选择状态持久化在 `/userdata/xiaozhi/skill_state.json`，修改选择后会自动重建 WebSocket 会话。
 
 Rust 核心同时提供一个轻量网页管理端，默认监听 `8080` 端口。浏览器访问设备 IP 的 `http://设备IP:8080/`，即可上传 ZIP、粘贴 `SKILL.md`、删除 Skill 和调整主/副角色。网页端不再提供 Git 地址和分支输入。管理端写入设备的 `/userdata/xiaozhi/skills`，开发机自动使用用户可写目录；可用 `QZDESK_SKILL_WEB_PORT`（兼容 `XIAOZHI_SKILL_WEB_PORT`）修改端口，用 `QZDESK_SKILL_DIR`（兼容 `XIAOZHI_SKILL_DIR`）修改 Skill 持久化目录。删除接口只允许删除用户目录中的 Skill，不会删除 OEM 固件内置内容。通过 `run.sh` 启动时，QZdesk 会先关闭占用 `8080` 的旧服务。
+
+Skill 列表上方的“跨设备技能包”用于离线迁移：导出全部用户自装 Skill、嵌套参考文件和 `primary` / `secondary` / `none` 角色，再在另一台设备导入。ZIP 根部是 `qzdesk-skills.json` 清单，技能内容位于 `skills/<id>/`；OEM 和源码目录中的预置 Skill 不会进入包内，隐藏文件、`__pycache__`、`node_modules`、`target` 等缓存也不会被导出。导入会先完整校验路径、体积和清单，同名 Skill 必须确认后才替换；未带 `X-QZdesk-Replace: 1` 的冲突请求不会改动现有文件。
+
+### 一键体检与脱敏诊断包
+
+网页“技能管理”右侧的“设备工具”中可以直接运行体检。检查项包括麦克风、扬声器、局域网、DNS、MQTT、天气、磁盘、Skill 和状态文件。体检结果只保存在当前核心进程内，服务重启后需重新运行。
+
+诊断包是 ZIP，包含：
+
+- `result.json`：检查项、耗时和汇总。
+- `logs.txt`：经过脱敏的近期日志。
+- `performance.json`：CPU、内存、磁盘和运行状态快照。
+- `errors.json`：失败检查项与性能错误摘要。
+- `README.txt`：诊断包内容边界说明。
+
+诊断包不会写入密钥、聊天、记忆正文、Skill 正文或原始配置。麦克风和扬声器检查只确认设备或配置是否存在，不采样、不播放，也不录制音频。
+
+| 接口 | 用途 |
+| :--- | :--- |
+| `GET /api/diagnostics/latest` | 读取当前进程最近一次体检结果 |
+| `POST /api/diagnostics/run` | 立即运行体检并返回结果 |
+| `GET /api/diagnostics/export` | 下载最近一次体检的脱敏 ZIP |
+
+### 本地场景引擎
+
+“设备工具”的“场景”页签支持新建、编辑、启停、删除、试运行和定时触发。场景保存在 QZdesk 用户数据目录的 `scenes.json`，最多 32 个场景，每个场景最多 12 个动作和 8 个触发器。
+
+可用动作包括灯光开关/调亮度、系统音量、屏幕背光、延时提醒和切换 Skill 角色。触发器包括手动执行、每天定时和 MQTT 设备状态变化。试运行会逐项验证设备和 Skill，但不会实际发布灯光指令、写背光或设置音量。正式执行时每个动作独立运行，单个动作失败不会阻断后续动作，网页会列出每一项的成功或失败原因。
+
+```json
+{
+  "name": "回家模式",
+  "enabled": true,
+  "actions": [
+    { "type": "light", "deviceId": "客厅灯", "action": "on" },
+    { "type": "volume", "percent": 35 },
+    { "type": "skill_role", "skill": "home-assistant", "role": "primary" }
+  ],
+  "triggers": [
+    { "type": "time", "hour": 19, "minute": 30, "weekdays": [1, 2, 3, 4, 5] },
+    { "type": "mqtt", "deviceId": "门磁", "state": true }
+  ]
+}
+```
+
+`weekdays` 使用 `1` 到 `7` 表示周一至周日，空数组表示每天。MQTT 触发器至少需要 `state` 或 `brightness` 条件，亮度范围是 `0..100`。
+
+| 接口 | 用途 |
+| :--- | :--- |
+| `GET /api/scenes` | 列出场景和执行限制 |
+| `POST /api/scenes` | 新建场景 |
+| `PUT /api/scenes/{id}` | 更新场景 |
+| `DELETE /api/scenes/{id}` | 删除场景 |
+| `POST /api/scenes/{id}/run` | 执行场景；请求体 `{"dryRun":true}` 表示试运行 |
+
+核心另外注册了只读 MCP 工具 `scene_list` 和执行工具 `scene_run`，语音侧可以用同一套场景配置。
+
+场景动作依赖以下可选环境变量：
+
+| 变量 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `QZDESK_BACKLIGHT` | `/sys/class/backlight/backlight/brightness` | 背光 `brightness` 文件的绝对路径，同目录需有 `max_brightness` |
+| `QZDESK_MIXER_CARD` | `0` | 传给 `amixer -c` 的声卡编号 |
+| `QZDESK_MIXER_CONTROL` | `DAC LINEOUT Volume` | `amixer cset name=...` 使用的控件名 |
+| `QZDESK_MIXER_MAX` | `30` | 控件原始最大值，用于把百分比换算成 raw 数值 |
+
+### 局域网 Skill 互传
+
+“设备工具”的“互传”页签用于两台 QZdesk 在同一局域网内直接传输 Skill 包，不经过云端。接收端生成六位配对码，120 秒内有效且只能使用一次；配对令牌有效 10 分钟并绑定来源 IP。发现使用 UDP，默认端口 `18766`，传输按 256 KiB 分块，支持断点续传，导入前校验 SHA-256，单个包上限 64 MiB。
+
+传输目标只接受回环地址、IPv4 私网地址和 IPv6 ULA/回环地址。同名 Skill 会先返回冲突列表，不会自动覆盖；用户确认后以 `replaceExisting: true` 重试。
+
+当前互传范围仅是 Skill 包，不是完整设置或整机备份，配对方式是六位码而不是二维码。
+
+| 接口 | 用途 |
+| :--- | :--- |
+| `GET /api/device-sync/status` | 读取本机身份、端口和已配对设备 |
+| `POST /api/device-sync/discover` | 扫描同一局域网，等待约 1.8 秒 |
+| `POST /api/device-sync/code` | 生成六位配对码 |
+| `POST /api/device-sync/pair` | 用 `{"address":"192.168.1.20:8080","code":"123456"}` 配对 |
+| `POST /api/device-sync/send` | 发送 Skill 包，可在请求体加 `"replaceExisting":true` |
+
+| 变量 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `QZDESK_SKILL_WEB_PORT` | `8080` | 网页管理端与互传 HTTP 端口，兼容 `XIAOZHI_SKILL_WEB_PORT` |
+| `QZDESK_SYNC_PORT` | `18766` | UDP 发现端口，两台设备应使用相同端口 |
+| `QZDESK_SYNC_PROBE_ADDR` | 空 | 额外发现目标，逗号分隔的 `IP:port`，例如 `192.168.1.20:18766` |
 
 ---
 

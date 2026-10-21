@@ -4,14 +4,15 @@
 //! contention with async network tasks.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc as std_mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use anyhow::Result;
 
-use super::record::record_thread;
 use super::play::play_thread;
+use super::record::record_thread;
 use crate::audio_bridge::PlaybackData;
 
 /// Audio system configuration.
@@ -70,9 +71,12 @@ impl Default for AudioConfig {
 /// - Recording thread: ALSA capture → Speex preprocess → Opus encode → `opus_tx`
 /// - Playback thread: `opus_rx` → Opus decode → ALSA playback
 pub struct AudioSystem {
-    running: Arc<AtomicBool>,
+    record_running: Arc<AtomicBool>,
+    play_running: Arc<AtomicBool>,
     record_handle: Option<JoinHandle<()>>,
     play_handle: Option<JoinHandle<()>>,
+    capture_error: Option<String>,
+    persistent_silence: Arc<AtomicBool>,
 }
 
 impl AudioSystem {
@@ -87,19 +91,22 @@ impl AudioSystem {
         opus_rx: mpsc::Receiver<PlaybackData>,
         playback_generation: Arc<AtomicU64>,
     ) -> Result<Self> {
-        let running = Arc::new(AtomicBool::new(true));
+        let record_running = Arc::new(AtomicBool::new(true));
+        let play_running = Arc::new(AtomicBool::new(true));
 
-        if std::env::var("QZDESK_AUDIO_DISABLED")
-            .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false)
-        {
-            log::warn!("Audio disabled by QZDESK_AUDIO_DISABLED; continuing without ALSA capture/playback");
+        if crate::audio::audio_disabled() {
+            log::warn!(
+                "Audio disabled by QZDESK_AUDIO_DISABLED; continuing without ALSA capture/playback"
+            );
             drop(opus_tx);
             drop(opus_rx);
             return Ok(Self {
-                running,
+                record_running: Arc::new(AtomicBool::new(false)),
+                play_running: Arc::new(AtomicBool::new(false)),
                 record_handle: None,
                 play_handle: None,
+                capture_error: Some("audio disabled by QZDESK_AUDIO_DISABLED".to_string()),
+                persistent_silence: Arc::new(AtomicBool::new(false)),
             });
         }
 
@@ -113,20 +120,52 @@ impl AudioSystem {
             config.opus_channels,
         );
 
+        let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
+        let persistent_silence = Arc::new(AtomicBool::new(false));
+        let record_silence = persistent_silence.clone();
         let record_handle = {
-            let running = running.clone();
+            let running = record_running.clone();
             let config = config.clone();
             thread::Builder::new()
                 .name("audio-record".into())
                 .spawn(move || {
-                    if let Err(e) = record_thread(&config, opus_tx, &running) {
+                    if let Err(e) =
+                        record_thread(&config, opus_tx, &running, &record_silence, ready_tx)
+                    {
                         log::error!("Recording thread error: {}", e);
                     }
                 })?
         };
 
+        // Do not report a working microphone until ALSA, the preprocessors and
+        // the Opus encoder are all initialized.  The old implementation returned
+        // success immediately, so a failed capture looked like a healthy listen.
+        let (capture_error, record_handle) = match ready_rx.recv_timeout(Duration::from_secs(8)) {
+            Ok(Ok(())) => (None, Some(record_handle)),
+            Ok(Err(error)) => {
+                record_running.store(false, Ordering::SeqCst);
+                let _ = record_handle.join();
+                (Some(error), None)
+            }
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                record_running.store(false, Ordering::SeqCst);
+                let _ = record_handle.join();
+                (
+                    Some("capture thread exited before initialization completed".to_string()),
+                    None,
+                )
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                record_running.store(false, Ordering::SeqCst);
+                (
+                    Some("timed out while waiting for ALSA capture initialization".to_string()),
+                    None,
+                )
+            }
+        };
+
         let play_handle = {
-            let running = running.clone();
+            let running = play_running.clone();
             let config = config.clone();
             thread::Builder::new()
                 .name("audio-play".into())
@@ -140,15 +179,30 @@ impl AudioSystem {
         };
 
         Ok(Self {
-            running,
-            record_handle: Some(record_handle),
+            record_running,
+            play_running,
+            record_handle,
             play_handle: Some(play_handle),
+            capture_error,
+            persistent_silence,
         })
+    }
+
+    /// Error encountered while preparing microphone capture, if any.
+    pub fn capture_error(&self) -> Option<&str> {
+        self.capture_error.as_deref()
+    }
+
+    /// True when capture has produced only zero samples long enough to indicate
+    /// a hardware or mixer fault rather than ordinary room silence.
+    pub fn persistent_silence(&self) -> bool {
+        self.persistent_silence.load(Ordering::Relaxed)
     }
 
     /// Signal threads to stop and wait for them to finish.
     pub fn stop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
+        self.record_running.store(false, Ordering::SeqCst);
+        self.play_running.store(false, Ordering::SeqCst);
         if let Some(h) = self.record_handle.take() {
             let _ = h.join();
         }

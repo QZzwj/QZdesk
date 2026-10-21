@@ -1,6 +1,6 @@
 use crate::gui_bridge::GuiBridge;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
@@ -104,6 +104,14 @@ pub struct WeatherSnapshot {
     pub low: Option<f64>,
     /// 今日降水概率上限（%）。
     pub precipitation: Option<i64>,
+    /// 未来两小时内第一场雨还有多少分钟：0 = 正在下，None = 这两小时里没有。
+    ///
+    /// 15 分钟一格地扫 `minutely_15`；某格降水量大于 0，或（从第二格起）
+    /// 概率到 50%，就算"有雨"。首页那张小卡片拿它和概率一起说一句
+    /// "12 分钟后有雨"。
+    pub near_precipitation_minutes: Option<i64>,
+    /// 上面那格的降水概率（%）；接口没给就是 None。
+    pub near_precipitation_probability: Option<i64>,
     /// 今日紫外线指数上限（uv_index_max）。
     pub uv: Option<f64>,
     /// 今日日出（HH:MM）。
@@ -136,6 +144,8 @@ impl Default for WeatherSnapshot {
             high: None,
             low: None,
             precipitation: None,
+            near_precipitation_minutes: None,
+            near_precipitation_probability: None,
             uv: None,
             sunrise: String::new(),
             sunset: String::new(),
@@ -513,9 +523,8 @@ async fn fetch(
     let builder = match proxy_choice(config.proxy.as_deref()) {
         ProxyChoice::Direct => builder.no_proxy(),
         ProxyChoice::Environment => builder,
-        ProxyChoice::Url(url) => builder.proxy(
-            reqwest::Proxy::all(&url).map_err(|error| format!("代理配置无效: {}", error))?,
-        ),
+        ProxyChoice::Url(url) => builder
+            .proxy(reqwest::Proxy::all(&url).map_err(|error| format!("代理配置无效: {}", error))?),
     };
     let client = builder
         .build()
@@ -536,8 +545,15 @@ async fn fetch(
                 "temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max,sunrise,sunset"
                     .to_string(),
             ),
+            /* 未来两小时按 15 分钟粒度取降水和概率：首页卡片要先回答
+             * "要不要带伞"，只看"今日概率上限"回答不了这个问题。 */
+            (
+                "minutely_15",
+                "precipitation,precipitation_probability".to_string(),
+            ),
             ("timezone", "auto".to_string()),
             ("forecast_days", "1".to_string()),
+            ("forecast_minutely_15", "8".to_string()),
             ("wind_speed_unit", "ms".to_string()),
         ])
         .send()
@@ -567,6 +583,7 @@ fn snapshot_from_value(value: &Value, city: &str) -> Result<WeatherSnapshot, Str
         .and_then(Value::as_str)
         .unwrap_or("");
     let (updated, updated_full) = clock(observed);
+    let (near_minutes, near_probability) = near_precipitation(value);
 
     Ok(WeatherSnapshot {
         status: "ok".to_string(),
@@ -583,6 +600,8 @@ fn snapshot_from_value(value: &Value, city: &str) -> Result<WeatherSnapshot, Str
         low: number(value, "/daily/temperature_2m_min/0"),
         precipitation: number(value, "/daily/precipitation_probability_max/0")
             .map(|value| value.round() as i64),
+        near_precipitation_minutes: near_minutes,
+        near_precipitation_probability: near_probability,
         uv: number(value, "/daily/uv_index_max/0"),
         sunrise: daily_time(value, "/daily/sunrise/0"),
         sunset: daily_time(value, "/daily/sunset/0"),
@@ -595,6 +614,30 @@ fn snapshot_from_value(value: &Value, city: &str) -> Result<WeatherSnapshot, Str
 
 fn number(value: &Value, pointer: &str) -> Option<f64> {
     value.pointer(pointer).and_then(Value::as_f64)
+}
+
+/// 未来两小时里第一场要下的雨：`(还有多少分钟, 那一格的降水概率)`。
+///
+/// 0 表示现在正在下（只有真的测到降水量才算，光有概率不算"正在下"）。
+/// 从第二格起概率到 50% 也认——"15 分钟后可能下雨"对带不带伞同样有用。
+/// 两小时里都看不出雨就返回 `(None, None)`，界面照常显示天气描述。
+fn near_precipitation(value: &Value) -> (Option<i64>, Option<i64>) {
+    const BUCKETS: i64 = 8; /* 15 分钟一格，8 格 = 2 小时 */
+    const PROBABILITY_THRESHOLD: i64 = 50;
+    for index in 0..BUCKETS {
+        let amount = number(value, &format!("/minutely_15/precipitation/{}", index)).unwrap_or(0.0);
+        let probability = number(
+            value,
+            &format!("/minutely_15/precipitation_probability/{}", index),
+        )
+        .map(|value| value.round() as i64);
+        let soon =
+            amount > 0.0 || (index > 0 && probability.is_some_and(|p| p >= PROBABILITY_THRESHOLD));
+        if soon {
+            return (Some(index * 15), probability);
+        }
+    }
+    (None, None)
 }
 
 /// weather_code → (中文描述, 图标键)。映射表按需求给定，未列出的码算未知天气。
@@ -819,8 +862,57 @@ mod tests {
         assert_eq!(snapshot.low, Some(17.2));
         assert_eq!(snapshot.updated, "16:30");
         assert_eq!(snapshot.updated_full, "2026-10-05 16:30");
+        /* 没给 minutely_15 时不许瞎猜"正在下雨" */
+        assert_eq!(snapshot.near_precipitation_minutes, None);
         assert!(snapshot.has_data());
         assert!(snapshot.is_ok());
+    }
+
+    #[test]
+    fn imminent_rain_is_reported_as_minutes_until_it_starts() {
+        let wrap = |minutely: &str| -> Value {
+            serde_json::from_str(&format!(
+                r#"{{"current": {{"temperature_2m": 20}},
+                    "minutely_15": {}}}"#,
+                minutely
+            ))
+            .expect("合法 JSON")
+        };
+
+        /* 正在下：第一格就有降水量，概率跟着走。 */
+        let raining =
+            wrap(r#"{"precipitation": [0.4, 0.5], "precipitation_probability": [88, 90]}"#);
+        let snapshot = snapshot_from_value(&raining, "北京").expect("字段齐全");
+        assert_eq!(snapshot.near_precipitation_minutes, Some(0));
+        assert_eq!(snapshot.near_precipitation_probability, Some(88));
+
+        /* 45 分钟后：前 3 格是干的。 */
+        let later = wrap(
+            r#"{"precipitation": [0, 0, 0, 0.2], "precipitation_probability": [10, 20, 30, 70]}"#,
+        );
+        let snapshot = snapshot_from_value(&later, "北京").expect("字段齐全");
+        assert_eq!(snapshot.near_precipitation_minutes, Some(45));
+        assert_eq!(snapshot.near_precipitation_probability, Some(70));
+
+        /* 概率到 50% 也算"要下"：30 分钟后那一格 60%。 */
+        let likely = wrap(
+            r#"{"precipitation": [0, 0, 0, 0, 0, 0, 0, 0],
+                "precipitation_probability": [30, 40, 60, 60, 60, 60, 60, 60]}"#,
+        );
+        let snapshot = snapshot_from_value(&likely, "北京").expect("字段齐全");
+        assert_eq!(snapshot.near_precipitation_minutes, Some(30));
+        assert_eq!(snapshot.near_precipitation_probability, Some(60));
+
+        /* 第一格光有概率不算"正在下"，接着往后看。 */
+        let dry = wrap(r#"{"precipitation": [0, 0], "precipitation_probability": [90, 20]}"#);
+        let snapshot = snapshot_from_value(&dry, "北京").expect("字段齐全");
+        assert_eq!(snapshot.near_precipitation_minutes, None);
+
+        /* 两小时里都没雨：留给界面一个"没有"的信号。 */
+        let none = wrap(r#"{"precipitation": [], "precipitation_probability": []}"#);
+        let snapshot = snapshot_from_value(&none, "北京").expect("字段齐全");
+        assert_eq!(snapshot.near_precipitation_minutes, None);
+        assert_eq!(snapshot.near_precipitation_probability, None);
     }
 
     #[test]
@@ -842,7 +934,10 @@ mod tests {
         assert!(matches!(proxy_choice(None), ProxyChoice::Direct));
         assert!(matches!(proxy_choice(Some("   ")), ProxyChoice::Direct));
         assert!(matches!(proxy_choice(Some("off")), ProxyChoice::Direct));
-        assert!(matches!(proxy_choice(Some("env")), ProxyChoice::Environment));
+        assert!(matches!(
+            proxy_choice(Some("env")),
+            ProxyChoice::Environment
+        ));
         match proxy_choice(Some("http://127.0.0.1:10808")) {
             ProxyChoice::Url(url) => assert_eq!(url, "http://127.0.0.1:10808"),
             _ => panic!("应识别为代理地址"),
@@ -912,7 +1007,9 @@ mod tests {
         // 网卡 down（比如 WiFi 断了但路由表没清）时不算联网
         assert!(!route_table_is_online(table, |_| Some("down".to_string())));
         // 虚拟网卡报 unknown 时按可用处理，免得误判成离线
-        assert!(route_table_is_online(table, |_| Some("unknown".to_string())));
+        assert!(route_table_is_online(table, |_| Some(
+            "unknown".to_string()
+        )));
     }
 
     #[test]

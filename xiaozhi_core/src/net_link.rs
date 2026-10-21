@@ -1,14 +1,14 @@
 use crate::config::Config;
+use crate::mcp_gateway::McpServer;
 use futures_util::{SinkExt, StreamExt};
 use mac_address::get_mac_address;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
 use uuid::Uuid;
-use std::sync::Arc;
-use crate::mcp_gateway::McpServer;
 
 #[derive(Debug)]
 pub enum NetEvent {
@@ -24,7 +24,10 @@ pub enum NetEvent {
 pub enum NetCommand {
     SendText(String),
     SendBinary(Vec<u8>),
-    AbortTurn(Option<String>, tokio::sync::oneshot::Sender<Result<(), String>>),
+    AbortTurn(
+        Option<String>,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
     /// Recreate the session so a changed Skill selection is sent during MCP
     /// initialize on the next connection.
     Reconnect,
@@ -44,7 +47,11 @@ fn abort_message(session_id: Option<&str>) -> Value {
 // 音频参数结构体
 fn confirms_primary_skill(request: &Value, response: &Value) -> bool {
     if request.get("method").and_then(Value::as_str) != Some("tools/call")
-        || request.get("params").and_then(|p| p.get("name")).and_then(Value::as_str) != Some("skill_list")
+        || request
+            .get("params")
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str)
+            != Some("skill_list")
         || response.get("error").is_some()
     {
         return false;
@@ -53,10 +60,19 @@ fn confirms_primary_skill(request: &Value, response: &Value) -> bool {
         .get("result")
         .and_then(|result| result.get("content"))
         .and_then(Value::as_array)
-        .and_then(|items| items.iter().find_map(|item| item.get("text").and_then(Value::as_str)))
-    else { return false; };
-    let Ok(value) = serde_json::from_str::<Value>(text) else { return false; };
-    value.get("primary_instructions")
+        .and_then(|items| {
+            items
+                .iter()
+                .find_map(|item| item.get("text").and_then(Value::as_str))
+        })
+    else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    value
+        .get("primary_instructions")
         .and_then(Value::as_str)
         .map(|instructions| !instructions.trim().is_empty())
         .unwrap_or(false)
@@ -104,7 +120,13 @@ impl NetLink {
         rx_cmd: mpsc::Receiver<NetCommand>,
         mcp_server: Arc<McpServer>,
     ) -> Self {
-        Self { config, tx, rx_cmd, mcp_server, ready_waiters: Vec::new() }
+        Self {
+            config,
+            tx,
+            rx_cmd,
+            mcp_server,
+            ready_waiters: Vec::new(),
+        }
     }
 
     // 如果发生错误断开连接，5秒后重连
@@ -200,11 +222,14 @@ impl NetLink {
 
         let mut hello_seen = false;
         let mut ready_sent = false;
-        let mut skill_fetched = !self.config.mcp.enabled || self.mcp_server.has_instructions() || self.mcp_server.skills_ready();
+        let mut skill_fetched = !self.config.mcp.enabled
+            || self.mcp_server.has_instructions()
+            || self.mcp_server.skills_ready();
         let mut turn_waiting = false;
         let mut turn_failed = false;
         let mut output_suppressed = false;
-        let mut mcp_tasks: tokio::task::JoinSet<(Value, Option<String>, String, bool)> = tokio::task::JoinSet::new();
+        let mut mcp_tasks: tokio::task::JoinSet<(Value, Option<String>, String, bool)> =
+            tokio::task::JoinSet::new();
         let mut skill_deadline = tokio::time::Instant::now();
         let mut ready_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
         let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(20));
@@ -395,7 +420,7 @@ mod tests {
     use super::*;
     use crate::mcp_gateway::tool::McpTool;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     struct SlowTool {
         started: Arc<tokio::sync::Notify>,
@@ -403,13 +428,21 @@ mod tests {
     }
     struct CancelGuard(Arc<AtomicBool>);
     impl Drop for CancelGuard {
-        fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
     }
     #[async_trait::async_trait]
     impl McpTool for SlowTool {
-        fn name(&self) -> &str { "slow" }
-        fn description(&self) -> &str { "slow test tool" }
-        fn input_schema(&self) -> Value { json!({"type":"object"}) }
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn description(&self) -> &str {
+            "slow test tool"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
         async fn call(&self, _: Value) -> Result<Value, String> {
             let _guard = CancelGuard(self.cancelled.clone());
             self.started.notify_one();
@@ -421,7 +454,7 @@ mod tests {
     fn abort_protocol_has_reason_and_optional_session() {
         assert_eq!(abort_message(None), json!({"type":"abort","reason":"user"}));
         assert_eq!(abort_message(Some("session"))["session_id"], "session");
-        assert!(abort_message(Some("" )).get("session_id").is_none());
+        assert!(abort_message(Some("")).get("session_id").is_none());
     }
 
     #[tokio::test]
@@ -430,7 +463,10 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut server = McpServer::new();
-        server.register_tool(Box::new(SlowTool { started: started.clone(), cancelled: cancelled.clone() }));
+        server.register_tool(Box::new(SlowTool {
+            started: started.clone(),
+            cancelled: cancelled.clone(),
+        }));
         let mut config = Config::default();
         config.ws_url = format!("ws://{}", listener.local_addr().unwrap()).into();
         config.device_id = "test".into();
@@ -441,42 +477,89 @@ mod tests {
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
         while !matches!(socket.next().await.unwrap().unwrap(), Message::Text(_)) {}
-        socket.send(Message::Text(json!({"type":"hello","session_id":"kept"}).to_string().into())).await.unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"hello","session_id":"kept"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
         socket.send(Message::Text(json!({"type":"mcp","session_id":"kept","payload":{
             "jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}
         }}).to_string().into())).await.unwrap();
-        timeout(Duration::from_secs(1), started.notified()).await.unwrap();
+        timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
         let (reply, result) = tokio::sync::oneshot::channel();
-        commands.send(NetCommand::AbortTurn(Some("kept".into()), reply)).await.unwrap();
-        timeout(Duration::from_secs(1), result).await.unwrap().unwrap().unwrap();
+        commands
+            .send(NetCommand::AbortTurn(Some("kept".into()), reply))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), result)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let abort = timeout(Duration::from_secs(1), async {
             loop {
                 if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
                     break serde_json::from_str::<Value>(&text).unwrap();
                 }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(abort, abort_message(Some("kept")));
         tokio::task::yield_now().await;
         assert!(cancelled.load(Ordering::Acquire));
         while event_rx.try_recv().is_ok() {}
-        socket.send(Message::Text(json!({"type":"tts","state":"sentence_start","text":"old"}).to_string().into())).await.unwrap();
-        socket.send(Message::Binary(vec![1,2,3].into())).await.unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"tts","state":"sentence_start","text":"old"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Binary(vec![1, 2, 3].into()))
+            .await
+            .unwrap();
         let _ = timeout(Duration::from_millis(100), async {
             while let Some(event) = event_rx.recv().await {
-                assert!(!matches!(event, NetEvent::Binary(_) | NetEvent::SkillRequired | NetEvent::Disconnected), "unexpected aborted-turn event: {event:?}");
+                assert!(
+                    !matches!(
+                        event,
+                        NetEvent::Binary(_) | NetEvent::SkillRequired | NetEvent::Disconnected
+                    ),
+                    "unexpected aborted-turn event: {event:?}"
+                );
                 if let NetEvent::Text(text) = event {
                     assert_ne!(serde_json::from_str::<Value>(&text).unwrap()["type"], "tts");
                 }
             }
-        }).await;
-        commands.send(NetCommand::SendText(r#"{"type":"listen","state":"start"}"#.into())).await.unwrap();
+        })
+        .await;
+        commands
+            .send(NetCommand::SendText(
+                r#"{"type":"listen","state":"start"}"#.into(),
+            ))
+            .await
+            .unwrap();
         let next = timeout(Duration::from_secs(1), async {
             loop {
-                if let Message::Text(text) = socket.next().await.unwrap().unwrap() { break text; }
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                    break text;
+                }
             }
-        }).await.unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&next).unwrap()["type"], "listen");
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&next).unwrap()["type"],
+            "listen"
+        );
         link_task.abort();
     }
 }

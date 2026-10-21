@@ -1,7 +1,7 @@
 use serde::Deserialize;
+use std::env;
 use std::fs;
 use std::path::Path;
-use std::env;
 
 #[derive(Deserialize)]
 struct Config {
@@ -225,7 +225,10 @@ fn main() {
     println!("cargo:rustc-env=TTS_VOLUME={}", config.tts.volume);
     println!("cargo:rustc-env=TTS_PITCH={}", config.tts.pitch);
     println!("cargo:rustc-env=TTS_SAMPLE_RATE={}", config.tts.sample_rate);
-    println!("cargo:rustc-env=TTS_TIMEOUT_SECS={}", config.tts.timeout_secs);
+    println!(
+        "cargo:rustc-env=TTS_TIMEOUT_SECS={}",
+        config.tts.timeout_secs
+    );
 
     // 智能家居中枢（MQTT）：整段序列化成 JSON 烘进二进制，运行时用 serde 还原
     let smarthome_json =
@@ -244,15 +247,16 @@ fn main() {
 
     // 交叉编译配置
     let target = env::var("TARGET").unwrap_or_default();
-    
+
     // 只在交叉编译到 uclibc 目标时链接 auxval_stub
     if target.contains("uclibc") {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-        let stub_c = format!("{}/scripts/armv7-unknown-linux-uclibceabihf/auxval_stub.c", manifest_dir);
-        
-        cc::Build::new()
-            .file(&stub_c)
-            .compile("auxval_stub");
+        let stub_c = format!(
+            "{}/scripts/armv7-unknown-linux-uclibceabihf/auxval_stub.c",
+            manifest_dir
+        );
+
+        cc::Build::new().file(&stub_c).compile("auxval_stub");
     }
 
     // 处理 C 依赖构建 (opus, speexdsp)
@@ -271,7 +275,6 @@ fn main() {
             .probe("opus")
             .expect("Failed to find opus. Please install libopus-dev.");
     }
-
 }
 
 fn build_or_probe_c_deps(target: &str) {
@@ -279,62 +282,97 @@ fn build_or_probe_c_deps(target: &str) {
     let out_path = Path::new(&out_dir);
 
     // 1. SpeexDSP
-    if pkg_config::Config::new().statik(true).probe("speexdsp").is_err() {
-        println!("cargo:warning=speexdsp not found via pkg-config for target {}. Building from source...", target);
+    if pkg_config::Config::new()
+        .statik(true)
+        .probe("speexdsp")
+        .is_err()
+    {
+        println!(
+            "cargo:warning=speexdsp not found via pkg-config for target {}. Building from source...",
+            target
+        );
         let speexdsp_version = "1.2.1";
-        let speexdsp_url = format!("https://github.com/Hyrsoft/xiaozhi_linux_rs/releases/download/Source_Mirror/speexdsp-{}.tar.gz", speexdsp_version);
+        let speexdsp_url = format!(
+            "https://github.com/Hyrsoft/xiaozhi_linux_rs/releases/download/Source_Mirror/speexdsp-{}.tar.gz",
+            speexdsp_version
+        );
         let src_dir = download_and_extract(&speexdsp_url, "speexdsp", speexdsp_version, out_path);
-        
+
         let mut config = autotools::Config::new(src_dir);
         config.enable_static().disable_shared();
-            
+
         if target.contains("arm-linux-gnueabihf") || target == "armv7-unknown-linux-gnueabihf" {
             config.config_option("host", Some("arm-linux-gnueabihf"));
-        } else if target.contains("arm-rockchip830-linux-uclibcgnueabihf") || target == "armv7-unknown-linux-uclibceabihf" {
+        } else if target.contains("arm-rockchip830-linux-uclibcgnueabihf")
+            || target == "armv7-unknown-linux-uclibceabihf"
+        {
             config.config_option("host", Some("arm-rockchip830-linux-uclibcgnueabihf"));
         } else if target.contains("aarch64-linux-gnu") || target == "aarch64-unknown-linux-gnu" {
             config.config_option("host", Some("aarch64-linux-gnu"));
         }
-            
+
         let dst = config.build();
-            
+
         println!("cargo:rustc-link-search=native={}/lib", dst.display());
         println!("cargo:rustc-link-lib=static=speexdsp");
     }
 
     // 2. Opus
-    if pkg_config::Config::new().statik(true).probe("opus").is_err() {
-        println!("cargo:warning=opus not found via pkg-config for target {}. Building from source...", target);
+    if pkg_config::Config::new()
+        .statik(true)
+        .probe("opus")
+        .is_err()
+    {
+        println!(
+            "cargo:warning=opus not found via pkg-config for target {}. Building from source...",
+            target
+        );
         let opus_version = "1.5.2";
-        let opus_url = format!("https://github.com/Hyrsoft/xiaozhi_linux_rs/releases/download/Source_Mirror/opus-{}.tar.gz", opus_version);
+        let opus_url = format!(
+            "https://github.com/Hyrsoft/xiaozhi_linux_rs/releases/download/Source_Mirror/opus-{}.tar.gz",
+            opus_version
+        );
         let src_dir = download_and_extract(&opus_url, "opus", opus_version, out_path);
-        
+
         let mut config = autotools::Config::new(src_dir);
-        config.enable_static()
+        config
+            .enable_static()
             .disable_shared()
             .config_option("disable-doc", None)
             .config_option("disable-extra-programs", None);
-            
+
         if target.contains("arm-linux-gnueabihf") || target == "armv7-unknown-linux-gnueabihf" {
             config.config_option("host", Some("arm-linux-gnueabihf"));
-        } else if target.contains("arm-rockchip830-linux-uclibcgnueabihf") || target == "armv7-unknown-linux-uclibceabihf" {
+        } else if target.contains("arm-rockchip830-linux-uclibcgnueabihf")
+            || target == "armv7-unknown-linux-uclibceabihf"
+        {
             config.config_option("host", Some("arm-rockchip830-linux-uclibcgnueabihf"));
         } else if target.contains("aarch64-linux-gnu") || target == "aarch64-unknown-linux-gnu" {
             config.config_option("host", Some("aarch64-linux-gnu"));
         }
-        
+
         let dst = config.build();
-            
+
         println!("cargo:rustc-link-search=native={}/lib", dst.display());
         println!("cargo:rustc-link-lib=static=opus");
     }
 }
 
-fn download_and_extract(url: &str, name: &str, version: &str, out_path: &Path) -> std::path::PathBuf {
+fn download_and_extract(
+    url: &str,
+    name: &str,
+    version: &str,
+    out_path: &Path,
+) -> std::path::PathBuf {
     let extract_dir = out_path.join(format!("{}-{}", name, version));
-    
+
     // 如果目录已经存在并且不是空的，就假设已经解压好了
-    if extract_dir.exists() && extract_dir.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
+    if extract_dir.exists()
+        && extract_dir
+            .read_dir()
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    {
         return extract_dir;
     }
 
@@ -343,14 +381,22 @@ fn download_and_extract(url: &str, name: &str, version: &str, out_path: &Path) -
     if !tarball_path.exists() {
         // 优先用仓库里随附的源码包：构建（尤其是交叉编译）不必联网。
         if let Some(vendored) = vendored_source(name, version) {
-            println!("cargo:warning=Using vendored {} source: {}", name, vendored.display());
+            println!(
+                "cargo:warning=Using vendored {} source: {}",
+                name,
+                vendored.display()
+            );
             fs::copy(&vendored, &tarball_path)
                 .unwrap_or_else(|e| panic!("Failed to copy vendored {} source: {}", name, e));
         } else {
             println!("cargo:warning=Downloading {} from {}", name, url);
-            let response = reqwest::blocking::get(url).unwrap_or_else(|e| panic!("Failed to download {}: {}", name, e));
-            let bytes = response.bytes().unwrap_or_else(|e| panic!("Failed to read bytes for {}: {}", name, e));
-            std::fs::write(&tarball_path, bytes).unwrap_or_else(|e| panic!("Failed to save tarball for {}: {}", name, e));
+            let response = reqwest::blocking::get(url)
+                .unwrap_or_else(|e| panic!("Failed to download {}: {}", name, e));
+            let bytes = response
+                .bytes()
+                .unwrap_or_else(|e| panic!("Failed to read bytes for {}: {}", name, e));
+            std::fs::write(&tarball_path, bytes)
+                .unwrap_or_else(|e| panic!("Failed to save tarball for {}: {}", name, e));
         }
     }
 
@@ -358,7 +404,9 @@ fn download_and_extract(url: &str, name: &str, version: &str, out_path: &Path) -
     let tar_gz = std::fs::File::open(&tarball_path).unwrap();
     let tar = flate2::read::GzDecoder::new(tar_gz);
     let mut archive = tar::Archive::new(tar);
-    archive.unpack(out_path).unwrap_or_else(|e| panic!("Failed to unpack archive for {}: {}", name, e));
+    archive
+        .unpack(out_path)
+        .unwrap_or_else(|e| panic!("Failed to unpack archive for {}: {}", name, e));
 
     extract_dir
 }

@@ -16,7 +16,10 @@ pub async fn check_device_activation(config: &Config) -> ActivationResult {
     /* OTA 走直连，不读系统的 https_proxy：本机代理（v2ray/clash 的 10808 等）
      * 经常是开机时不在监听、或被规则丢包，导致激活握手在 30 秒后超时——而小智
      * OTA 服务器本身在国内直连可达，没必要绕代理。和天气请求一个原则。 */
-    let client = Client::builder().no_proxy().build().unwrap_or_else(|_| Client::new());
+    let client = Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     log::info!("Checking activation status via HTTP: {}", http_url);
 

@@ -8,8 +8,8 @@
 - 来源：https://github.com/txp666/otto-emoji-gif-component
 - 用途：吉祥物的表情动画（`assets/mascot/otto/*.gif`、以及由它们生成的
   `app/otto_emoji.c` / `include/otto_emoji.h`）
-- 改动：从 21 个 240×240 表情中取 10 个，缩放为 60/88/164 三档、裁掉四周黑边、
-  量化到 16 级灰，并把 GIF 字节嵌入固件
+- 改动：从 21 个 240×240 表情中取 15 个，按界面真实尺寸缩放、裁掉四周黑边、
+  量化到 16 级灰，把每帧时长从 80ms 放慢到 120ms，并把 GIF 字节嵌入固件
 
 ```
 MIT License
@@ -34,6 +34,17 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## aora-bot 球球
+
+- 来源：https://github.com/sam70361/aora-bot
+- 版本：e3b6148c818da4a8e1966f2bc89cdb3cee473b73
+- Copyright (c) 2026 sam70361
+- 用途：球球的明亮 / 暗黑外观、25 组眼环和 32 种表情配置，移植为 LVGL
+  原生矢量动画。详见 `third_party/aora-bot/README.md`。
+- 完整许可与使用声明：`third_party/aora-bot/LICENSE`、
+  `third_party/aora-bot/NOTICE.md`，分发时须一并保留。
+- 球形角色视觉形象仅供个人技术学习与研究，禁止商业用途。
 
 ## 其他
 

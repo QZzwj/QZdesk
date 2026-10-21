@@ -5,7 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 void qz_load_config(char *server, unsigned int server_size)
 {
@@ -124,11 +126,13 @@ bool qz_backlight_set(int percent)
 }
 
 /* ------------------------------------------------------------------------- *
- * Speaker ("amixer -c 0 cset name='DAC LINEOUT Volume' 18", range 0..30)
+ * Speaker ("amixer -c 0 cset numid=24 18", range 0..30). The uClibc amixer
+ * build on this board cannot reliably resolve the control by name, while the
+ * numid is stable across the QZdesk and Echo-Mate kernels.
  * ------------------------------------------------------------------------- */
 
 #define MIXER_CARD 0
-#define MIXER_CONTROL "DAC LINEOUT Volume"
+#define MIXER_CONTROL_NUMID 24
 #define MIXER_MAX 30
 
 /** Run a command and capture its output (up to size-1 bytes). */
@@ -154,7 +158,7 @@ int qz_volume_level(void)
     int value = -1;
 
     snprintf(command, sizeof(command),
-             "amixer -c %d cget name='%s' 2>/dev/null", MIXER_CARD, MIXER_CONTROL);
+             "amixer -c %d cget numid=%d 2>/dev/null", MIXER_CARD, MIXER_CONTROL_NUMID);
     if (!capture(command, buffer, sizeof(buffer))) return -1;
     /* amixer prints the range on the "type=" line and the current reading on
      * the ": values=" line, so match the latter only. */
@@ -173,8 +177,8 @@ bool qz_volume_set(int percent)
     if (percent > 100) percent = 100;
     value = (percent * MIXER_MAX + 50) / 100;
     snprintf(command, sizeof(command),
-             "amixer -c %d cset name='%s' %d >/dev/null 2>&1",
-             MIXER_CARD, MIXER_CONTROL, value);
+             "amixer -c %d cset numid=%d %d >/dev/null 2>&1",
+             MIXER_CARD, MIXER_CONTROL_NUMID, value);
     return system(command) == 0;
 }
 
@@ -238,15 +242,18 @@ bool qz_timezone_apply(const char *posix_tz)
 /* ------------------------------------------------------------------------- *
  * Appearance (dark mode)
  *
- * One line, one value, one file. The path prefers /etc/qzdesk so the device
- * keeps it with the rest of its config; the simulator falls back to $HOME so a
- * read-only source tree still persists the user's choice.
+ * One line, one value, one file. On the device /userdata survives firmware
+ * updates and is writable; the simulator falls back to $HOME so a read-only
+ * source tree still persists the user's choice.
  * ------------------------------------------------------------------------- */
 
 static const char *appearance_path(void)
 {
     const char *forced = getenv("QZDESK_APPEARANCE_FILE");
     if (forced && forced[0] != '\0') return forced;
+    if (access("/userdata", W_OK) == 0) {
+        return "/userdata/qzdesk/appearance";
+    }
     const char *home = getenv("HOME");
     if (home && home[0] != '\0') {
         static char home_path[128];
@@ -256,12 +263,34 @@ static const char *appearance_path(void)
     return "/etc/qzdesk/appearance";
 }
 
+static bool ensure_appearance_parent(void)
+{
+    const char *path = appearance_path();
+    char directory[160];
+    char *slash;
+
+    if (!path || strlen(path) >= sizeof(directory)) return false;
+    snprintf(directory, sizeof(directory), "%s", path);
+    slash = strrchr(directory, '/');
+    if (!slash || slash == directory) return true;
+    *slash = '\0';
+
+    for (char *cursor = directory + 1; *cursor; cursor++) {
+        if (*cursor != '/') continue;
+        *cursor = '\0';
+        if (mkdir(directory, 0755) != 0 && access(directory, F_OK) != 0) return false;
+        *cursor = '/';
+    }
+    return mkdir(directory, 0755) == 0 || access(directory, F_OK) == 0;
+}
+
 void qz_appearance_load(void)
 {
-    /* An explicit env var wins: it lets a tester force a theme without touching
-     * the persisted file. */
+    /* An explicit env var wins: it lets a tester force either a complete
+     * palette or the legacy light/dark mode without touching the file. */
     const char *current = getenv("QZDESK_DARK");
-    if (current && current[0] != '\0') return;
+    const char *theme = getenv("QZDESK_THEME");
+    if ((current && current[0] != '\0') || (theme && theme[0] != '\0')) return;
 
     FILE *file = fopen(appearance_path(), "r");
     if (!file) return;
@@ -273,15 +302,39 @@ void qz_appearance_load(void)
             setenv("QZDESK_DARK", line + 12, 1);
             break;
         }
+        if (strncmp(line, "QZDESK_THEME=", 13) == 0) {
+            char *value = line + 13;
+            value[strcspn(value, "\r\n")] = '\0';
+            if (value[0] != '\0') {
+                setenv("QZDESK_THEME", value, 1);
+                break;
+            }
+        }
     }
     fclose(file);
+}
+
+bool qz_appearance_save_theme(const char *theme_key)
+{
+    if (!theme_key || theme_key[0] == '\0') return false;
+    setenv("QZDESK_THEME", theme_key, 1);
+
+    const char *path = appearance_path();
+    if (!ensure_appearance_parent()) return false;
+    FILE *file = fopen(path, "w");
+    if (!file) return false;
+    bool ok = fprintf(file, "QZDESK_THEME=%s\n", theme_key) >= 0;
+    if (fclose(file) != 0) ok = false;
+    return ok;
 }
 
 bool qz_appearance_save(bool dark)
 {
     setenv("QZDESK_DARK", dark ? "1" : "0", 1);
+    if (qz_appearance_save_theme(dark ? "night" : "mineral")) return true;
 
     const char *path = appearance_path();
+    if (!ensure_appearance_parent()) return false;
     FILE *file = fopen(path, "w");
     if (!file) return false;
     bool ok = fprintf(file, "QZDESK_DARK=%s\n", dark ? "1" : "0") >= 0;

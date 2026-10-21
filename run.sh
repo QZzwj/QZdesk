@@ -5,9 +5,9 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 build_dir=${QZDESK_BUILD_DIR:-"$script_dir/build"}
 
 
-# The SDL simulator has no ALSA capture/playback devices. Keep the core
-# network and GUI paths active without starting failing ALSA threads.
-export QZDESK_AUDIO_DISABLED=1
+# Allow real microphone/speaker use. Set QZDESK_AUDIO_DISABLED=1 only on a
+# simulator host where ALSA should not be touched at all.
+export QZDESK_AUDIO_DISABLED=${QZDESK_AUDIO_DISABLED:-0}
 export QZDESK_AUTO_MEMORY=${QZDESK_AUTO_MEMORY:-1}
 
 # The simulator can reuse a previously built core. Set QZDESK_BUILD_CORE=ON

@@ -33,6 +33,7 @@ typedef enum {
     QZ_ICON_CPU,
     QZ_ICON_DATABASE,
     QZ_ICON_DEVICE_DESKTOP,
+    QZ_ICON_DEVICE_MOBILE,
     QZ_ICON_DOWNLOAD,
     QZ_ICON_DROPLET,
     QZ_ICON_EYE,
@@ -74,10 +75,19 @@ typedef enum {
 } qz_icon_t;
 
 /**
- * Glyph for `icon` at the baked size closest to `px` (never smaller than asked
- * for unless it is the largest baked size). Returns NULL for an unknown icon, so
- * callers can fall back to text.
+ * Glyph for `icon` at the baked size closest to `px`, preferring the larger
+ * entry on a tie. Callers get a glyph within a pixel or two of the request and
+ * draw it 1:1, so LVGL never has to resample it. Returns NULL for an unknown
+ * icon, so callers can fall back to text.
  */
 const lv_image_dsc_t *qz_icon(qz_icon_t icon, int px);
+
+/**
+ * How many qz_icon() calls missed an exact baked size so far. Non-zero means
+ * some screen asked for a size nobody baked: LVGL would then soften the glyph
+ * with its nearest-neighbour transform. tools/check_layout.c asserts this
+ * stays 0, so a new call site with an unknown size fails the layout check.
+ */
+int qz_icon_size_misses(void);
 
 #endif

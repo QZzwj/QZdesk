@@ -27,46 +27,214 @@ static const char *qz_font_paths[] = {
  * semantic colours keep their hue and only step the brightness so the accent
  * text still clears 4.5:1 on the dark plate.
  * ------------------------------------------------------------------------- */
-static const struct {
-    uint32_t light;
-    uint32_t dark;
-} qz_palette[] = {
-    [QZ_BG]             = { 0xE8EFF7, 0x101B2C },
-    [QZ_BG_GRAD]        = { 0xDCE8F2, 0x17283B },
-    [QZ_CARD]           = { 0xFFFFFF, 0x1C1C1E }, /* grouped plate: white / systemGray6 dark */
-    [QZ_CARD_GRAD]      = { 0xF1F2F6, 0x161619 }, /* plate gradient bottom（顶部用 QZ_CARD） */
-    [QZ_BAR]            = { 0xFFFFFF, 0x1C1C1E }, /* toolbar glass fill */
-    [QZ_FILL]           = { 0xF2F2F7, 0x2C2C2E }, /* recessed fill / track */
-    [QZ_FILL_PRESSED]   = { 0xE9E9EF, 0x3A3A3C }, /* pressed / switch-off track */
-    [QZ_SEPARATOR]      = { 0xC6C6C8, 0x38383A }, /* hairline */
-    [QZ_TEXT]           = { 0x172B43, 0xF4F7FC },
-    [QZ_TEXT_SECONDARY] = { 0x40546B, 0xCAD7E7 },
-    [QZ_TEXT_TERTIARY]  = { 0x4B5E73, 0xBFCDDE },
-    [QZ_SHADOW]         = { 0x1C1C1E, 0x000000 },
-    [QZ_FACE_BUBBLE]    = { 0xE4EFFF, 0x2C2C2E }, /* AI thinking pips */
-    [QZ_KNOB]           = { 0xFFFFFF, 0xFFFFFF }, /* slider / switch knob stays white */
-    [QZ_GLASS_RIM]      = { 0xFFFFFF, 0xFFFFFF }, /* specular rim on glass chrome */
-    [QZ_ACCENT]         = { 0x006BFF, 0x66F7FF },
-    [QZ_ACCENT_DARK]    = { 0x056570, 0x75DCE4 }, /* pressed accent + accent text on tint */
-    [QZ_ACCENT_TEXT]    = { 0x056570, 0x75DCE4 },
-    [QZ_ACCENT_TINT]    = { 0xD9F3F4, 0x17383D }, /* 10% accent wash under badges */
-    [QZ_TEXT_ON_ACCENT] = { 0xFFFFFF, 0xFFFFFF },
-    [QZ_GREEN]          = { 0x248A3D, 0x30D158 }, /* systemGreen */
-    [QZ_ORANGE]         = { 0xC93400, 0xFF9F0A }, /* systemOrange */
-    [QZ_RED]            = { 0xD70015, 0xFF453A }, /* systemRed */
+static const uint32_t qz_palette[QZ_THEME_COUNT][QZ_COLOR_COUNT] = {
+    /* Signal Workstation: a cool mineral canvas, paper-like working plates,
+     * and one deep teal action colour. Orange is reserved for stale / warning
+     * states, never decoration. */
+    [QZ_THEME_MINERAL] = {
+        [QZ_BG]             = 0xE8ECE8,
+        [QZ_BG_GRAD]        = 0xE8ECE8,
+        [QZ_CARD]           = 0xF8FAF6,
+        [QZ_CARD_GRAD]      = 0xF8FAF6,
+        [QZ_BAR]            = 0xF8FAF6,
+        [QZ_FILL]           = 0xE2E7E3,
+        [QZ_FILL_PRESSED]   = 0xD4DCD6,
+        [QZ_SEPARATOR]      = 0xC4CBC5,
+        [QZ_TEXT]           = 0x14211D,
+        [QZ_TEXT_SECONDARY] = 0x52625B,
+        [QZ_TEXT_TERTIARY]  = 0x5F6F68,
+        [QZ_SHADOW]         = 0x14211D,
+        [QZ_FACE_BUBBLE]    = 0xD9EAE4,
+        [QZ_KNOB]           = 0xF8FAF6,
+        [QZ_GLASS_RIM]      = 0xC4CBC5,
+        [QZ_ACCENT]         = 0x0B6258,
+        [QZ_ACCENT_DARK]    = 0x084C44,
+        [QZ_ACCENT_TEXT]    = 0x084C44,
+        [QZ_ACCENT_TINT]    = 0xD9EAE4,
+        [QZ_TEXT_ON_ACCENT] = 0xF6FBF8,
+        [QZ_GREEN]          = 0x1F6B44,
+        [QZ_ORANGE]         = 0xC45B16,
+        [QZ_RED]            = 0xB43A34,
+    },
+    [QZ_THEME_NIGHT] = {
+        [QZ_BG]             = 0x101613,
+        [QZ_BG_GRAD]        = 0x101613,
+        [QZ_CARD]           = 0x18211D,
+        [QZ_CARD_GRAD]      = 0x18211D,
+        [QZ_BAR]            = 0x18211D,
+        [QZ_FILL]           = 0x222C27,
+        [QZ_FILL_PRESSED]   = 0x2D3933,
+        [QZ_SEPARATOR]      = 0x3A4740,
+        [QZ_TEXT]           = 0xEFF5F1,
+        [QZ_TEXT_SECONDARY] = 0xB7C3BC,
+        [QZ_TEXT_TERTIARY]  = 0x93A39B,
+        [QZ_SHADOW]         = 0x000000,
+        [QZ_FACE_BUBBLE]    = 0x1A332E,
+        [QZ_KNOB]           = 0xEFF5F1,
+        [QZ_GLASS_RIM]      = 0x3A4740,
+        [QZ_ACCENT]         = 0x3FC4AB,
+        [QZ_ACCENT_DARK]    = 0x8EE1D2,
+        [QZ_ACCENT_TEXT]    = 0x8EE1D2,
+        [QZ_ACCENT_TINT]    = 0x1A332E,
+        [QZ_TEXT_ON_ACCENT] = 0x081411,
+        [QZ_GREEN]          = 0x52C878,
+        [QZ_ORANGE]         = 0xFFAB5E,
+        [QZ_RED]            = 0xFF7A72,
+    },
+    /* A crisp daylight palette with cobalt as the system signal. The warm
+     * orange is deliberately separate so time and warnings never disappear
+     * into the action colour. */
+    [QZ_THEME_PAPER] = {
+        [QZ_BG]             = 0xEEF1F0,
+        [QZ_BG_GRAD]        = 0xEEF1F0,
+        [QZ_CARD]           = 0xFFFFFF,
+        [QZ_CARD_GRAD]      = 0xFFFFFF,
+        [QZ_BAR]            = 0xFFFFFF,
+        [QZ_FILL]           = 0xE5E9ED,
+        [QZ_FILL_PRESSED]   = 0xD5DCE4,
+        [QZ_SEPARATOR]      = 0xBBC5D0,
+        [QZ_TEXT]           = 0x111922,
+        [QZ_TEXT_SECONDARY] = 0x4E5C6B,
+        [QZ_TEXT_TERTIARY]  = 0x687687,
+        [QZ_SHADOW]         = 0x0B1420,
+        [QZ_FACE_BUBBLE]    = 0xDDE7F8,
+        [QZ_KNOB]           = 0xFFFFFF,
+        [QZ_GLASS_RIM]      = 0xBBC5D0,
+        [QZ_ACCENT]         = 0x2457B6,
+        [QZ_ACCENT_DARK]    = 0x173E8A,
+        [QZ_ACCENT_TEXT]    = 0x173E8A,
+        [QZ_ACCENT_TINT]    = 0xDDE7F8,
+        [QZ_TEXT_ON_ACCENT] = 0xFFFFFF,
+        [QZ_GREEN]          = 0x176B4A,
+        [QZ_ORANGE]         = 0xB4541A,
+        [QZ_RED]            = 0xB32F3A,
+    },
+    /* Warm graphite and coral for evening use. Surfaces stay neutral so the
+     * accent reads as a signal, not as a wash over the whole interface. */
+    [QZ_THEME_EMBER] = {
+        [QZ_BG]             = 0x141315,
+        [QZ_BG_GRAD]        = 0x141315,
+        [QZ_CARD]           = 0x201E21,
+        [QZ_CARD_GRAD]      = 0x201E21,
+        [QZ_BAR]            = 0x201E21,
+        [QZ_FILL]           = 0x2B282D,
+        [QZ_FILL_PRESSED]   = 0x37333A,
+        [QZ_SEPARATOR]      = 0x4A444C,
+        [QZ_TEXT]           = 0xF7F1EA,
+        [QZ_TEXT_SECONDARY] = 0xC8BDB2,
+        [QZ_TEXT_TERTIARY]  = 0xA79A8E,
+        [QZ_SHADOW]         = 0x000000,
+        [QZ_FACE_BUBBLE]    = 0x402824,
+        [QZ_KNOB]           = 0xF7F1EA,
+        [QZ_GLASS_RIM]      = 0x4A444C,
+        [QZ_ACCENT]         = 0xFF8E72,
+        [QZ_ACCENT_DARK]    = 0xFFC0AE,
+        [QZ_ACCENT_TEXT]    = 0xFFC0AE,
+        [QZ_ACCENT_TINT]    = 0x402824,
+        [QZ_TEXT_ON_ACCENT] = 0x1B0E0A,
+        [QZ_GREEN]          = 0x69D08A,
+        [QZ_ORANGE]         = 0xFFC66D,
+        [QZ_RED]            = 0xFF7777,
+    },
 };
 
-static bool g_dark_mode;
+static qz_theme_id_t g_theme = QZ_THEME_MINERAL;
 
-bool qz_theme_is_dark(void) { return g_dark_mode; }
+static qz_theme_id_t valid_theme(qz_theme_id_t theme)
+{
+    return (unsigned)theme < QZ_THEME_COUNT ? theme : QZ_THEME_MINERAL;
+}
+
+bool qz_theme_is_dark(void) { return qz_theme_id_is_dark(g_theme); }
+qz_theme_id_t qz_theme_get_id(void) { return g_theme; }
+
+bool qz_theme_id_is_dark(qz_theme_id_t theme)
+{
+    return valid_theme(theme) == QZ_THEME_NIGHT ||
+           valid_theme(theme) == QZ_THEME_EMBER;
+}
+
+const char *qz_theme_id_key(qz_theme_id_t theme)
+{
+    static const char *const keys[QZ_THEME_COUNT] = {
+        "mineral", "night", "paper", "ember",
+    };
+    return keys[valid_theme(theme)];
+}
+
+const char *qz_theme_id_name(qz_theme_id_t theme)
+{
+    static const char *const names[QZ_THEME_COUNT] = {
+        "苔原", "夜海", "纸蓝", "余烬",
+    };
+    return names[valid_theme(theme)];
+}
+
+const char *qz_theme_id_caption(qz_theme_id_t theme)
+{
+    static const char *const captions[QZ_THEME_COUNT] = {
+        "冷灰 · 深青", "墨绿 · 薄荷", "亮白 · 钴蓝", "暖灰 · 珊瑚",
+    };
+    return captions[valid_theme(theme)];
+}
+
+bool qz_theme_parse(const char *value, qz_theme_id_t *theme)
+{
+    if (!value || value[0] == '\0') return false;
+    for (int i = 0; i < QZ_THEME_COUNT; i++) {
+        if (strcmp(value, qz_theme_id_key((qz_theme_id_t)i)) == 0) {
+            if (theme) *theme = (qz_theme_id_t)i;
+            return true;
+        }
+        if (strcmp(value, qz_theme_id_name((qz_theme_id_t)i)) == 0) {
+            if (theme) *theme = (qz_theme_id_t)i;
+            return true;
+        }
+    }
+    if (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
+        strcmp(value, "yes") == 0 || strcmp(value, "dark") == 0) {
+        if (theme) *theme = QZ_THEME_NIGHT;
+        return true;
+    }
+    if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 ||
+        strcmp(value, "no") == 0 || strcmp(value, "light") == 0) {
+        if (theme) *theme = QZ_THEME_MINERAL;
+        return true;
+    }
+    return false;
+}
+
+lv_color_t qz_color_theme(qz_color_token_t token, qz_theme_id_t theme)
+{
+    if ((unsigned)token >= QZ_COLOR_COUNT) return lv_color_black();
+    return lv_color_hex(qz_palette[valid_theme(theme)][token]);
+}
+
+lv_color_t qz_color_mode(qz_color_token_t token, bool dark)
+{
+    return qz_color_theme(token, dark ? QZ_THEME_NIGHT : QZ_THEME_MINERAL);
+}
 
 lv_color_t qz_color(qz_color_token_t token)
 {
-    /* Stay safe if a caller passes a raw int outside the enum range. */
-    if ((unsigned)token >= sizeof(qz_palette) / sizeof(qz_palette[0])) {
-        return lv_color_black();
+    return qz_color_theme(token, g_theme);
+}
+
+/* Public widget helpers still accept lv_color_t so the existing call sites keep
+ * working. Map those colours back to a palette role; dynamic colours that are
+ * genuinely not theme roles stay untracked. */
+static bool color_token_for(lv_color_t color, qz_color_token_t *token)
+{
+    uint32_t value = lv_color_to_int(color);
+    for (int theme = 0; theme < QZ_THEME_COUNT; theme++) {
+        for (int i = 0; i < QZ_COLOR_COUNT; i++) {
+            if (lv_color_to_int(lv_color_hex(qz_palette[theme][i])) == value) {
+                if (token) *token = (qz_color_token_t)i;
+                return true;
+            }
+        }
     }
-    return lv_color_hex(g_dark_mode ? qz_palette[token].dark : qz_palette[token].light);
+    return false;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -83,19 +251,21 @@ typedef struct qz_style_record_s {
     lv_style_prop_t prop;
     lv_style_selector_t selector;
     qz_color_token_t token;
+    void *aux;
     struct qz_style_record_s *next;
 } qz_style_record_t;
 
 static qz_style_record_t *g_style_records;
 
 static void track_record(lv_obj_t *obj, lv_style_prop_t prop,
-                         lv_style_selector_t sel, qz_color_token_t token)
+                         lv_style_selector_t sel, qz_color_token_t token, void *aux)
 {
     /* Reuse an existing record for the same (obj, prop, sel) triple so a
      * restyle doesn't grow the list. */
     qz_style_record_t *rec = g_style_records;
     while (rec) {
-        if (rec->obj == obj && rec->prop == prop && rec->selector == sel) {
+        if (rec->obj == obj && rec->prop == prop && rec->selector == sel &&
+            rec->aux == aux) {
             rec->token = token;
             return;
         }
@@ -107,6 +277,7 @@ static void track_record(lv_obj_t *obj, lv_style_prop_t prop,
     rec->prop = prop;
     rec->selector = sel;
     rec->token = token;
+    rec->aux = aux;
     rec->next = g_style_records;
     g_style_records = rec;
 }
@@ -128,47 +299,76 @@ static void track_delete(lv_event_t *event)
 
 static void ensure_delete_hook(lv_obj_t *obj)
 {
-    /* LV_EVENT_DELETE is delivered once per object, so a single hook is enough.
-     * Adding it every time is harmless but wasteful — track whether we have. */
-    static void *marker = (void *)0xDEAD;
-    if (lv_obj_get_user_data(obj) == marker) return;
-    lv_obj_set_user_data(obj, marker);
+    /* Application widgets use user_data for their own bindings. Keep the theme
+     * marker out of that slot; USER_4 is still free after the material tags. */
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_USER_4)) return;
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_USER_4);
     lv_obj_add_event_cb(obj, track_delete, LV_EVENT_DELETE, NULL);
 }
 
 void qz_obj_set_bg_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
 {
     lv_obj_set_style_bg_color(obj, qz_color(token), sel);
-    track_record(obj, LV_STYLE_BG_COLOR, sel, token);
+    track_record(obj, LV_STYLE_BG_COLOR, sel, token, NULL);
     ensure_delete_hook(obj);
 }
 
 void qz_obj_set_bg_grad_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
 {
     lv_obj_set_style_bg_grad_color(obj, qz_color(token), sel);
-    track_record(obj, LV_STYLE_BG_GRAD_COLOR, sel, token);
+    track_record(obj, LV_STYLE_BG_GRAD_COLOR, sel, token, NULL);
     ensure_delete_hook(obj);
 }
 
 void qz_obj_set_text_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
 {
     lv_obj_set_style_text_color(obj, qz_color(token), sel);
-    track_record(obj, LV_STYLE_TEXT_COLOR, sel, token);
+    track_record(obj, LV_STYLE_TEXT_COLOR, sel, token, NULL);
     ensure_delete_hook(obj);
 }
 
 void qz_obj_set_border_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
 {
     lv_obj_set_style_border_color(obj, qz_color(token), sel);
-    track_record(obj, LV_STYLE_BORDER_COLOR, sel, token);
+    track_record(obj, LV_STYLE_BORDER_COLOR, sel, token, NULL);
     ensure_delete_hook(obj);
 }
 
 void qz_obj_set_shadow_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
 {
     lv_obj_set_style_shadow_color(obj, qz_color(token), sel);
-    track_record(obj, LV_STYLE_SHADOW_COLOR, sel, token);
+    track_record(obj, LV_STYLE_SHADOW_COLOR, sel, token, NULL);
     ensure_delete_hook(obj);
+}
+
+void qz_obj_set_image_recolor(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
+{
+    lv_obj_set_style_image_recolor(obj, qz_color(token), sel);
+    track_record(obj, LV_STYLE_IMAGE_RECOLOR, sel, token, NULL);
+    ensure_delete_hook(obj);
+}
+
+void qz_obj_set_line_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
+{
+    lv_obj_set_style_line_color(obj, qz_color(token), sel);
+    track_record(obj, LV_STYLE_LINE_COLOR, sel, token, NULL);
+    ensure_delete_hook(obj);
+}
+
+void qz_obj_set_arc_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel)
+{
+    lv_obj_set_style_arc_color(obj, qz_color(token), sel);
+    track_record(obj, LV_STYLE_ARC_COLOR, sel, token, NULL);
+    ensure_delete_hook(obj);
+}
+
+void qz_obj_set_chart_series_color(lv_obj_t *chart, lv_chart_series_t *series,
+                                   qz_color_token_t token)
+{
+    if (!chart || !series) return;
+    lv_chart_set_series_color(chart, series, qz_color(token));
+    track_record(chart, LV_STYLE_PROP_INV, 0, token, series);
+    ensure_delete_hook(chart);
 }
 
 /* Walk every recorded style and re-apply its colour from the current palette.
@@ -183,6 +383,9 @@ static void theme_refresh_all_records(void)
     while (rec) {
         lv_color_t c = qz_color(rec->token);
         switch (rec->prop) {
+        case LV_STYLE_PROP_INV:
+            lv_chart_set_series_color(rec->obj, (lv_chart_series_t *)rec->aux, c);
+            break;
         case LV_STYLE_BG_COLOR:
             lv_obj_set_style_bg_color(rec->obj, c, rec->selector);
             break;
@@ -197,6 +400,15 @@ static void theme_refresh_all_records(void)
             break;
         case LV_STYLE_SHADOW_COLOR:
             lv_obj_set_style_shadow_color(rec->obj, c, rec->selector);
+            break;
+        case LV_STYLE_IMAGE_RECOLOR:
+            lv_obj_set_style_image_recolor(rec->obj, c, rec->selector);
+            break;
+        case LV_STYLE_LINE_COLOR:
+            lv_obj_set_style_line_color(rec->obj, c, rec->selector);
+            break;
+        case LV_STYLE_ARC_COLOR:
+            lv_obj_set_style_arc_color(rec->obj, c, rec->selector);
             break;
         default:
             break;
@@ -220,22 +432,104 @@ static void theme_refresh_all_records(void)
 
 static bool theme_reduce_motion(void);
 
-bool qz_theme_set_dark(bool dark)
+/* ------------------------------------------------------------------------- *
+ * Theme wash
+ *
+ * Palette records redraw in place. A full-screen rectangle on the top layer
+ * animates only its background opacity, so the change reads as one soft accent
+ * wash without an ARGB transform layer or a screen reload. The wash is inert:
+ * it never owns input and it is removed when the settle animation completes.
+ * ------------------------------------------------------------------------- */
+static lv_obj_t *theme_wash;
+
+static void theme_wash_opa(void *var, int32_t value)
 {
-    if (g_dark_mode == dark) return false;
-    g_dark_mode = dark;
+    lv_obj_set_style_bg_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
+}
+
+static void theme_wash_deleted(lv_event_t *event)
+{
+    if (lv_event_get_target(event) == theme_wash) theme_wash = NULL;
+}
+
+static void theme_wash_out(void *var, int32_t value)
+{
+    theme_wash_opa(var, value);
+}
+
+static void theme_wash_out_complete(lv_anim_t *anim)
+{
+    lv_obj_t *wash = (lv_obj_t *)anim->var;
+    if (wash != theme_wash) return;
+    lv_obj_delete(wash);
+    theme_wash = NULL;
+}
+
+static void theme_wash_in_complete(lv_anim_t *anim)
+{
+    if ((lv_obj_t *)anim->var != theme_wash || !theme_wash) return;
+    lv_anim_t out;
+    lv_anim_init(&out);
+    lv_anim_set_var(&out, theme_wash);
+    lv_anim_set_exec_cb(&out, theme_wash_out);
+    lv_anim_set_values(&out, 18, LV_OPA_TRANSP);
+    lv_anim_set_duration(&out, QZ_DUR_THEME * 70 / 100);
+    qz_anim_ease_in_out(&out);
+    lv_anim_set_completed_cb(&out, theme_wash_out_complete);
+    lv_anim_start(&out);
+}
+
+static void theme_wash_start(void)
+{
+    if (theme_wash) {
+        lv_obj_delete(theme_wash);
+        theme_wash = NULL;
+    }
+
+    theme_wash = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(theme_wash, lv_pct(100), lv_pct(100));
+    lv_obj_align(theme_wash, LV_ALIGN_TOP_LEFT, 0, 0);
+    qz_obj_set_bg_color(theme_wash, QZ_ACCENT, 0);
+    lv_obj_set_style_bg_opa(theme_wash, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(theme_wash, 0, 0);
+    lv_obj_set_style_radius(theme_wash, 0, 0);
+    lv_obj_set_style_pad_all(theme_wash, 0, 0);
+    lv_obj_clear_flag(theme_wash, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(theme_wash, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(theme_wash, theme_wash_deleted, LV_EVENT_DELETE, NULL);
+
+    lv_anim_t in;
+    lv_anim_init(&in);
+    lv_anim_set_var(&in, theme_wash);
+    lv_anim_set_exec_cb(&in, theme_wash_opa);
+    lv_anim_set_values(&in, LV_OPA_TRANSP, 18);
+    lv_anim_set_duration(&in, QZ_DUR_THEME * 30 / 100);
+    qz_anim_ease_out(&in);
+    lv_anim_set_completed_cb(&in, theme_wash_in_complete);
+    lv_anim_start(&in);
+}
+
+bool qz_theme_set(qz_theme_id_t theme)
+{
+    theme = valid_theme(theme);
+    if (g_theme == theme) return false;
+    g_theme = theme;
     theme_refresh_all_records();
-    /* The active screen is reloaded with a short cross-fade so the palette
-     * change reads as a single motion instead of a hard repaint. */
     lv_obj_t *active = lv_screen_active();
     if (active) {
         if (theme_reduce_motion()) {
             lv_obj_invalidate(active);
         } else {
-            lv_screen_load_anim(active, LV_SCR_LOAD_ANIM_FADE_ON, QZ_DUR_SMALL, 0, false);
+            theme_wash_start();
         }
     }
     return true;
+}
+
+bool qz_theme_set_dark(bool dark)
+{
+    if (qz_theme_is_dark() == dark) return false;
+    return qz_theme_set(dark ? QZ_THEME_NIGHT : QZ_THEME_MINERAL);
 }
 
 typedef struct {
@@ -283,14 +577,17 @@ static int env_percent(const char *name, int fallback)
 
 void qz_style_init(void)
 {
-    /* Pull the persisted dark-mode preference into QZDESK_DARK before any token
-     * is read, so the first frame is already in the right theme. */
+    /* Pull the persisted palette into the environment before any token is
+     * read, so the first frame is already in the right theme. */
     qz_appearance_load();
-    const char *dark_env = getenv("QZDESK_DARK");
-    g_dark_mode = dark_env &&
-                  (strcmp(dark_env, "1") == 0 ||
-                   strcmp(dark_env, "true") == 0 ||
-                   strcmp(dark_env, "yes") == 0);
+    const char *theme_env = getenv("QZDESK_THEME");
+    qz_theme_id_t loaded;
+    if (theme_env && qz_theme_parse(theme_env, &loaded)) {
+        g_theme = loaded;
+    } else {
+        const char *dark_env = getenv("QZDESK_DARK");
+        if (dark_env && qz_theme_parse(dark_env, &loaded)) g_theme = loaded;
+    }
 
     material_opa = 255 * env_percent("QZDESK_MATERIAL_OPA", QZ_MATERIAL_PERCENT_DEFAULT) / 100;
     int glass = env_percent("QZDESK_GLASS_OPA", -1);
@@ -501,12 +798,10 @@ void qz_style_screen(lv_obj_t *obj)
 {
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_OFF);
-    /* Canvas with a subtle vertical gradient: glass needs a backdrop with
-     * tonal depth, or 68%-alpha plates read as flat paint. Filling a VER
-     * gradient costs the same as a solid fill (per-row constant colour). */
+    /* One neutral canvas. Flat surfaces keep rules and data exactly aligned
+     * instead of introducing decorative tonal shifts. */
     qz_obj_set_bg_color(obj, QZ_BG, 0);
-    qz_obj_set_bg_grad_color(obj, QZ_BG_GRAD, 0);
-    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_radius(obj, 0, 0);
@@ -515,26 +810,51 @@ void qz_style_screen(lv_obj_t *obj)
     lv_obj_set_style_text_font(obj, qz_font(), 0);
 }
 
-void qz_style_toolbar(lv_obj_t *obj)
+void qz_style_header(lv_obj_t *obj)
 {
-    /* Floating chrome: a capsule of translucent white inset from the edges, so
-     * content stays visible all the way round it. Together with the composer it
-     * is the only translucent surface in the interface — plates are opaque, and
-     * glass never sits on glass. The rim stands in for a hairline: light
-     * catching the material separates it from the page without a hard divider.
-     *
-     * The chrome is glass: in light mode it is translucent white, in dark mode
-     * it is translucent #1C1C1E — same role, same opacity, opposite palette. */
-    lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, 0);
+    /* 页头是**贴边**的：全宽、直角、无阴影，底部一根发丝线。以前它是缩进 8px
+     * 的浮空胶囊，那圈留白加阴影在 320×240 上要吃掉三行内容的高度，换来的只是
+     * 一层玻璃感 —— 而玻璃的价值是"浮在内容之上"，页头并不浮在什么之上。
+     * 材质本身留着：填充仍是 QZ_BAR + 材质不透明度，滑杆一样调得动。 */
+    lv_obj_set_style_radius(obj, 0, 0);
     qz_obj_set_bg_color(obj, QZ_BAR, 0);
     lv_obj_set_style_bg_opa(obj, (lv_opa_t)material_glass_opa, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
-    qz_obj_set_border_color(obj, QZ_GLASS_RIM, 0);
-    lv_obj_set_style_border_opa(obj, (lv_opa_t)QZ_RIM_OPA, 0);
-    lv_obj_set_style_shadow_width(obj, 10, 0);
-    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)46, 0);
-    qz_obj_set_shadow_color(obj, QZ_SHADOW, 0);
-    lv_obj_set_style_shadow_offset_y(obj, 4, 0);
+    qz_obj_set_border_color(obj, QZ_SEPARATOR, 0);
+    lv_obj_set_style_border_opa(obj, (lv_opa_t)150, 0);
+    lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    /* 页头是chrome，本身没有动作：默认的 CLICKABLE 只会让它在命中区审计里
+     * 冒充一个 320×39 的可点对象，也顺手把没有目标的空白变成"点了有反应"。 */
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    qz_material_register(obj, true);
+}
+
+lv_obj_t *qz_page_header(lv_obj_t *screen, const char *title)
+{
+    lv_obj_t *header = lv_obj_create(screen);
+    lv_obj_set_size(header, lv_pct(100), QZ_HEADER_H);
+    lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
+    qz_style_header(header);
+    /* 标题固定排在返回键右边（58 = 8 内缩 + 44 返回键 + 6）：五个页面与所有
+     * 二级页的标题都落在同一条竖线上，翻页时文字不会左右跳。 */
+    lv_obj_t *label = qz_text(header, title, 22, qz_color(QZ_TEXT));
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 58, 0);
+    return header;
+}
+
+void qz_style_toolbar(lv_obj_t *obj)
+{
+    /* Toolbars are work surfaces, not floating pills. */
+    lv_obj_set_style_radius(obj, QZ_RADIUS_CARD, 0);
+    qz_obj_set_bg_color(obj, QZ_BAR, 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(obj, 1, 0);
+    qz_obj_set_border_color(obj, QZ_SEPARATOR, 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     qz_material_register(obj, true);
@@ -557,13 +877,11 @@ void qz_style_row(lv_obj_t *obj)
     lv_obj_set_style_pad_all(obj, 0, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     qz_add_press_feedback(obj);
-    qz_add_touch_glint(obj);
 }
 
 void qz_style_slider(lv_obj_t *obj)
 {
-    /* The object is 26px tall: 9px of padding leave an 8px iOS track while the
-     * knob keeps a 26px circle. */
+    /* The object is 26px tall: 9px of padding leave an 8px precision track. */
     /* The track is the neutral fill rather than a translucent white: on a white
      * plate a translucent white track is invisible. */
     qz_obj_set_bg_color(obj, QZ_FILL, LV_PART_MAIN);
@@ -581,10 +899,7 @@ void qz_style_slider(lv_obj_t *obj)
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_KNOB);
     lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, LV_PART_KNOB);
     lv_obj_set_style_pad_all(obj, 0, LV_PART_KNOB);
-    lv_obj_set_style_shadow_width(obj, 8, LV_PART_KNOB);
-    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)80, LV_PART_KNOB);
-    lv_obj_set_style_shadow_color(obj, lv_color_black(), LV_PART_KNOB);
-    lv_obj_set_style_shadow_offset_y(obj, 2, LV_PART_KNOB);
+    lv_obj_set_style_shadow_width(obj, 0, LV_PART_KNOB);
     /* A hairline keeps the white knob readable on the white cards. */
     lv_obj_set_style_border_width(obj, 1, LV_PART_KNOB);
     qz_obj_set_border_color(obj, QZ_SEPARATOR, LV_PART_KNOB);
@@ -605,17 +920,14 @@ void qz_style_switch(lv_obj_t *obj)
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
     qz_obj_set_bg_color(obj, QZ_KNOB, LV_PART_KNOB);
     lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, LV_PART_KNOB);
-    lv_obj_set_style_shadow_width(obj, 8, LV_PART_KNOB);
-    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)80, LV_PART_KNOB);
-    lv_obj_set_style_shadow_color(obj, lv_color_black(), LV_PART_KNOB);
+    lv_obj_set_style_shadow_width(obj, 0, LV_PART_KNOB);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 void qz_style_textarea(lv_obj_t *obj)
 {
-    /* A filled field on the white composer bar, the way iOS fills a search
-     * field: neutral fill, no border, no translucency. */
-    lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, 0);
+    /* A filled field on the composer bar: neutral fill, no translucency. */
+    lv_obj_set_style_radius(obj, 6, 0);
     qz_obj_set_bg_color(obj, QZ_FILL, 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
@@ -645,7 +957,7 @@ void qz_style_keyboard(lv_obj_t *obj)
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_ITEMS);
     qz_obj_set_text_color(obj, QZ_TEXT, LV_PART_ITEMS);
     lv_obj_set_style_text_font(obj, qz_symbol_font(12), LV_PART_ITEMS);
-    lv_obj_set_style_radius(obj, 7, LV_PART_ITEMS);
+    lv_obj_set_style_radius(obj, 4, LV_PART_ITEMS);
     lv_obj_set_style_border_width(obj, 0, LV_PART_ITEMS);
     lv_obj_set_style_shadow_width(obj, 0, LV_PART_ITEMS);
     /* LVGL flags the function keys (1#/ABC/backspace/enter/space/ok) as
@@ -659,7 +971,12 @@ lv_obj_t *qz_text(lv_obj_t *parent, const char *text, int32_t px, lv_color_t tex
     lv_obj_t *obj = lv_label_create(parent);
     lv_label_set_text(obj, text);
     lv_obj_set_style_text_font(obj, qz_font_size(px), 0);
-    lv_obj_set_style_text_color(obj, text_color, 0);
+    qz_color_token_t token;
+    if (color_token_for(text_color, &token)) {
+        qz_obj_set_text_color(obj, token, 0);
+    } else {
+        lv_obj_set_style_text_color(obj, text_color, 0);
+    }
     lv_obj_set_style_text_letter_space(obj, 0, 0);
     return obj;
 }
@@ -704,6 +1021,7 @@ static const struct {
     { LV_SYMBOL_FILE, QZ_ICON_FILE_TEXT },
     { LV_SYMBOL_EDIT, QZ_ICON_PENCIL },
     { LV_SYMBOL_DOWNLOAD, QZ_ICON_DOWNLOAD },
+    { LV_SYMBOL_TRASH, QZ_ICON_TRASH },
     { LV_SYMBOL_CLOSE, QZ_ICON_X },
 };
 
@@ -720,24 +1038,23 @@ static qz_icon_t qz_symbol_icon(const char *symbol)
 
 lv_obj_t *qz_icon_image(lv_obj_t *parent, qz_icon_t icon, int32_t px, lv_color_t color)
 {
-    /* 传进来的是设计稿尺寸：先缩到当前面板再挑素材（素材是"不小于请求尺寸里
-     * 最小的一档"，见 qz_icon）。 */
+    /* 传进来的是设计稿尺寸：先按当前面板换成物理像素，再挑"最接近那一档"
+     * 的素材（见 qz_icon）。小屏用到的 11~23px 都有精确档位，所以这里永远
+     * 1:1 贴图；LVGL 的软件 transform 缩图是最近邻，线性图标一缩就发虚。 */
     int32_t want = qz_scale_px(px);
     const lv_image_dsc_t *glyph = qz_icon(icon, (int)want);
-    lv_obj_t *image;
     if (!glyph) return NULL;
 
-    image = lv_image_create(parent);
+    lv_obj_t *image = lv_image_create(parent);
     lv_image_set_src(image, glyph);
     /* A8 蒙版 + 全量重着色：颜色就是主题色，浅色/深色共用一份资源 */
-    lv_obj_set_style_image_recolor(image, color, 0);
-    lv_obj_set_style_image_recolor_opa(image, LV_OPA_COVER, 0);
-    /* 面板比设计稿小：素材最小一档只有 14px，仍会比周围的字与留白大出一截，
-     * 于是按设计尺寸反算一个 zoom（`lv_image_set_scale` 会被 scale.h 再缩到
-     * 面板），把它压到想要的大小。面板不小于设计稿时不走这里，行为与设计一致。 */
-    if (qz_scale_downscaled() && px > 0 && (int32_t)glyph->header.w > want) {
-        lv_image_set_scale(image, (uint32_t)(256 * px / glyph->header.w));
+    qz_color_token_t token;
+    if (color_token_for(color, &token)) {
+        qz_obj_set_image_recolor(image, token, 0);
+    } else {
+        lv_obj_set_style_image_recolor(image, color, 0);
     }
+    lv_obj_set_style_image_recolor_opa(image, LV_OPA_COVER, 0);
     lv_obj_clear_flag(image, LV_OBJ_FLAG_CLICKABLE);
     return image;
 }
@@ -753,15 +1070,21 @@ lv_obj_t *qz_symbol(lv_obj_t *parent, const char *symbol, int32_t px, lv_color_t
     lv_obj_t *obj = lv_label_create(parent);
     lv_label_set_text(obj, symbol);
     lv_obj_set_style_text_font(obj, qz_symbol_font(px), 0);
-    lv_obj_set_style_text_color(obj, color, 0);
+    qz_color_token_t token;
+    if (color_token_for(color, &token)) {
+        qz_obj_set_text_color(obj, token, 0);
+    } else {
+        lv_obj_set_style_text_color(obj, color, 0);
+    }
     return obj;
 }
 
 lv_obj_t *qz_squircle(lv_obj_t *parent, int size, qz_color_token_t color)
 {
     /* Flat, one colour, no shadow — a filled glyph tile the way iOS Settings
-     * draws them. Neighbouring tiles alternate between the accent and the
-     * neutral fill; a second hue is never the answer. */
+     * draws them. The caller passes the role: tiles now keep one role across a
+     * whole grid instead of alternating accent / neutral, so a filled tile can
+     * still mean "this one is selected" wherever it appears. */
     lv_obj_t *obj = lv_obj_create(parent);
     lv_obj_set_size(obj, size, size);
     lv_obj_set_style_radius(obj, size * QZ_RADIUS_ICON / 100, 0);
@@ -811,7 +1134,12 @@ lv_obj_t *qz_chevron(lv_obj_t *parent, lv_color_t color, int32_t size)
     lv_obj_t *line = lv_line_create(parent);
     lv_line_set_points(line, points, 3);
     lv_obj_set_style_line_width(line, size > 20 ? 3 : 2, 0);
-    lv_obj_set_style_line_color(line, color, 0);
+    qz_color_token_t token;
+    if (color_token_for(color, &token)) {
+        qz_obj_set_line_color(line, token, 0);
+    } else {
+        lv_obj_set_style_line_color(line, color, 0);
+    }
     lv_obj_set_style_line_rounded(line, true, 0);
     lv_obj_set_style_line_opa(line, LV_OPA_COVER, 0);
     lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE);
@@ -824,12 +1152,22 @@ lv_obj_t *qz_arc_piece(lv_obj_t *parent, int32_t width, int32_t height, int32_t 
                        int32_t end, int32_t thickness, lv_color_t color)
 {
     lv_obj_t *arc = lv_arc_create(parent);
-    lv_obj_set_size(arc, width, height);
+    /* An arc is geometrically square. Scale one axis only, otherwise an
+     * anisotropic panel (for example 320x320 against the 480x320 design)
+     * turns it into an oval and, for small glyph parts, makes it overflow
+     * the square parent. */
+    int32_t side = qz_scale_px(width < height ? width : height);
+    (lv_obj_set_size)(arc, side, side);
     lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(arc, 0, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_arc_width(arc, thickness, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(arc, color, LV_PART_INDICATOR);
+    qz_color_token_t token;
+    if (color_token_for(color, &token)) {
+        qz_obj_set_arc_color(arc, token, LV_PART_INDICATOR);
+    } else {
+        lv_obj_set_style_arc_color(arc, color, LV_PART_INDICATOR);
+    }
     lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_set_style_pad_all(arc, 0, 0);
@@ -842,49 +1180,60 @@ lv_obj_t *qz_arc_piece(lv_obj_t *parent, int32_t width, int32_t height, int32_t 
 
 void qz_style_plate(lv_obj_t *obj)
 {
-    /* The workhorse surface, now glass: translucent plate with a vertical
-     * sheen (top = QZ_CARD, bottom = QZ_CARD_GRAD) and a 1px specular rim.
-     * RV1106 预算内的玻璃三件套 —— 混合已在跑，渐变填充与实心同价，
-     * 描边按周长计；刻意不加深色阴影（逐像素高斯，一张大卡 10~20ms）。 */
+    /* The workhorse surface is a solid sheet separated by a hairline. */
     qz_obj_set_bg_color(obj, QZ_CARD, 0);
-    qz_obj_set_bg_grad_color(obj, QZ_CARD_GRAD, 0);
-    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_bg_opa(obj, (lv_opa_t)material_opa, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
-    qz_obj_set_border_color(obj, QZ_GLASS_RIM, 0);
-    lv_obj_set_style_border_opa(obj, (lv_opa_t)(QZ_RIM_OPA * 2 / 5), 0);
+    qz_obj_set_border_color(obj, QZ_SEPARATOR, 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_shadow_width(obj, 0, 0);
+    lv_obj_set_style_radius(obj, QZ_RADIUS_CARD, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     qz_material_register(obj, false);
 }
 
 void qz_style_glass(lv_obj_t *obj)
 {
-    /* Translucent surface + the specular rim + a soft neutral shadow. Reserve
-     * it for chrome above content; a plate is opaque with no shadow. The glass
-     * role follows the theme: white in light, #1C1C1E in dark. */
+    /* Chrome uses the same flat surface language as content, separated by a
+     * rule rather than a glow. */
     qz_obj_set_bg_color(obj, QZ_BAR, 0);
     lv_obj_set_style_bg_opa(obj, (lv_opa_t)material_glass_opa, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
-    qz_obj_set_border_color(obj, QZ_GLASS_RIM, 0);
-    lv_obj_set_style_border_opa(obj, (lv_opa_t)QZ_RIM_OPA, 0);
-    lv_obj_set_style_shadow_width(obj, 8, 0);
-    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)38, 0);
-    qz_obj_set_shadow_color(obj, QZ_SHADOW, 0);
-    lv_obj_set_style_shadow_offset_y(obj, 3, 0);
+    qz_obj_set_border_color(obj, QZ_SEPARATOR, 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
+    lv_obj_set_style_radius(obj, QZ_RADIUS_CARD, 0);
     qz_material_register(obj, true);
+}
+
+void qz_style_sheet(lv_obj_t *panel)
+{
+    /* Modal sheets stay opaque; the scrim and a precise border carry depth. */
+    qz_obj_set_bg_color(panel, QZ_CARD, 0);
+    lv_obj_set_style_bg_grad_dir(panel, LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    qz_obj_set_border_color(panel, QZ_SEPARATOR, 0);
+    lv_obj_set_style_border_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(panel, QZ_RADIUS_CARD, 0);
+    lv_obj_set_style_shadow_width(panel, 0, 0);
+    lv_obj_set_style_clip_corner(panel, true, 0);
 }
 
 lv_obj_t *qz_card_button(lv_obj_t *parent, int width, int height)
 {
     lv_obj_t *card = lv_button_create(parent);
     lv_obj_set_size(card, width, height);
+    qz_touch_target(card);
     lv_obj_set_style_radius(card, QZ_RADIUS_CARD, 0);
-    /* A plate, not a material: opaque plate, no border, no shadow. The grey
-     * canvas around it is what makes it read as raised. */
+    /* A compact working tile, separated by the canvas rather than a shadow. */
     qz_obj_set_bg_color(card, QZ_CARD, 0);
     lv_obj_set_style_bg_opa(card, (lv_opa_t)material_opa, 0);
-    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    qz_obj_set_border_color(card, QZ_SEPARATOR, 0);
+    lv_obj_set_style_border_opa(card, LV_OPA_COVER, 0);
     lv_obj_set_style_shadow_width(card, 0, 0);
     qz_obj_set_bg_color(card, QZ_FILL_PRESSED, LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(card, (lv_opa_t)material_opa, LV_STATE_PRESSED);
@@ -892,10 +1241,7 @@ lv_obj_t *qz_card_button(lv_obj_t *parent, int width, int height)
     lv_obj_set_style_pad_all(card, 0, 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     qz_add_press_feedback(card);
-    qz_add_touch_glint(card);
-    /* Press scale costs an ARGB layer of width x height, keep it for the
-     * compact cards (tiles, home cards) and let wide rows just tint. */
-    if (width <= 260 && height <= 160) qz_add_press_scale(card, 97);
+    /* Touch feedback stays a single causal colour response. */
     return card;
 }
 
@@ -906,9 +1252,28 @@ lv_obj_t *qz_card_button(lv_obj_t *parent, int width, int height)
 lv_obj_t *qz_back_button(lv_obj_t *parent)
 {
     lv_obj_t *btn = qz_icon_button(parent, LV_SYMBOL_LEFT, QZ_TOUCH_BACK);
-    /* 视觉上仍是原来的小圆，但把命中区往外扩一圈：小屏上拇指也点得中。 */
-    lv_obj_set_ext_click_area(btn, 8);
+    lv_obj_clean(btn);
+    lv_obj_t *glyph = qz_icon_image(btn, QZ_ICON_CHEVRON_LEFT,
+                                    qz_design_px(QZ_TOUCH_BACK / 2),
+                                    qz_color(QZ_TEXT));
+    if (glyph) lv_obj_center(glyph);
+    /* 视觉上仍是原来的小圆，命中区由 qz_touch_target 补到物理下限；再往外
+     * 多给一圈，因为在页头里它边上没有别的控件可抢。 */
+    lv_obj_set_ext_click_area(btn, qz_touch_target(btn) + 4);
     return btn;
+}
+
+/* 滚动条是"这根列表还能拽"的反馈，不是装饰：静止时不该有一条灰线钉在屏幕
+ * 边缘（290 宽的屏上尤其显眼）。LVGL 的 AUTO 是"内容能滚就常显"，ACTIVE 才是
+ * "正在滚时才显"。同时把它压细、往内收，免得贴着边框像掉了一根线。 */
+static void style_scrollbar(lv_obj_t *obj)
+{
+    lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_ACTIVE);
+    lv_obj_set_style_width(obj, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(obj, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_50, LV_PART_SCROLLBAR);
+    qz_obj_set_bg_color(obj, QZ_TEXT_TERTIARY, LV_PART_SCROLLBAR);
 }
 
 void qz_make_scrollable(lv_obj_t *obj)
@@ -916,7 +1281,7 @@ void qz_make_scrollable(lv_obj_t *obj)
     if (!obj) return;
     lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(obj, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
+    style_scrollbar(obj);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLL_ELASTIC);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLL_MOMENTUM);
 }
@@ -931,7 +1296,7 @@ lv_obj_t *qz_page_scroll(lv_obj_t *screen, int32_t top)
     lv_obj_set_style_shadow_width(area, 0, 0);
     lv_obj_set_style_pad_all(area, 0, 0);
     lv_obj_set_scroll_dir(area, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(area, LV_SCROLLBAR_MODE_AUTO);
+    style_scrollbar(area);
     lv_obj_add_flag(area, LV_OBJ_FLAG_SCROLL_ELASTIC);
     lv_obj_add_flag(area, LV_OBJ_FLAG_SCROLL_MOMENTUM);
     return area;
@@ -957,7 +1322,8 @@ lv_obj_t *qz_button(lv_obj_t *parent, const char *caption, int width, int height
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, width, height);
-    lv_obj_set_style_radius(btn, height / 2, 0);
+    qz_touch_target(btn);
+    lv_obj_set_style_radius(btn, 4, 0);
     qz_obj_set_bg_color(btn, QZ_FILL, 0);
     qz_obj_set_bg_color(btn, QZ_FILL_PRESSED, LV_STATE_PRESSED);
     lv_obj_set_style_border_width(btn, 0, 0);
@@ -965,18 +1331,32 @@ lv_obj_t *qz_button(lv_obj_t *parent, const char *caption, int width, int height
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     qz_add_press_feedback(btn);
-    qz_add_press_scale(btn, 96);
     lv_obj_t *caption_label = qz_text(btn, caption, 15, qz_color(QZ_TEXT));
     lv_obj_center(caption_label);
     return btn;
+}
+
+lv_obj_t *qz_chip(lv_obj_t *parent, const char *caption, int width, int height)
+{
+    lv_obj_t *chip = qz_button(parent, caption, width, height);
+    /* Suggestion chips are compact keys, not decorative pills. */
+    qz_obj_set_bg_color(chip, QZ_ACCENT_TINT, 0);
+    qz_obj_set_bg_color(chip, QZ_FILL_PRESSED, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_grad_dir(chip, LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_border_width(chip, 0, 0);
+    lv_obj_set_style_radius(chip, 4, 0);
+    lv_obj_t *caption_label = lv_obj_get_child(chip, 0);
+    if (caption_label) qz_obj_set_text_color(caption_label, QZ_ACCENT_TEXT, 0);
+    return chip;
 }
 
 lv_obj_t *qz_icon_button(lv_obj_t *parent, const char *icon, int size)
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, size, size);
-    /* A filled circle, so it also reads on top of the glass bar. */
-    lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
+    qz_touch_target(btn);
+    /* Square-ish controls align to the workstation grid. */
+    lv_obj_set_style_radius(btn, 5, 0);
     qz_obj_set_bg_color(btn, QZ_FILL, 0);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
     qz_obj_set_bg_color(btn, QZ_FILL_PRESSED, LV_STATE_PRESSED);
@@ -985,8 +1365,6 @@ lv_obj_t *qz_icon_button(lv_obj_t *parent, const char *icon, int size)
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     qz_add_press_feedback(btn);
-    qz_add_press_scale(btn, 96);
-    qz_add_touch_glint(btn);
     lv_obj_t *label = qz_symbol(btn, icon, size / 2, qz_color(QZ_TEXT));
     lv_obj_center(label);
     return btn;
@@ -994,19 +1372,15 @@ lv_obj_t *qz_icon_button(lv_obj_t *parent, const char *icon, int size)
 
 void qz_style_primary_button(lv_obj_t *obj)
 {
-    /* Apple ships exactly two button materials. This is the prominent one:
-     * opaque accent fill, white label, capsule. Nothing shows through it — it
-     * is the one action the screen is asking for. */
-    lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, 0);
+    /* The single decisive action on a screen. */
+    lv_obj_set_style_radius(obj, 4, 0);
     qz_obj_set_bg_color(obj, QZ_ACCENT, 0);
     lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_NONE, 0);
     qz_obj_set_bg_color(obj, QZ_ACCENT_DARK, LV_STATE_PRESSED);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_shadow_width(obj, 0, 0);
-    lv_obj_set_style_shadow_offset_y(obj, 5, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     qz_add_press_feedback(obj);
-    qz_add_touch_glint(obj);
 }
 
 void qz_add_press_feedback(lv_obj_t *obj)
@@ -1025,7 +1399,7 @@ void qz_add_press_feedback(lv_obj_t *obj)
     bool *ready = reduce_motion ? &reduced_press_transition_ready : &press_transition_ready;
     if (!*ready) {
         lv_style_transition_dsc_init(transition, props, lv_anim_path_ease_out,
-                                     reduce_motion ? 0 : 140, 0, NULL);
+                                     reduce_motion ? 0 : QZ_DUR_PRESS, 0, NULL);
         *ready = true;
     }
     lv_obj_set_style_transition(obj, transition, 0);
@@ -1118,117 +1492,45 @@ void qz_add_press_scale(lv_obj_t *obj, int32_t percent)
 /* Touch glint                                                                */
 /* ------------------------------------------------------------------------- */
 
-/** Lives in the top layer so it is never clipped or laid out by a flex parent. */
-static lv_obj_t *touch_glint;
-
-static void entrance_opa(void *var, int32_t value);   /* defined below */
-
-static lv_obj_t *glint_create(void)
-{
-    lv_obj_t *glint = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(glint, 72, 72);
-    lv_obj_set_style_radius(glint, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(glint, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(glint, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(glint, 0, 0);
-    lv_obj_set_style_pad_all(glint, 0, 0);
-    /* Two concentric discs fake a soft radial falloff: the plain software
-     * renderer has no radial gradients. */
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t *ring = lv_obj_create(glint);
-        int size = i == 0 ? 44 : 22;
-        lv_obj_set_size(ring, size, size);
-        lv_obj_center(ring);
-        lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(ring, lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(ring, i == 0 ? (lv_opa_t)70 : (lv_opa_t)110, 0);
-        lv_obj_set_style_border_width(ring, 0, 0);
-        lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
-    }
-    lv_obj_clear_flag(glint, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(glint, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(glint, LV_OBJ_FLAG_HIDDEN);
-    return glint;
-}
-
-static void glint_follow(void)
-{
-    lv_indev_t *indev = lv_indev_get_act();
-    lv_point_t point;
-    if (!indev || !touch_glint) return;
-    lv_indev_get_point(indev, &point);
-    (lv_obj_set_pos)(touch_glint, point.x - qz_scale_x(36), point.y - qz_scale_y(36));
-}
-
-/** Fade the glint out. Safe to call when nothing is showing. */
-static void glint_hide(void)
-{
-    lv_anim_t fade;
-    if (!touch_glint) return;
-    lv_anim_init(&fade);
-    lv_anim_set_var(&fade, touch_glint);
-    lv_anim_set_exec_cb(&fade, entrance_opa);
-    lv_anim_set_values(&fade, lv_obj_get_style_opa(touch_glint, 0), LV_OPA_TRANSP);
-    lv_anim_set_duration(&fade, QZ_DUR_SMALL);
-    qz_anim_ease_out(&fade);
-    lv_anim_start(&fade);
-}
-
-/** The glint lives outside the pressed widget, so it also listens on the input
- *  device: a press that ends because the widget was deleted (a screen change,
- *  a row removing itself) never reaches the widget's own handlers and would
- *  otherwise leave the highlight stuck on screen. */
-static void glint_indev_event(lv_event_t *event)
-{
-    lv_event_code_t code = lv_event_get_code(event);
-    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) glint_hide();
-}
-
-static void glint_event(lv_event_t *event)
-{
-    lv_event_code_t code = lv_event_get_code(event);
-    lv_anim_t fade;
-    if (!touch_glint) touch_glint = glint_create();
-
-    if (code == LV_EVENT_PRESSED) {
-        glint_follow();
-        lv_obj_clear_flag(touch_glint, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_opa(touch_glint, LV_OPA_TRANSP, 0);
-        lv_anim_init(&fade);
-        lv_anim_set_var(&fade, touch_glint);
-        lv_anim_set_exec_cb(&fade, entrance_opa);
-        lv_anim_set_values(&fade, LV_OPA_TRANSP, LV_OPA_COVER);
-        lv_anim_set_duration(&fade, QZ_DUR_PRESS);
-        qz_anim_ease_out(&fade);
-        lv_anim_start(&fade);
-    } else if (code == LV_EVENT_PRESSING) {
-        glint_follow();
-    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST ||
-               code == LV_EVENT_CLICKED) {
-        glint_hide();
-    }
-}
+static void glint_hide(void) {}
 
 void qz_add_touch_glint(lv_obj_t *obj)
 {
-    static bool indev_hooked;
-    if (!obj || reduce_motion) return;
+    /* Compatibility hook. The workstation language uses state colour and
+     * content motion instead of a moving specular highlight. */
+    (void)obj;
+}
 
-    if (!indev_hooked) {
-        for (lv_indev_t *indev = lv_indev_get_next(NULL); indev;
-             indev = lv_indev_get_next(indev)) {
-            if (lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) continue;
-            lv_indev_add_event_cb(indev, glint_indev_event, LV_EVENT_ALL, NULL);
-        }
-        indev_hooked = true;
+/** 当前盖在页面上的遮罩/弹层：手势用它判断"这一下返回该不该交给弹层"。 */
+#define QZ_OVERLAY_MAX 8
+static lv_obj_t *overlays[QZ_OVERLAY_MAX];
+static int overlay_count;
+
+static void overlay_deleted(lv_event_t *event)
+{
+    lv_obj_t *overlay = lv_event_get_target(event);
+    for (int i = 0; i < overlay_count; i++) {
+        if (overlays[i] != overlay) continue;
+        memmove(&overlays[i], &overlays[i + 1], sizeof(overlays[0]) * (overlay_count - i - 1));
+        overlays[--overlay_count] = NULL;
+        return;
     }
+}
 
-    lv_obj_add_event_cb(obj, glint_event, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(obj, glint_event, LV_EVENT_PRESSING, NULL);
-    lv_obj_add_event_cb(obj, glint_event, LV_EVENT_RELEASED, NULL);
-    lv_obj_add_event_cb(obj, glint_event, LV_EVENT_PRESS_LOST, NULL);
-    lv_obj_add_event_cb(obj, glint_event, LV_EVENT_CLICKED, NULL);
+/** 弹层是不是盖在眼前那页上。
+ *
+ *  页面对象一直活着，随手势/语音翻走的那一页上留着的弹层也还在——只认"还
+ *  看得见的"，否则一次"开弹层 → 语音翻页"就把返回手势永久锁死了。 */
+static bool overlay_visible(lv_obj_t *overlay)
+{
+    if (!overlay) return false;
+    lv_display_t *display = lv_obj_get_display(overlay);
+    lv_obj_t *active = lv_display_get_screen_active(display);
+    lv_obj_t *top = lv_display_get_layer_top(display);
+    for (lv_obj_t *object = overlay; object; object = lv_obj_get_parent(object)) {
+        if (object == active || object == top) return true;
+    }
+    return false;
 }
 
 lv_obj_t *qz_overlay_create(lv_obj_t *parent)
@@ -1242,7 +1544,30 @@ lv_obj_t *qz_overlay_create(lv_obj_t *parent)
     lv_obj_set_style_pad_all(overlay, 0, 0);
     lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    if (overlay_count < QZ_OVERLAY_MAX) overlays[overlay_count++] = overlay;
+    lv_obj_add_event_cb(overlay, overlay_deleted, LV_EVENT_DELETE, NULL);
     return overlay;
+}
+
+bool qz_overlay_open(void)
+{
+    for (int i = 0; i < overlay_count; i++) {
+        if (overlay_visible(overlays[i])) return true;
+    }
+    return false;
+}
+
+bool qz_overlay_close_top(void)
+{
+    for (int i = overlay_count - 1; i >= 0; i--) {
+        lv_obj_t *overlay = overlays[i];
+        if (!overlay_visible(overlay)) continue;
+        /* 所有经由 qz_overlay_create() 创建的弹层都把点空白关闭挂在遮罩
+         * 本身；显式发送 CLICKED 比复制各页面自己的关闭状态更可靠。 */
+        lv_obj_send_event(overlay, LV_EVENT_CLICKED, overlay);
+        return true;
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1267,14 +1592,14 @@ void qz_animate_entrance(lv_obj_t *obj, uint32_t delay_ms)
         return;
     }
     lv_obj_set_style_opa(obj, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_translate_y(obj, 12, 0);
+    lv_obj_set_style_translate_y(obj, 2, 0);
 
     lv_anim_t opacity;
     lv_anim_init(&opacity);
     lv_anim_set_var(&opacity, obj);
     lv_anim_set_exec_cb(&opacity, entrance_opa);
     lv_anim_set_values(&opacity, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&opacity, QZ_DUR_PANEL);
+    lv_anim_set_duration(&opacity, QZ_DUR_SMALL);
     lv_anim_set_delay(&opacity, delay_ms);
     qz_anim_ease_out(&opacity);
     lv_anim_start(&opacity);
@@ -1283,8 +1608,8 @@ void qz_animate_entrance(lv_obj_t *obj, uint32_t delay_ms)
     lv_anim_init(&translate);
     lv_anim_set_var(&translate, obj);
     lv_anim_set_exec_cb(&translate, entrance_translate_y);
-    lv_anim_set_values(&translate, 12, 0);
-    lv_anim_set_duration(&translate, QZ_DUR_PANEL);
+    lv_anim_set_values(&translate, 2, 0);
+    lv_anim_set_duration(&translate, QZ_DUR_SMALL);
     lv_anim_set_delay(&translate, delay_ms);
     qz_anim_ease_out(&translate);
     lv_anim_start(&translate);
@@ -1313,19 +1638,165 @@ void qz_animate_pop_in(lv_obj_t *obj)
     lv_anim_start(&opacity);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Screen history
+ *
+ * 返回键和侧滑返回共用这条历史：MOVE_LEFT 是往前翻一页（入栈），MOVE_RIGHT
+ * 是退回去（出栈）。页面对象一直活着，所以这里只记"刚才是从哪来的"，退回去
+ * 不需要销毁任何东西。
+ * ------------------------------------------------------------------------- */
+#define QZ_NAV_DEPTH 8
+static lv_obj_t *nav_stack[QZ_NAV_DEPTH];
+static int nav_depth;
+
+/** 少数页面有比"退回上一页"更细的返回逻辑（对话页要先收键盘），登记在这里。 */
+#define QZ_BACK_HANDLERS 4
+static struct {
+    lv_obj_t *screen;
+    void (*handler)(void);
+} back_handlers[QZ_BACK_HANDLERS];
+
+void qz_screen_set_back_handler(lv_obj_t *screen, void (*handler)(void))
+{
+    if (!screen || !handler) return;
+    int free_slot = -1;
+    for (int i = 0; i < QZ_BACK_HANDLERS; i++) {
+        if (back_handlers[i].screen == screen) {
+            back_handlers[i].handler = handler;
+            return;
+        }
+        if (!back_handlers[i].screen && free_slot < 0) free_slot = i;
+    }
+    if (free_slot >= 0) {
+        back_handlers[free_slot].screen = screen;
+        back_handlers[free_slot].handler = handler;
+    }
+}
+
+static void nav_record(lv_obj_t *screen)
+{
+    if (!screen) return;
+    if (nav_depth > 0 && nav_stack[nav_depth - 1] == screen) return;
+    if (nav_depth == QZ_NAV_DEPTH) {
+        /* 满栈就丢掉最老的一页：用户记得住的是刚才那几屏。 */
+        memmove(nav_stack, nav_stack + 1, sizeof(nav_stack[0]) * (QZ_NAV_DEPTH - 1));
+        nav_depth--;
+    }
+    nav_stack[nav_depth++] = screen;
+}
+
+static void nav_push(lv_obj_t *screen)
+{
+    /* 第一次导航时栈还是空的（主页是开机时直接 load 的），把离开的那页补成起点。 */
+    if (nav_depth == 0) nav_record(lv_screen_active());
+    nav_record(screen);
+}
+
+static void nav_pop(lv_obj_t *screen)
+{
+    if (lv_screen_active() == screen) return;   /* 原地重载：历史不动 */
+    if (nav_depth > 0 && nav_stack[nav_depth - 1] == lv_screen_active()) nav_depth--;
+    /* 目标页未必紧挨着上一页：小程序既能回主页也能回应用页，WLAN 页也能直接
+     * 回主页。一路退到它为止；真找不到就把它当成新的起点。 */
+    while (nav_depth > 0 && nav_stack[nav_depth - 1] != screen) nav_depth--;
+    if (nav_depth == 0) nav_record(screen);
+}
+
+void qz_screen_back(void)
+{
+    lv_obj_t *active = lv_screen_active();
+    for (int i = 0; i < QZ_BACK_HANDLERS; i++) {
+        if (back_handlers[i].screen == active && back_handlers[i].handler) {
+            back_handlers[i].handler();
+            return;
+        }
+    }
+    if (nav_depth < 2) return;
+    qz_screen_load(nav_stack[nav_depth - 2], LV_SCR_LOAD_ANIM_MOVE_RIGHT, QZ_DUR_SCREEN);
+}
+
+/* A second navigation request must not cancel a screen animation halfway
+ * through: LVGL snaps the interrupted page into place before starting the next
+ * one, which reads as a flash. Keep only the newest request and start it after
+ * the current SCREEN_LOADED event has fully unwound. */
+static lv_obj_t *nav_transition_target;
+static lv_obj_t *nav_pending_target;
+static lv_scr_load_anim_t nav_pending_anim;
+static uint32_t nav_pending_duration;
+static bool nav_pending_scheduled;
+static int nav_motion_token;
+
+static void nav_pending_start(void *unused)
+{
+    (void)unused;
+    nav_pending_scheduled = false;
+    if (!nav_pending_target) return;
+    lv_obj_t *target = nav_pending_target;
+    lv_scr_load_anim_t anim = nav_pending_anim;
+    uint32_t duration = nav_pending_duration;
+    nav_pending_target = NULL;
+    qz_screen_load(target, anim, duration);
+}
+
+static void nav_screen_loaded(lv_event_t *event)
+{
+    lv_obj_t *loaded = lv_event_get_target(event);
+    if (loaded != nav_transition_target) return;
+    nav_transition_target = NULL;
+    if (!nav_pending_target || nav_pending_scheduled) return;
+    nav_pending_scheduled = true;
+    /* Queue for the next timer tick; starting a new load inside SCREEN_LOADED
+     * would race LVGL's own cleanup of the previous transition. */
+    if (lv_async_call(nav_pending_start, NULL) != LV_RESULT_OK) {
+        nav_pending_scheduled = false;
+        nav_pending_target = NULL;
+    }
+}
+
 void qz_screen_load(lv_obj_t *screen, lv_scr_load_anim_t anim, uint32_t duration_ms)
 {
     if (!screen) return;
+    /* 记历史要用调用方原本的动画方向，减速动效把它换成淡入之前就得记完。 */
+    if (anim == LV_SCR_LOAD_ANIM_MOVE_LEFT) nav_push(screen);
+    else if (anim == LV_SCR_LOAD_ANIM_MOVE_RIGHT) nav_pop(screen);
     /* A screen change can delete the widget that was being pressed, which is
      * exactly when the release event never arrives. */
     glint_hide();
     /* Bring the page about to be shown up to the current material. */
     material_apply_tree(screen);
-    if (reduce_motion) {
-        /* Reduced motion still needs the change to be legible: cross fade
-         * instead of a slide, and no movement. */
-        lv_screen_load_anim(screen, LV_SCR_LOAD_ANIM_FADE_ON, QZ_DUR_SMALL, 0, false);
+
+    if (nav_transition_target) {
+        nav_pending_target = screen;
+        nav_pending_anim = reduce_motion ? LV_SCR_LOAD_ANIM_FADE_ON : anim;
+        nav_pending_duration = reduce_motion ? QZ_DUR_QUICK : duration_ms;
         return;
     }
+
+    if (screen == lv_screen_active()) return;
+
+    if (reduce_motion) {
+        /* Reduced motion still needs the change to be legible: cross fade
+         * instead of a slide, and no translation. */
+        anim = LV_SCR_LOAD_ANIM_FADE_ON;
+        duration_ms = QZ_DUR_QUICK;
+    }
+    if (duration_ms == 0) {
+        lv_screen_load_anim(screen, anim, 0, 0, false);
+        return;
+    }
+
+    lv_obj_t *previous = lv_screen_active();
     lv_screen_load_anim(screen, anim, duration_ms, 0, false);
+
+    lv_anim_t *incoming = lv_anim_get(screen, NULL);
+    if (!incoming) return;  /* LVGL treated it as an immediate load. */
+    lv_anim_t *outgoing = previous ? lv_anim_get(previous, NULL) : NULL;
+    qz_anim_ease_in_out(incoming);
+    if (outgoing) qz_anim_ease_in_out(outgoing);
+
+    nav_transition_target = screen;
+    /* One watcher per destination, replaced rather than accumulated. */
+    lv_obj_remove_event_cb_with_user_data(screen, nav_screen_loaded, &nav_motion_token);
+    lv_obj_add_event_cb(screen, nav_screen_loaded, LV_EVENT_SCREEN_LOADED,
+                        &nav_motion_token);
 }

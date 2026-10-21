@@ -20,6 +20,7 @@
 
 static lv_obj_t *screens[QZ_APPLET_COUNT];
 static lv_obj_t *apps_screen_ref;
+static lv_obj_t *back_screen_ref;
 
 static void set_page_button_enabled(lv_obj_t *button, bool enabled)
 {
@@ -31,28 +32,17 @@ static void set_page_button_enabled(lv_obj_t *button, bool enabled)
 static void go_back(lv_event_t *event)
 {
     (void)event;
-    qz_screen_load(apps_screen_ref, LV_SCR_LOAD_ANIM_MOVE_RIGHT, QZ_DUR_SCREEN);
+    qz_screen_load(back_screen_ref ? back_screen_ref : apps_screen_ref,
+                   LV_SCR_LOAD_ANIM_MOVE_RIGHT, QZ_DUR_SCREEN);
 }
 
 static lv_obj_t *make_toolbar(lv_obj_t *screen, const char *title)
 {
-    lv_obj_t *toolbar = lv_obj_create(screen);
-    lv_obj_set_size(toolbar, QZ_DESIGN_W - 16, 48);
-    lv_obj_align(toolbar, LV_ALIGN_TOP_MID, 0, 6);
-    qz_style_toolbar(toolbar);
-    lv_obj_set_style_radius(toolbar, 16, 0);
-    lv_obj_set_style_border_width(toolbar, 0, 0);
-    lv_obj_set_style_shadow_width(toolbar, 0, 0);
-    lv_obj_set_style_pad_all(toolbar, 0, 0);
-    lv_obj_clear_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *back = qz_back_button(toolbar);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_t *header = qz_page_header(screen, title);
+    lv_obj_t *back = qz_back_button(header);
+    lv_obj_align(back, LV_ALIGN_LEFT_MID, 4, 0);
     lv_obj_add_event_cb(back, go_back, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *label = qz_text(toolbar, title, 20, qz_color(QZ_TEXT));
-    lv_obj_align(label, LV_ALIGN_LEFT_MID, 58, 0);
-    return toolbar;
+    return header;
 }
 
 static lv_obj_t *make_card(lv_obj_t *screen, int y, int height)
@@ -60,7 +50,7 @@ static lv_obj_t *make_card(lv_obj_t *screen, int y, int height)
     lv_obj_t *card = lv_obj_create(screen);
     lv_obj_set_size(card, CONTENT_W, height);
     lv_obj_align(card, LV_ALIGN_TOP_LEFT, QZ_GUTTER, y);
-    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_radius(card, QZ_RADIUS_CARD, 0);
     qz_style_plate(card);
     lv_obj_set_style_shadow_width(card, 0, 0);
     lv_obj_set_style_pad_all(card, 0, 0);
@@ -287,7 +277,10 @@ static void reminders_loaded(bool ok, const char *body, void *data)
         count++;
     }
     reminder_count = count;
-    rebuild_reminders();
+    /* 列表只在提醒页显示时才重建：定时器现在不管在哪个页面都会拉这份缓存
+     * （主页的「接下来」卡要读它），翻了页重建只是白跑一趟。 */
+    if (!add_overlay && lv_screen_active() == screens[QZ_APPLET_REMINDER])
+        rebuild_reminders();
 }
 
 static bool reminders_reload(void)
@@ -295,6 +288,16 @@ static bool reminders_reload(void)
     if (reminders_loading) return true;
     reminders_loading = qz_web_request_async("GET", "/api/timers", NULL, reminders_loaded, NULL);
     return reminders_loading;
+}
+
+/** 进提醒页时按缓存重画一次，再对一次核心：同步可能在别的页面上就完成了，
+ *  那时列表按"只在提醒页重建"的规矩没有重建。 */
+static void reminder_screen_loaded(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_SCREEN_LOADED) return;
+    if (add_overlay) return;
+    rebuild_reminders();
+    reminders_reload();
 }
 
 static void remove_reminder(lv_event_t *event);
@@ -358,6 +361,11 @@ static void rebuild_reminders(void)
         lv_obj_t *time_label = qz_text(row, clock, qz_compact() ? 20 : 17, qz_color(QZ_TEXT));
         lv_obj_align(time_label, LV_ALIGN_LEFT_MID, 14, 0);
         lv_obj_add_flag(time_label, LV_OBJ_FLAG_CLICKABLE);
+        /* 时间本身是编辑入口，字只有 38×19 实像素。标签按内容定宽，构造时
+         * 还没有坐标，先让它落一次版再补命中区；上下左右都没有别的可点对象
+         * （删除键在最右边），直接补到物理下限。 */
+        lv_obj_update_layout(row);
+        qz_touch_target(time_label);
         lv_obj_add_event_cb(time_label, edit_reminder, LV_EVENT_CLICKED,
                             (void *)(intptr_t)reminders[i].id);
 
@@ -500,7 +508,7 @@ static void style_roller(lv_obj_t *roller)
     lv_obj_set_style_text_line_space(roller, 14, LV_PART_MAIN);
     qz_obj_set_bg_color(roller, QZ_FILL, LV_PART_SELECTED);
     lv_obj_set_style_bg_opa(roller, LV_OPA_COVER, LV_PART_SELECTED);
-    lv_obj_set_style_radius(roller, 10, LV_PART_SELECTED);
+    lv_obj_set_style_radius(roller, 3, LV_PART_SELECTED);
     qz_obj_set_text_color(roller, QZ_TEXT, LV_PART_SELECTED);
     lv_obj_set_style_text_font(roller, qz_font_size(17), LV_PART_SELECTED);
 }
@@ -520,6 +528,33 @@ static void reminder_input_focus(lv_event_t *event)
     lv_keyboard_set_textarea(keyboard, lv_event_get_target(event));
     lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_CANCEL, NULL);
+}
+
+/** 开关行：整行可点，点文字也能切换。
+ *
+ *  弹层里一行只有 24 设计像素高，开关自己更小（紧凑面板上 28×18 实像素）。
+ *  把说明文字和开关放进同一条整宽行，命中面就从一枚小圆点变成整行。 */
+static void switch_row_clicked(lv_event_t *event)
+{
+    lv_obj_t *sw = (lv_obj_t *)lv_event_get_user_data(event);
+    if (!sw) return;
+    if (lv_obj_has_state(sw, LV_STATE_CHECKED)) lv_obj_remove_state(sw, LV_STATE_CHECKED);
+    else lv_obj_add_state(sw, LV_STATE_CHECKED);
+}
+
+static lv_obj_t *switch_row(lv_obj_t *parent, int y, int height, const char *caption,
+                            int caption_px)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, lv_pct(100), height);
+    lv_obj_align(row, LV_ALIGN_TOP_LEFT, 0, y);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *label = qz_text(row, caption, caption_px, qz_color(QZ_TEXT));
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+    return row;
 }
 
 static void open_add_modal(lv_event_t *event)
@@ -577,12 +612,12 @@ static void open_add_modal(lv_event_t *event)
     style_roller(add_minute_roller);
     lv_roller_set_selected(add_minute_roller, (uint32_t)local_now.tm_min, LV_ANIM_OFF);
 
-    lv_obj_t *daily_caption = qz_text(panel, "每日重复", 13, qz_color(QZ_TEXT));
-    lv_obj_align(daily_caption, LV_ALIGN_TOP_LEFT, 0, 140);
-    add_daily_switch = lv_switch_create(panel);
+    lv_obj_t *daily_row = switch_row(panel, 136, qz_compact() ? 32 : 26, "每日重复", 13);
+    add_daily_switch = lv_switch_create(daily_row);
     qz_style_switch(add_daily_switch);
     lv_obj_set_size(add_daily_switch, qz_compact() ? 60 : 42, qz_compact() ? 32 : 26);
-    lv_obj_align(add_daily_switch, LV_ALIGN_TOP_RIGHT, 0, 136);
+    lv_obj_align(add_daily_switch, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(daily_row, switch_row_clicked, LV_EVENT_CLICKED, add_daily_switch);
 
     add_name_input = lv_textarea_create(panel);
     lv_textarea_set_one_line(add_name_input, true);
@@ -604,12 +639,12 @@ static void open_add_modal(lv_event_t *event)
     lv_obj_align(add_date_input, LV_ALIGN_TOP_LEFT, 0, 202);
     lv_textarea_set_text(add_date_input, reminder_edit_id ? reminder_edit_value.date : "");
 
-    lv_obj_t *enabled_caption = qz_text(panel, "启用提醒", 12, qz_color(QZ_TEXT));
-    lv_obj_align(enabled_caption, LV_ALIGN_TOP_LEFT, 0, 240);
-    add_enabled_switch = lv_switch_create(panel);
+    lv_obj_t *enabled_row = switch_row(panel, 234, 26, "启用提醒", 12);
+    add_enabled_switch = lv_switch_create(enabled_row);
     qz_style_switch(add_enabled_switch);
     lv_obj_set_size(add_enabled_switch, 42, 24);
-    lv_obj_align(add_enabled_switch, LV_ALIGN_TOP_RIGHT, 0, 236);
+    lv_obj_align(add_enabled_switch, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(enabled_row, switch_row_clicked, LV_EVENT_CLICKED, add_enabled_switch);
     if (!reminder_edit_id || reminder_edit_value.enabled) lv_obj_add_state(add_enabled_switch, LV_STATE_CHECKED);
 
     if (reminder_edit_id) {
@@ -629,11 +664,15 @@ static void open_add_modal(lv_event_t *event)
     lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    /* 这排按钮的底板压在「启用提醒」那一行上：底板自己要透明可穿透，
+     * 否则被盖住的下半行点不动。 */
+    lv_obj_clear_flag(actions, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *cancel = qz_button(actions, "取消", 88, qz_compact() ? 44 : 32);
     lv_obj_add_event_cb(cancel, close_add_modal, LV_EVENT_CLICKED, NULL);
     lv_obj_t *confirm = lv_button_create(actions);
     lv_obj_set_size(confirm, 96, qz_compact() ? 44 : 32);
+    qz_touch_target(confirm);
     qz_style_primary_button(confirm);
     lv_obj_t *caption = qz_text(confirm, "确定", 14, qz_color(QZ_TEXT_ON_ACCENT));
     lv_obj_center(caption);
@@ -647,8 +686,9 @@ static void open_add_modal(lv_event_t *event)
  *  屏幕上。 */
 static void reminder_poll(void)
 {
-    if (lv_screen_active() != screens[QZ_APPLET_REMINDER] || add_overlay) return;
-    if (reminders_reload()) rebuild_reminders();
+    /* 提醒列表定期与核心对齐：语音刚加的、或刚响过被撤掉的一次性提醒。
+     * 主页的「接下来」卡读的是同一份缓存，所以不在提醒页也要继续拉。 */
+    reminders_reload();
 }
 
 static void build_reminder_screen(void)
@@ -656,19 +696,17 @@ static void build_reminder_screen(void)
     lv_obj_t *screen = lv_obj_create(NULL);
     qz_style_screen(screen);
     screens[QZ_APPLET_REMINDER] = screen;
+    lv_obj_add_event_cb(screen, reminder_screen_loaded, LV_EVENT_SCREEN_LOADED, NULL);
     make_toolbar(screen, "定时提醒");
 
     reminder_list = make_card(screen, 56, 166);
     reminder_banner = make_card(screen, 56, 64);
-    /* A banner is chrome floating over the page, so it is the one surface here
-     * that keeps a shadow; the fill itself stays a plain white plate. */
     qz_obj_set_bg_color(reminder_banner, QZ_CARD, 0);
     lv_obj_set_style_bg_opa(reminder_banner, LV_OPA_COVER, 0);
-    lv_obj_set_style_shadow_width(reminder_banner, 12, 0);
-    lv_obj_set_style_shadow_opa(reminder_banner, (lv_opa_t)52, 0);
-    qz_obj_set_shadow_color(reminder_banner, QZ_SHADOW, 0);
-    lv_obj_set_style_shadow_offset_y(reminder_banner, 4, 0);
+    lv_obj_set_style_shadow_width(reminder_banner, 0, 0);
     qz_material_register(reminder_banner, true);
+    /* 提示条只是反馈，不能拦住下面的提醒行。删除确认需要第二次点到原删除键。 */
+    lv_obj_clear_flag(reminder_banner, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(reminder_banner, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t *bell = qz_symbol(reminder_banner, LV_SYMBOL_BELL, 15, qz_color(QZ_ACCENT));
     lv_obj_align(bell, LV_ALIGN_LEFT_MID, CARD_PAD, 0);
@@ -715,11 +753,21 @@ static void build_reminder_screen(void)
  * 于是语音说的"开始番茄钟"和屏幕上的按钮动的是同一个计时器，切页面、退出界面
  * 都不会把它弄丢；换阶段与结束时的播报由核心写进聊天记录。界面保留一个本地
  * 倒计时，只为让秒数看起来是连续走的，每隔几拍与核心对一次表。 */
-static lv_obj_t *pomo_arc;
+static lv_obj_t *pomo_workbench;
 static lv_obj_t *pomo_clock;
 static lv_obj_t *pomo_phase_chip;
+static lv_obj_t *pomo_stage_dot;
+static lv_obj_t *pomo_progress_caption;
+static lv_obj_t *pomo_progress;
+static lv_obj_t *pomo_round_track;
 static lv_obj_t *pomo_count;
+static lv_obj_t *pomo_end_caption;
+static lv_obj_t *pomo_local_clock;
+static lv_obj_t *pomo_start_button;
 static lv_obj_t *pomo_start_caption;
+static lv_obj_t *pomo_start_play;
+static lv_obj_t *pomo_start_pause;
+static lv_obj_t *pomo_stop_button;
 
 static bool pomo_active;
 static bool pomo_paused;
@@ -728,29 +776,54 @@ static int pomo_remaining;
 static int pomo_phase_total = 25 * 60;
 static int pomo_done;
 static int pomo_cycles = 4;
-static int pomo_preset;
 static int pomo_next_focus = 25;
 static int pomo_next_break = 5;
 static int pomo_next_cycles = 4;
-static lv_obj_t *pomo_custom_overlay;
-static lv_obj_t *pomo_custom_inputs[3];
-static lv_obj_t *pomo_auto_switch;
 static bool pomo_next_auto_break = true;
-static lv_obj_t *pomo_preset_caption;
+static bool pomo_config_loaded;
+static uintptr_t pomo_request_epoch = 1;
+static int pomo_round_track_count;
+static int pomo_visual_stage = -1;
+
+static lv_obj_t *pomo_settings_overlay;
+static lv_obj_t *pomo_settings_panel;
+static lv_obj_t *pomo_edit_labels[3];
+static lv_obj_t *pomo_preset_buttons[3];
+static lv_obj_t *pomo_auto_switch;
+static int pomo_edit_focus = 25;
+static int pomo_edit_break = 5;
+static int pomo_edit_cycles = 4;
 static const int pomo_presets[][3] = {{25, 5, 4}, {45, 10, 2}, {15, 5, 4}};
+static char pomo_notice[96];
+static bool pomo_notice_error;
+
 /** 番茄钟页每这么多拍（秒）与核心对一次表。 */
 #define POMO_POLL_TICKS 5
+#define POMO_PROGRESS_MS 380
+#define POMO_SETTINGS_W 264
+#define POMO_SETTINGS_H 304
+#define POMO_MAX_MINUTES 180
+#define POMO_MAX_CYCLES 12
 
 static void pomo_refresh(void);
 
 /** 把核心返回的番茄钟状态读进界面变量。 */
 static bool pomo_sync(const char *json)
 {
+    const char *state;
     char phase[16] = "";
     bool flag = false;
     int value = 0;
     int focus_minutes = 25;
     int break_minutes = 5;
+    int total_cycles = 4;
+    bool auto_break = true;
+
+    if (!json) return false;
+    /* /api/pomodoro 返回 {"ok":true,"state":{...},"message":"..."}。
+     * 旧核心曾经把字段直接平铺在顶层，这里继续兼容。 */
+    state = qz_json_value(json, "state");
+    if (state && *state == '{') json = state;
 
     if (!qz_json_bool(json, "active", &flag)) return false;
     pomo_active = flag;
@@ -760,29 +833,59 @@ static bool pomo_sync(const char *json)
         pomo_break = strcmp(phase, "break") == 0;
     }
     if (qz_json_int(json, "remaining_seconds", &value)) pomo_remaining = value < 0 ? 0 : value;
-    if (qz_json_int(json, "completed_cycles", &value)) pomo_done = value;
-    if (qz_json_int(json, "total_cycles", &value) && value > 0) pomo_cycles = value;
+    if (qz_json_int(json, "completed_cycles", &value)) pomo_done = value < 0 ? 0 : value;
+    if (qz_json_int(json, "total_cycles", &value) && value > 0) total_cycles = value;
     qz_json_int(json, "focus_minutes", &focus_minutes);
     qz_json_int(json, "break_minutes", &break_minutes);
+    qz_json_bool(json, "auto_break", &auto_break);
+    if (total_cycles < 1) total_cycles = 1;
+    if (total_cycles > POMO_MAX_CYCLES) total_cycles = POMO_MAX_CYCLES;
+    if (focus_minutes < 1) focus_minutes = 1;
+    if (focus_minutes > POMO_MAX_MINUTES) focus_minutes = POMO_MAX_MINUTES;
+    if (break_minutes < 1) break_minutes = 1;
+    if (break_minutes > POMO_MAX_MINUTES) break_minutes = POMO_MAX_MINUTES;
+    pomo_cycles = total_cycles;
+    if (pomo_done > pomo_cycles) pomo_done = pomo_cycles;
+
+    if (!pomo_config_loaded) {
+        pomo_next_focus = focus_minutes;
+        pomo_next_break = break_minutes;
+        pomo_next_cycles = total_cycles;
+        pomo_next_auto_break = auto_break;
+        pomo_config_loaded = true;
+    }
+
     pomo_phase_total = (pomo_break ? break_minutes : focus_minutes) * 60;
     if (pomo_phase_total <= 0) pomo_phase_total = 60;
+    if (pomo_remaining > pomo_phase_total) pomo_remaining = pomo_phase_total;
     return true;
 }
 
 static bool pomo_loading;
 
+static void pomo_set_notice(const char *text, bool error)
+{
+    snprintf(pomo_notice, sizeof(pomo_notice), "%s", text ? text : "");
+    pomo_notice_error = error;
+}
+
 static void pomo_loaded(bool ok, const char *body, void *data)
 {
-    (void)data;
     pomo_loading = false;
-    if (ok && pomo_sync(body)) pomo_refresh();
-    else if (pomo_phase_chip) lv_label_set_text(pomo_phase_chip, "未同步，请检查服务");
+    if ((uintptr_t)data != pomo_request_epoch) return;
+    if (ok && pomo_sync(body)) {
+        pomo_refresh();
+    } else {
+        pomo_set_notice("未同步，请检查服务", true);
+        pomo_refresh();
+    }
 }
 
 static bool pomo_reload(void)
 {
     if (pomo_loading) return true;
-    pomo_loading = qz_web_request_async("GET", "/api/pomodoro", NULL, pomo_loaded, NULL);
+    pomo_loading = qz_web_request_async("GET", "/api/pomodoro", NULL, pomo_loaded,
+                                        (void *)pomo_request_epoch);
     return pomo_loading;
 }
 
@@ -797,16 +900,24 @@ static void pomo_request_done(bool ok, const char *body, void *user_data)
         char error[96];
         if (!qz_json_string(body, "error", error, sizeof(error)))
             snprintf(error, sizeof(error), "操作失败，请重试");
-        lv_label_set_text(pomo_phase_chip, error);
+        pomo_set_notice(error, true);
+        pomo_refresh();
         return;
     }
-    if (pomo_sync(body)) pomo_refresh();
+    if (pomo_sync(body)) {
+        pomo_set_notice(NULL, false);
+        pomo_refresh();
+    } else {
+        pomo_set_notice("状态解析失败，请重试", true);
+        pomo_refresh();
+    }
 }
 
 static void pomo_send(const char *action)
 {
     if (pomo_busy) return;
     char payload[160];
+    pomo_request_epoch++;
 
     if (strcmp(action, "start") == 0) {
         snprintf(payload, sizeof(payload),
@@ -814,42 +925,213 @@ static void pomo_send(const char *action)
             pomo_next_focus, pomo_next_break, pomo_next_cycles, pomo_next_auto_break ? "true" : "false");
     } else snprintf(payload, sizeof(payload), "{\"action\":\"%s\"}", action);
     pomo_busy = true;
-    lv_label_set_text(pomo_phase_chip, "执行中，请稍候");
+    pomo_set_notice("正在同步…", false);
+    pomo_refresh();
     if (!qz_web_request_async("POST", "/api/pomodoro", payload, pomo_request_done, NULL)) {
         pomo_busy = false;
-        lv_label_set_text(pomo_phase_chip, "无法发起操作，请重试");
+        pomo_set_notice("无法发起操作，请重试", true);
+        pomo_refresh();
+    }
+}
+
+static void pomo_progress_anim(void *var, int32_t value)
+{
+    lv_bar_set_value((lv_obj_t *)var, value, LV_ANIM_OFF);
+}
+
+static void pomo_progress_set(int value)
+{
+    if (!pomo_progress) return;
+    lv_anim_delete(pomo_progress, pomo_progress_anim);
+    if (qz_reduce_motion() || lv_bar_get_value(pomo_progress) == value) {
+        lv_bar_set_value(pomo_progress, value, LV_ANIM_OFF);
+        return;
+    }
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, pomo_progress);
+    lv_anim_set_exec_cb(&anim, pomo_progress_anim);
+    lv_anim_set_values(&anim, lv_bar_get_value(pomo_progress), value);
+    lv_anim_set_duration(&anim, POMO_PROGRESS_MS);
+    qz_anim_ease_out(&anim);
+    lv_anim_start(&anim);
+}
+
+static void pomo_round_track_build(void)
+{
+    if (!pomo_round_track) return;
+    int cycles = pomo_cycles < 1 ? 1
+               : pomo_cycles > POMO_MAX_CYCLES ? POMO_MAX_CYCLES : pomo_cycles;
+    int gap = cycles > 8 ? 2 : 3;
+    int32_t track_w = qz_scale_x(208);
+    int32_t track_h = qz_scale_y(8);
+    int32_t gap_px = qz_scale_x(gap);
+    int32_t bar_w = (track_w - (cycles - 1) * gap_px) / cycles;
+    int32_t bar_h = qz_scale_y(6);
+    if (bar_w < 3) bar_w = 3;
+    if (bar_h < 1) bar_h = 1;
+    int32_t used = cycles * bar_w + (cycles - 1) * gap_px;
+    int32_t start = (track_w - used) / 2;
+
+    lv_obj_clean(pomo_round_track);
+    for (int i = 0; i < cycles; i++) {
+        lv_obj_t *bar = lv_obj_create(pomo_round_track);
+        /* Position the bars in physical pixels: design-unit rounding can push
+         * the last bar one pixel outside a narrow round track. */
+        (lv_obj_set_size)(bar, bar_w, bar_h);
+        (lv_obj_set_pos)(bar, start + i * (bar_w + gap_px), (track_h - bar_h) / 2);
+        lv_obj_set_style_radius(bar, 1, 0);
+        lv_obj_set_style_border_width(bar, 0, 0);
+        lv_obj_set_style_pad_all(bar, 0, 0);
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        qz_obj_set_bg_color(bar, QZ_FILL, 0);
+    }
+    pomo_round_track_count = cycles;
+}
+
+static void pomo_round_track_refresh(void)
+{
+    if (!pomo_round_track) return;
+    if (pomo_round_track_count != pomo_cycles) pomo_round_track_build();
+    uint32_t child_count = lv_obj_get_child_count(pomo_round_track);
+    for (uint32_t i = 0; i < child_count; i++) {
+        lv_obj_t *bar = lv_obj_get_child(pomo_round_track, i);
+        qz_color_token_t color = QZ_FILL;
+        if ((int)i < pomo_done) color = QZ_ACCENT;
+        else if (pomo_active && (int)i == pomo_done)
+            color = pomo_break ? QZ_GREEN : QZ_ACCENT_DARK;
+        qz_obj_set_bg_color(bar, color, 0);
+    }
+}
+
+static void pomo_footer_refresh(void)
+{
+    if (!pomo_end_caption) return;
+    if (pomo_notice[0]) {
+        lv_label_set_text(pomo_end_caption, pomo_notice);
+        qz_obj_set_text_color(pomo_end_caption,
+                              pomo_notice_error ? QZ_RED : QZ_TEXT_SECONDARY, 0);
+        return;
+    }
+
+    char text[64];
+    if (!pomo_active) {
+        snprintf(text, sizeof(text), "开始后计算结束时刻");
+    } else if (pomo_paused) {
+        snprintf(text, sizeof(text), pomo_break ? "继续后开始休息" : "继续后计算结束时刻");
+    } else if (pomo_remaining <= 0) {
+        snprintf(text, sizeof(text), "正在切换阶段");
+    } else {
+        time_t end = time(NULL) + pomo_remaining;
+        struct tm local;
+        localtime_r(&end, &local);
+        snprintf(text, sizeof(text), "预计 %02d:%02d 结束", local.tm_hour, local.tm_min);
+    }
+    lv_label_set_text(pomo_end_caption, text);
+    qz_obj_set_text_color(pomo_end_caption, QZ_TEXT_SECONDARY, 0);
+}
+
+static void pomo_local_clock_refresh(void)
+{
+    if (!pomo_local_clock) return;
+    time_t now = time(NULL);
+    struct tm local;
+    char text[24];
+    localtime_r(&now, &local);
+    snprintf(text, sizeof(text), "本地 %02d:%02d", local.tm_hour, local.tm_min);
+    lv_label_set_text(pomo_local_clock, text);
+}
+
+static void pomo_busy_refresh(void)
+{
+    if (pomo_start_button) {
+        if (pomo_busy) lv_obj_add_state(pomo_start_button, LV_STATE_DISABLED);
+        else lv_obj_remove_state(pomo_start_button, LV_STATE_DISABLED);
+    }
+    if (pomo_stop_button) {
+        if (pomo_busy || !pomo_active) lv_obj_add_state(pomo_stop_button, LV_STATE_DISABLED);
+        else lv_obj_remove_state(pomo_stop_button, LV_STATE_DISABLED);
     }
 }
 
 static void pomo_refresh(void)
 {
-    lv_arc_set_range(pomo_arc, 0, pomo_phase_total);
-    lv_arc_set_value(pomo_arc, pomo_phase_total - pomo_remaining);
-    /* Focus is the accent; rest is the healthy-state green. */
-    lv_obj_set_style_arc_color(pomo_arc, qz_color(pomo_break ? QZ_GREEN : QZ_ACCENT),
-                               LV_PART_INDICATOR);
+    if (!pomo_clock || !pomo_phase_chip || !pomo_progress) return;
+
+    int total = pomo_active ? (pomo_phase_total > 0 ? pomo_phase_total : 60)
+                            : pomo_next_focus * 60;
+    if (total < 1) total = 60;
+    int shown = pomo_active ? pomo_remaining : pomo_next_focus * 60;
+    int progress = pomo_active ? total - pomo_remaining : 0;
+    if (progress < 0) progress = 0;
+    if (progress > total) progress = total;
+    lv_bar_set_range(pomo_progress, 0, total);
+    pomo_progress_set(progress);
+    qz_obj_set_bg_color(pomo_progress, pomo_break && pomo_active ? QZ_GREEN : QZ_ACCENT,
+                        LV_PART_INDICATOR);
+    if (pomo_progress_caption) {
+        lv_label_set_text(pomo_progress_caption,
+                          pomo_break && pomo_active ? "休息进度" : "专注进度");
+        qz_obj_set_text_color(pomo_progress_caption,
+                              pomo_break && pomo_active ? QZ_GREEN : QZ_ACCENT_TEXT, 0);
+    }
 
     char clock[16];
-    snprintf(clock, sizeof(clock), "%02d:%02d", pomo_remaining / 60, pomo_remaining % 60);
+    snprintf(clock, sizeof(clock), "%02d:%02d", shown / 60, shown % 60);
     lv_label_set_text(pomo_clock, clock);
     if (!pomo_active) {
-        lv_label_set_text(pomo_phase_chip, "未开始");
-        lv_obj_set_style_text_color(pomo_phase_chip, qz_color(QZ_TEXT_TERTIARY), 0);
+        lv_label_set_text(pomo_phase_chip, "准备专注");
+        qz_obj_set_text_color(pomo_phase_chip, QZ_TEXT_TERTIARY, 0);
     } else if (pomo_paused) {
-        lv_label_set_text(pomo_phase_chip, "已暂停");
-        lv_obj_set_style_text_color(pomo_phase_chip, qz_color(QZ_TEXT_SECONDARY), 0);
+        lv_label_set_text(pomo_phase_chip, pomo_break ? "休息已暂停" : "专注已暂停");
+        qz_obj_set_text_color(pomo_phase_chip, QZ_TEXT_SECONDARY, 0);
+    } else if (pomo_break) {
+        lv_label_set_text(pomo_phase_chip, "休息");
+        qz_obj_set_text_color(pomo_phase_chip, QZ_GREEN, 0);
     } else {
-        lv_label_set_text(pomo_phase_chip, pomo_break ? "休息一下" : "专注中");
-        lv_obj_set_style_text_color(pomo_phase_chip,
-                                   qz_color(pomo_break ? QZ_GREEN : QZ_ACCENT_TEXT), 0);
+        lv_label_set_text(pomo_phase_chip, "专注");
+        qz_obj_set_text_color(pomo_phase_chip, QZ_ACCENT_TEXT, 0);
     }
+    if (pomo_stage_dot) {
+        qz_color_token_t dot = !pomo_active ? QZ_TEXT_TERTIARY
+                             : pomo_paused ? QZ_ORANGE
+                             : pomo_break ? QZ_GREEN : QZ_ACCENT;
+        qz_obj_set_bg_color(pomo_stage_dot, dot, 0);
+    }
+
+    pomo_round_track_refresh();
     char count[40];
-    snprintf(count, sizeof(count), "已完成 %d/%d 轮", pomo_done, pomo_cycles);
+    if (pomo_active && !pomo_break)
+        snprintf(count, sizeof(count), "第 %d / %d 轮", pomo_done + 1, pomo_cycles);
+    else
+        snprintf(count, sizeof(count), "已完成 %d / %d 轮", pomo_done, pomo_cycles);
     lv_label_set_text(pomo_count, count);
+
     if (pomo_start_caption) {
-        lv_label_set_text(pomo_start_caption,
-                          !pomo_active ? "开始" : (pomo_paused ? "继续" : "暂停"));
+        const char *caption = "暂停";
+        if (!pomo_active) caption = "开始专注";
+        else if (pomo_paused) caption = pomo_break ? "继续休息" : "继续专注";
+        lv_label_set_text(pomo_start_caption, caption);
     }
+    if (pomo_start_play && pomo_start_pause) {
+        bool running = pomo_active && !pomo_paused;
+        if (running) lv_obj_add_flag(pomo_start_play, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(pomo_start_play, LV_OBJ_FLAG_HIDDEN);
+        if (running) lv_obj_clear_flag(pomo_start_pause, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(pomo_start_pause, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    int stage = pomo_active ? (pomo_break ? 2 : 1) : 0;
+    if (pomo_visual_stage >= 0 && stage != pomo_visual_stage) {
+        if (pomo_clock) qz_animate_pop_in(pomo_clock);
+        if (pomo_phase_chip) qz_animate_pop_in(pomo_phase_chip);
+    }
+    pomo_visual_stage = stage;
+
+    pomo_local_clock_refresh();
+    pomo_footer_refresh();
+    pomo_busy_refresh();
 }
 
 /** 每拍走一秒；换阶段与结束由核心判定，这里只让秒数看起来是连续走的。 */
@@ -857,17 +1139,15 @@ static void pomo_tick(void)
 {
     static int since_sync;
 
-    if (since_sync <= 0) {
-        since_sync = POMO_POLL_TICKS;
+    if (++since_sync >= POMO_POLL_TICKS) {
+        since_sync = 0;
         pomo_reload();
-        if (lv_screen_active() == screens[QZ_APPLET_POMODORO]) pomo_refresh();
-        return;
     }
-    since_sync--;
     if (pomo_active && !pomo_paused && pomo_remaining > 0) {
         pomo_remaining--;
-        pomo_refresh();
+        if (pomo_remaining == 0) pomo_reload();
     }
+    if (lv_screen_active() == screens[QZ_APPLET_POMODORO]) pomo_refresh();
 }
 
 static void pomo_toggle(lv_event_t *event)
@@ -884,99 +1164,279 @@ static void pomo_reset(lv_event_t *event)
     pomo_send("stop");
 }
 
-static void pomo_custom_close(lv_event_t *event)
+static void pomo_settings_render(void)
 {
-    (void)event;
-    if (pomo_custom_overlay) lv_obj_delete(pomo_custom_overlay);
-    pomo_custom_overlay = NULL;
+    char text[16];
+    int values[3] = {pomo_edit_focus, pomo_edit_break, pomo_edit_cycles};
+    for (int i = 0; i < 3; i++) {
+        if (!pomo_edit_labels[i]) continue;
+        snprintf(text, sizeof(text), "%d", values[i]);
+        lv_label_set_text(pomo_edit_labels[i], text);
+    }
+
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *button = pomo_preset_buttons[i];
+        if (!button) continue;
+        bool selected = values[0] == pomo_presets[i][0] &&
+                        values[1] == pomo_presets[i][1] &&
+                        values[2] == pomo_presets[i][2];
+        qz_obj_set_bg_color(button, selected ? QZ_ACCENT_TINT : QZ_FILL, 0);
+        qz_obj_set_border_color(button, QZ_ACCENT, 0);
+        lv_obj_set_style_border_width(button, selected ? 1 : 0, 0);
+        lv_obj_t *label = lv_obj_get_child(button, 0);
+        if (label) qz_obj_set_text_color(label, selected ? QZ_ACCENT_TEXT : QZ_TEXT, 0);
+    }
 }
 
-static void pomo_custom_save(lv_event_t *event)
+static void pomo_step_changed(lv_event_t *event)
+{
+    intptr_t code = (intptr_t)lv_event_get_user_data(event);
+    int index = (int)(code / 2);
+    int delta = (code % 2) ? 1 : -1;
+    int *values[3] = {&pomo_edit_focus, &pomo_edit_break, &pomo_edit_cycles};
+    int limits[3] = {POMO_MAX_MINUTES, POMO_MAX_MINUTES, POMO_MAX_CYCLES};
+    if (index < 0 || index > 2) return;
+    *values[index] += delta;
+    if (*values[index] < 1) *values[index] = 1;
+    if (*values[index] > limits[index]) *values[index] = limits[index];
+    pomo_settings_render();
+}
+
+static void pomo_preset_chosen(lv_event_t *event)
+{
+    intptr_t index = (intptr_t)lv_event_get_user_data(event);
+    if (index < 0 || index > 2) return;
+    pomo_edit_focus = pomo_presets[index][0];
+    pomo_edit_break = pomo_presets[index][1];
+    pomo_edit_cycles = pomo_presets[index][2];
+    pomo_settings_render();
+}
+
+static void pomo_settings_delete_ready(lv_anim_t *anim)
+{
+    lv_obj_t *overlay = (lv_obj_t *)anim->var;
+    if (overlay) lv_obj_delete(overlay);
+}
+
+static void pomo_settings_translate_x(void *var, int32_t value)
+{
+    /* Animation values are already physical pixels; bypass the design-unit
+     * scaling macro so close/open start from the exact current offset. */
+    (lv_obj_set_style_translate_x)((lv_obj_t *)var, value, 0);
+}
+
+static void pomo_scrim_opa(void *var, int32_t value)
+{
+    lv_obj_set_style_bg_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
+}
+
+static void pomo_settings_close(lv_event_t *event)
 {
     (void)event;
-    int *values[3] = {&pomo_next_focus, &pomo_next_break, &pomo_next_cycles};
-    int limits[3] = {120, 120, 12};
-    int pending[3];
-    for (int i = 0; i < 3; i++) {
-        const char *input = lv_textarea_get_text(pomo_custom_inputs[i]);
-        char *end;
-        long value = strtol(input, &end, 10);
-        if (!input[0] || *end || value < 1 || value > limits[i]) {
-            lv_obj_t *label = lv_obj_get_child(pomo_custom_overlay, i * 2);
-            const char *errors[3] = {"专注：1-120分钟", "休息：1-120分钟", "轮数：1-12"};
-            lv_label_set_text(label, errors[i]);
-            return;
-        }
-        pending[i] = (int)value;
+    if (!pomo_settings_overlay) return;
+    lv_obj_t *overlay = pomo_settings_overlay;
+    lv_obj_t *panel = lv_obj_get_child(overlay, 0);
+    pomo_settings_overlay = NULL;
+    pomo_settings_panel = NULL;
+
+    if (qz_reduce_motion() || !panel) {
+        lv_obj_delete(overlay);
+        return;
     }
-    for (int i = 0; i < 3; i++) *values[i] = pending[i];
-    char text[48];
-    snprintf(text, sizeof(text), "%d/%d·%d轮", pomo_next_focus, pomo_next_break, pomo_next_cycles);
-    lv_label_set_text(pomo_preset_caption, text);
+
+    lv_anim_delete(panel, pomo_settings_translate_x);
+    lv_anim_t slide;
+    lv_anim_init(&slide);
+    lv_anim_set_var(&slide, panel);
+    lv_anim_set_exec_cb(&slide, pomo_settings_translate_x);
+    lv_anim_set_values(&slide, lv_obj_get_style_translate_x(panel, 0),
+                       qz_scale_x(POMO_SETTINGS_W + 16));
+    lv_anim_set_duration(&slide, QZ_DUR_PANEL);
+    qz_anim_ease_out(&slide);
+    lv_anim_start(&slide);
+
+    lv_anim_t scrim;
+    lv_anim_init(&scrim);
+    lv_anim_set_var(&scrim, overlay);
+    lv_anim_set_exec_cb(&scrim, pomo_scrim_opa);
+    lv_anim_set_values(&scrim, lv_obj_get_style_bg_opa(overlay, 0), LV_OPA_TRANSP);
+    lv_anim_set_duration(&scrim, QZ_DUR_PANEL);
+    qz_anim_ease_out(&scrim);
+    lv_anim_set_completed_cb(&scrim, pomo_settings_delete_ready);
+    lv_anim_start(&scrim);
+}
+
+static void pomo_settings_dismissed(lv_event_t *event)
+{
+    if (lv_event_get_target(event) != lv_event_get_current_target(event)) return;
+    pomo_settings_close(event);
+}
+
+static void pomo_settings_save(lv_event_t *event)
+{
+    (void)event;
+    pomo_request_epoch++;
+    pomo_next_focus = pomo_edit_focus;
+    pomo_next_break = pomo_edit_break;
+    pomo_next_cycles = pomo_edit_cycles;
     pomo_next_auto_break = lv_obj_has_state(pomo_auto_switch, LV_STATE_CHECKED);
-    pomo_custom_close(NULL);
+    /* An initial GET may still be in flight when the user saves. Treat this
+     * explicit edit as the newer configuration so the late response cannot
+     * overwrite it with the values read before the save. */
+    pomo_config_loaded = true;
+    pomo_set_notice(pomo_active ? "已保存，将在下一次开始时生效" : "节律已更新", false);
+    pomo_settings_close(NULL);
+    pomo_refresh();
 }
 
-static void pomo_number_focus(lv_event_t *event)
+static void pomo_settings_stepper(lv_obj_t *panel, int y, const char *title, int index)
 {
-    lv_obj_t *keyboard = lv_keyboard_create(pomo_custom_overlay);
-    lv_obj_set_size(keyboard, lv_pct(100), 130);
-    lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_NUMBER);
-    lv_keyboard_set_textarea(keyboard, lv_event_get_target(event));
-    lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_READY, NULL);
-    lv_obj_add_event_cb(keyboard, reminder_keyboard_close, LV_EVENT_CANCEL, NULL);
+    lv_obj_t *row = lv_obj_create(panel);
+    lv_obj_set_size(row, POMO_SETTINGS_W - 32, 42);
+    lv_obj_align(row, LV_ALIGN_TOP_LEFT, 16, y);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *label = qz_text(row, title, 12, qz_color(QZ_TEXT));
+    lv_obj_set_width(label, 108);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *minus = qz_icon_button(row, LV_SYMBOL_MINUS, 30);
+    lv_obj_align(minus, LV_ALIGN_RIGHT_MID, -86, 0);
+    lv_obj_add_event_cb(minus, pomo_step_changed, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)(index * 2));
+
+    pomo_edit_labels[index] = qz_text(row, "0", 17, qz_color(QZ_TEXT));
+    lv_obj_set_width(pomo_edit_labels[index], 44);
+    lv_obj_set_style_text_align(pomo_edit_labels[index], LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(pomo_edit_labels[index], LV_ALIGN_RIGHT_MID, -36, 0);
+
+    lv_obj_t *plus = qz_icon_button(row, LV_SYMBOL_PLUS, 30);
+    lv_obj_align(plus, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(plus, pomo_step_changed, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)(index * 2 + 1));
 }
 
-static void pomo_custom_open(lv_event_t *event)
+static void pomo_settings_build(void)
 {
-    (void)event;
-    if (pomo_custom_overlay) return;
-    pomo_custom_overlay = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(pomo_custom_overlay, lv_pct(90), 220);
-    lv_obj_center(pomo_custom_overlay);
-    qz_obj_set_bg_color(pomo_custom_overlay, QZ_CARD, 0);
-    const char *labels[3] = {"专注分钟", "休息分钟", "轮数"};
-    int values[3] = {pomo_next_focus, pomo_next_break, pomo_next_cycles};
+    pomo_settings_panel = lv_obj_create(pomo_settings_overlay);
+    lv_obj_set_size(pomo_settings_panel, POMO_SETTINGS_W, POMO_SETTINGS_H);
+    lv_obj_align(pomo_settings_panel, LV_ALIGN_TOP_RIGHT, -8, 8);
+    qz_style_sheet(pomo_settings_panel);
+    lv_obj_set_style_pad_all(pomo_settings_panel, 0, 0);
+    lv_obj_add_flag(pomo_settings_panel, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *title = qz_text(pomo_settings_panel, "节律编辑", 18, qz_color(QZ_TEXT));
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 16, 8);
+    lv_obj_t *subtitle = qz_text(pomo_settings_panel, "仅影响下一次开始", 10,
+                                 qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_align(subtitle, LV_ALIGN_TOP_LEFT, 16, 31);
+
+    lv_obj_t *close = qz_icon_button(pomo_settings_panel, LV_SYMBOL_CLOSE, 30);
+    lv_obj_align(close, LV_ALIGN_TOP_RIGHT, -10, 7);
+    lv_obj_add_event_cb(close, pomo_settings_close, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *sep = qz_separator(pomo_settings_panel, POMO_SETTINGS_W - 32, false);
+    lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 16, 49);
+
+    const char *titles[3] = {"专注分钟", "休息分钟", "轮次"};
     for (int i = 0; i < 3; i++) {
-        lv_obj_t *label = qz_text(pomo_custom_overlay, labels[i], 12, qz_color(QZ_TEXT));
-        lv_obj_align(label, LV_ALIGN_TOP_LEFT, 10, 10 + i * 42);
-        pomo_custom_inputs[i] = lv_textarea_create(pomo_custom_overlay);
-        lv_textarea_set_one_line(pomo_custom_inputs[i], true);
-        lv_obj_add_event_cb(pomo_custom_inputs[i], pomo_number_focus, LV_EVENT_FOCUSED, NULL);
-        char value_text[12];
-        snprintf(value_text, sizeof(value_text), "%d", values[i]);
-        lv_textarea_set_text(pomo_custom_inputs[i], value_text);
-        lv_textarea_set_accepted_chars(pomo_custom_inputs[i], "0123456789");
-        lv_obj_set_size(pomo_custom_inputs[i], 80, 30);
-        lv_obj_align(pomo_custom_inputs[i], LV_ALIGN_TOP_RIGHT, -10, 5 + i * 42);
+        pomo_settings_stepper(pomo_settings_panel, 55 + i * 44, titles[i], i);
+        if (i < 2) {
+            lv_obj_t *line = qz_separator(pomo_settings_panel, POMO_SETTINGS_W - 32, false);
+            lv_obj_align(line, LV_ALIGN_TOP_LEFT, 16, 97 + i * 44);
+        }
     }
-    lv_obj_t *auto_label = qz_text(pomo_custom_overlay, "自动开始休息", 12, qz_color(QZ_TEXT));
-    lv_obj_align(auto_label, LV_ALIGN_TOP_LEFT, 10, 138);
-    pomo_auto_switch = lv_switch_create(pomo_custom_overlay);
+
+    lv_obj_t *preset_title = qz_text(pomo_settings_panel, "快速预设", 10,
+                                     qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_align(preset_title, LV_ALIGN_TOP_LEFT, 16, 186);
+    for (int i = 0; i < 3; i++) {
+        char caption[16];
+        snprintf(caption, sizeof(caption), "%d/%d/%d", pomo_presets[i][0],
+                 pomo_presets[i][1], pomo_presets[i][2]);
+        lv_obj_t *button = qz_button(pomo_settings_panel, caption, 70, 30);
+        lv_obj_align(button, LV_ALIGN_TOP_LEFT, 16 + i * 78, 201);
+        lv_obj_add_event_cb(button, pomo_preset_chosen, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+        pomo_preset_buttons[i] = button;
+    }
+
+    lv_obj_t *auto_label = qz_text(pomo_settings_panel, "自动开始休息", 11,
+                                   qz_color(QZ_TEXT));
+    lv_obj_align(auto_label, LV_ALIGN_TOP_LEFT, 16, 239);
+    pomo_auto_switch = lv_switch_create(pomo_settings_panel);
     lv_obj_set_size(pomo_auto_switch, 42, 24);
-    lv_obj_align(pomo_auto_switch, LV_ALIGN_TOP_RIGHT, -10, 132);
-    if (pomo_next_auto_break) lv_obj_add_state(pomo_auto_switch, LV_STATE_CHECKED);
-    lv_obj_t *save = qz_button(pomo_custom_overlay, "保存", 80, 34);
-    lv_obj_align(save, LV_ALIGN_BOTTOM_LEFT, 10, -8);
-    lv_obj_add_event_cb(save, pomo_custom_save, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *cancel = qz_button(pomo_custom_overlay, "取消", 80, 34);
-    lv_obj_align(cancel, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
-    lv_obj_add_event_cb(cancel, pomo_custom_close, LV_EVENT_CLICKED, NULL);
+    qz_style_switch(pomo_auto_switch);
+    qz_touch_target(pomo_auto_switch);
+    lv_obj_align(pomo_auto_switch, LV_ALIGN_TOP_RIGHT, -16, 233);
+    if (pomo_next_auto_break)
+        lv_obj_add_state(pomo_auto_switch, LV_STATE_CHECKED);
+
+    lv_obj_t *save = qz_button(pomo_settings_panel, "保存", 130, 35);
+    lv_obj_align(save, LV_ALIGN_BOTTOM_LEFT, 16, -8);
+    qz_style_primary_button(save);
+    lv_obj_t *save_caption = lv_obj_get_child(save, 0);
+    if (save_caption) qz_obj_set_text_color(save_caption, QZ_TEXT_ON_ACCENT, 0);
+    lv_obj_add_event_cb(save, pomo_settings_save, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cancel = qz_button(pomo_settings_panel, "取消", 86, 35);
+    lv_obj_align(cancel, LV_ALIGN_BOTTOM_RIGHT, -16, -8);
+    lv_obj_add_event_cb(cancel, pomo_settings_close, LV_EVENT_CLICKED, NULL);
+
+    pomo_settings_render();
 }
 
-static void pomo_next_preset(lv_event_t *event)
+static void pomo_settings_open(lv_event_t *event)
 {
     (void)event;
-    if (pomo_active) lv_label_set_text(pomo_phase_chip, "预设将在下一次开始时生效");
-    pomo_preset = (pomo_preset + 1) % 3;
-    pomo_next_focus = pomo_presets[pomo_preset][0];
-    pomo_next_break = pomo_presets[pomo_preset][1];
-    pomo_next_cycles = pomo_presets[pomo_preset][2];
-    char text[48];
-    snprintf(text, sizeof(text), "%d/%d·%d轮", pomo_presets[pomo_preset][0],
-             pomo_presets[pomo_preset][1], pomo_presets[pomo_preset][2]);
-    lv_label_set_text(pomo_preset_caption, text);
+    if (pomo_settings_overlay || !screens[QZ_APPLET_POMODORO]) return;
+    pomo_edit_focus = pomo_next_focus;
+    pomo_edit_break = pomo_next_break;
+    pomo_edit_cycles = pomo_next_cycles;
+    memset(pomo_edit_labels, 0, sizeof(pomo_edit_labels));
+    memset(pomo_preset_buttons, 0, sizeof(pomo_preset_buttons));
+    pomo_auto_switch = NULL;
+
+    pomo_settings_overlay = qz_overlay_create(screens[QZ_APPLET_POMODORO]);
+    lv_obj_add_event_cb(pomo_settings_overlay, pomo_settings_dismissed,
+                        LV_EVENT_CLICKED, NULL);
+    pomo_settings_build();
+
+    if (!qz_reduce_motion()) {
+        (lv_obj_set_style_translate_x)(pomo_settings_panel,
+                                       qz_scale_x(POMO_SETTINGS_W + 16), 0);
+        lv_anim_t slide;
+        lv_anim_init(&slide);
+        lv_anim_set_var(&slide, pomo_settings_panel);
+        lv_anim_set_exec_cb(&slide, pomo_settings_translate_x);
+        lv_anim_set_values(&slide, qz_scale_x(POMO_SETTINGS_W + 16), 0);
+        lv_anim_set_duration(&slide, QZ_DUR_PANEL);
+        qz_anim_ease_out(&slide);
+        lv_anim_start(&slide);
+
+        lv_obj_set_style_bg_opa(pomo_settings_overlay, LV_OPA_TRANSP, 0);
+        lv_anim_t scrim;
+        lv_anim_init(&scrim);
+        lv_anim_set_var(&scrim, pomo_settings_overlay);
+        lv_anim_set_exec_cb(&scrim, pomo_scrim_opa);
+        lv_anim_set_values(&scrim, LV_OPA_TRANSP, 110);
+        lv_anim_set_duration(&scrim, QZ_DUR_PANEL);
+        qz_anim_ease_out(&scrim);
+        lv_anim_start(&scrim);
+    }
+}
+
+static void pomo_screen_loaded(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_SCREEN_LOADED || qz_reduce_motion()) return;
+    qz_animate_entrance(pomo_workbench, 0);
+    if (pomo_end_caption) qz_animate_entrance(pomo_end_caption, 35);
+    if (pomo_start_button) qz_animate_entrance(pomo_start_button, 65);
+    if (pomo_stop_button) qz_animate_entrance(pomo_stop_button, 85);
 }
 
 static void build_pomodoro_screen(void)
@@ -984,54 +1444,152 @@ static void build_pomodoro_screen(void)
     lv_obj_t *screen = lv_obj_create(NULL);
     qz_style_screen(screen);
     screens[QZ_APPLET_POMODORO] = screen;
-    make_toolbar(screen, "番茄钟");
+    lv_obj_t *header = make_toolbar(screen, "番茄钟");
 
-    pomo_arc = lv_arc_create(screen);
-    lv_obj_set_size(pomo_arc, 186, 186);
-    lv_obj_align(pomo_arc, LV_ALIGN_TOP_MID, 0, 54);
-    lv_arc_set_rotation(pomo_arc, 135);
-    lv_arc_set_bg_angles(pomo_arc, 0, 270);
-    lv_arc_set_range(pomo_arc, 0, pomo_phase_total);
-    lv_arc_set_value(pomo_arc, 0);
-    lv_obj_remove_style(pomo_arc, NULL, LV_PART_KNOB);
-    lv_obj_clear_flag(pomo_arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_width(pomo_arc, 12, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(pomo_arc, qz_color(QZ_FILL), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(pomo_arc, 12, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(pomo_arc, qz_color(QZ_ACCENT), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(pomo_arc, true, LV_PART_MAIN);
-    lv_obj_set_style_arc_rounded(pomo_arc, true, LV_PART_INDICATOR);
+    lv_obj_t *settings = qz_icon_button(header, LV_SYMBOL_SETTINGS, 32);
+    lv_obj_align(settings, LV_ALIGN_RIGHT_MID, -9, 0);
+    lv_obj_add_event_cb(settings, pomo_settings_open, LV_EVENT_CLICKED, NULL);
 
-    pomo_phase_chip = qz_text(pomo_arc, "专注中", 11, qz_color(QZ_ACCENT_TEXT));
-    lv_obj_align(pomo_phase_chip, LV_ALIGN_CENTER, 0, -38);
+    pomo_workbench = make_card(screen, 58, 166);
 
-    pomo_clock = qz_text(pomo_arc, "25:00", qz_compact() ? 36 : 30, qz_color(QZ_TEXT));
-    lv_obj_align(pomo_clock, LV_ALIGN_CENTER, 0, -4);
+    lv_obj_t *rail = lv_obj_create(pomo_workbench);
+    lv_obj_set_size(rail, 3, 138);
+    lv_obj_align(rail, LV_ALIGN_LEFT_MID, 0, 0);
+    qz_obj_set_bg_color(rail, QZ_ACCENT, 0);
+    lv_obj_set_style_bg_opa(rail, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(rail, 0, 0);
+    lv_obj_set_style_radius(rail, 0, 0);
+    lv_obj_clear_flag(rail, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(rail, LV_OBJ_FLAG_SCROLLABLE);
 
-    pomo_count = qz_text(pomo_arc, "已完成 0 个番茄", 10, qz_color(QZ_TEXT_TERTIARY));
-    lv_obj_align(pomo_count, LV_ALIGN_CENTER, 0, 32);
+    pomo_stage_dot = lv_obj_create(pomo_workbench);
+    lv_obj_set_size(pomo_stage_dot, 7, 7);
+    lv_obj_align(pomo_stage_dot, LV_ALIGN_TOP_LEFT, 16, 17);
+    qz_obj_set_bg_color(pomo_stage_dot, QZ_TEXT_TERTIARY, 0);
+    lv_obj_set_style_bg_opa(pomo_stage_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(pomo_stage_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(pomo_stage_dot, 0, 0);
+    lv_obj_set_style_pad_all(pomo_stage_dot, 0, 0);
+    lv_obj_clear_flag(pomo_stage_dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(pomo_stage_dot, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *preset = qz_button(screen, "25/5·4轮", 144, 48);
-    lv_obj_align(preset, LV_ALIGN_TOP_LEFT, QZ_GUTTER, 258);
-    pomo_preset_caption = lv_obj_get_child(preset, 0);
-    lv_obj_add_event_cb(preset, pomo_next_preset, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(preset, pomo_custom_open, LV_EVENT_LONG_PRESSED, NULL);
+    pomo_phase_chip = qz_text(pomo_workbench, "准备专注", 12,
+                              qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_set_width(pomo_phase_chip, 164);
+    lv_obj_set_height(pomo_phase_chip, 20);
+    lv_label_set_long_mode(pomo_phase_chip, LV_LABEL_LONG_CLIP);
+    lv_obj_align(pomo_phase_chip, LV_ALIGN_TOP_LEFT, 30, 11);
 
-    lv_obj_t *reset = qz_icon_button(screen, LV_SYMBOL_REFRESH, 48);
-    lv_obj_align(reset, LV_ALIGN_TOP_LEFT, 170, 258);
-    lv_obj_add_event_cb(reset, pomo_reset, LV_EVENT_CLICKED, NULL);
+    pomo_clock = qz_text(pomo_workbench, "25:00", 49, qz_color(QZ_TEXT));
+    lv_obj_set_width(pomo_clock, 190);
+    lv_obj_set_height(pomo_clock, 66);
+    lv_obj_align(pomo_clock, LV_ALIGN_TOP_LEFT, 15, 34);
 
-    lv_obj_t *start = lv_button_create(screen);
-    lv_obj_set_size(start, 236, 48);
-    lv_obj_align(start, LV_ALIGN_TOP_RIGHT, -QZ_GUTTER, 258);
-    qz_style_primary_button(start);
-    pomo_start_caption = qz_text(start, "开始", 15, qz_color(QZ_TEXT_ON_ACCENT));
-    lv_obj_center(pomo_start_caption);
-    lv_obj_add_event_cb(start, pomo_toggle, LV_EVENT_CLICKED, NULL);
+    pomo_progress_caption = qz_text(pomo_workbench, "专注进度", 10,
+                                    qz_color(QZ_ACCENT_TEXT));
+    lv_obj_set_width(pomo_progress_caption, 190);
+    lv_obj_set_height(pomo_progress_caption, 20);
+    lv_label_set_long_mode(pomo_progress_caption, LV_LABEL_LONG_CLIP);
+    lv_obj_align(pomo_progress_caption, LV_ALIGN_TOP_LEFT, 16, 110);
+
+    pomo_progress = lv_bar_create(pomo_workbench);
+    lv_obj_set_size(pomo_progress, 190, 8);
+    lv_obj_align(pomo_progress, LV_ALIGN_TOP_LEFT, 16, 132);
+    lv_bar_set_range(pomo_progress, 0, pomo_phase_total);
+    lv_bar_set_value(pomo_progress, 0, LV_ANIM_OFF);
+    qz_obj_set_bg_color(pomo_progress, QZ_FILL, LV_PART_MAIN);
+    qz_obj_set_bg_color(pomo_progress, QZ_ACCENT, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(pomo_progress, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(pomo_progress, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(pomo_progress, 3, LV_PART_MAIN);
+    lv_obj_set_style_radius(pomo_progress, 3, LV_PART_INDICATOR);
+    lv_obj_set_style_border_width(pomo_progress, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(pomo_progress, 0, 0);
+    lv_obj_clear_flag(pomo_progress, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(pomo_progress, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *split = qz_separator(pomo_workbench, 136, true);
+    lv_obj_align(split, LV_ALIGN_TOP_LEFT, 218, 15);
+
+    lv_obj_t *round_caption = qz_text(pomo_workbench, "轮次轨道", 10,
+                                      qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_align(round_caption, LV_ALIGN_TOP_LEFT, 234, 12);
+
+    pomo_count = qz_text(pomo_workbench, "已完成 0 / 4 轮", 15, qz_color(QZ_TEXT));
+    lv_obj_set_width(pomo_count, 200);
+    lv_obj_set_height(pomo_count, 22);
+    lv_label_set_long_mode(pomo_count, LV_LABEL_LONG_DOT);
+    lv_obj_align(pomo_count, LV_ALIGN_TOP_LEFT, 234, 32);
+
+    pomo_round_track = lv_obj_create(pomo_workbench);
+    lv_obj_set_size(pomo_round_track, 208, 8);
+    lv_obj_align(pomo_round_track, LV_ALIGN_TOP_LEFT, 234, 62);
+    lv_obj_set_style_bg_opa(pomo_round_track, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(pomo_round_track, 0, 0);
+    lv_obj_set_style_pad_all(pomo_round_track, 0, 0);
+    lv_obj_clear_flag(pomo_round_track, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(pomo_round_track, LV_OBJ_FLAG_CLICKABLE);
+    pomo_round_track_build();
+
+    lv_obj_t *round_rule = qz_separator(pomo_workbench, 200, false);
+    lv_obj_align(round_rule, LV_ALIGN_TOP_LEFT, 234, 82);
+
+    lv_obj_t *local_caption = qz_text(pomo_workbench, "当前时刻", 10,
+                                      qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_set_width(local_caption, 200);
+    lv_obj_set_height(local_caption, 20);
+    lv_label_set_long_mode(local_caption, LV_LABEL_LONG_CLIP);
+    lv_obj_align(local_caption, LV_ALIGN_TOP_LEFT, 234, 94);
+
+    pomo_local_clock = qz_text(pomo_workbench, "本地 --:--", 23,
+                               qz_color(QZ_TEXT));
+    lv_obj_set_width(pomo_local_clock, 200);
+    lv_obj_align(pomo_local_clock, LV_ALIGN_TOP_LEFT, 234, 114);
+
+    lv_obj_t *local_hint = qz_text(pomo_workbench, "暂停时计时停在当前秒数", 10,
+                                   qz_color(QZ_TEXT_TERTIARY));
+    lv_obj_set_width(local_hint, 200);
+    lv_label_set_long_mode(local_hint, LV_LABEL_LONG_DOT);
+    lv_obj_align(local_hint, LV_ALIGN_TOP_LEFT, 234, qz_compact() ? 142 : 150);
+
+    pomo_end_caption = qz_text(screen, "开始后计算结束时刻", 11,
+                               qz_color(QZ_TEXT_SECONDARY));
+    lv_obj_set_width(pomo_end_caption, CONTENT_W);
+    lv_obj_set_height(pomo_end_caption, 18);
+    lv_obj_set_style_text_align(pomo_end_caption, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(pomo_end_caption, LV_LABEL_LONG_DOT);
+    lv_obj_align(pomo_end_caption, LV_ALIGN_TOP_MID, 0, 236);
+
+    pomo_start_button = lv_button_create(screen);
+    lv_obj_set_size(pomo_start_button, 312, 40);
+    qz_touch_target(pomo_start_button);
+    lv_obj_align(pomo_start_button, LV_ALIGN_BOTTOM_LEFT, QZ_GUTTER, -6);
+    qz_style_primary_button(pomo_start_button);
+    pomo_start_play = qz_icon_image(pomo_start_button, QZ_ICON_PLAYER_PLAY, 20,
+                                    qz_color(QZ_TEXT_ON_ACCENT));
+    if (pomo_start_play) lv_obj_align(pomo_start_play, LV_ALIGN_CENTER, -67, 0);
+    pomo_start_pause = qz_symbol(pomo_start_button, LV_SYMBOL_PAUSE, 18,
+                                 qz_color(QZ_TEXT_ON_ACCENT));
+    lv_obj_align(pomo_start_pause, LV_ALIGN_CENTER, -67, 0);
+    lv_obj_add_flag(pomo_start_pause, LV_OBJ_FLAG_HIDDEN);
+    pomo_start_caption = qz_text(pomo_start_button, "开始专注", 15,
+                                 qz_color(QZ_TEXT_ON_ACCENT));
+    lv_obj_align(pomo_start_caption, LV_ALIGN_CENTER, 14, 0);
+    lv_obj_add_event_cb(pomo_start_button, pomo_toggle, LV_EVENT_CLICKED, NULL);
+
+    pomo_stop_button = qz_button(screen, "结束", 126, 40);
+    lv_obj_align(pomo_stop_button, LV_ALIGN_BOTTOM_RIGHT, -QZ_GUTTER, -6);
+    lv_obj_add_event_cb(pomo_stop_button, pomo_reset, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *stop_caption = lv_obj_get_child(pomo_stop_button, 0);
+    if (stop_caption) lv_obj_align(stop_caption, LV_ALIGN_CENTER, 12, 0);
+    lv_obj_t *stop_icon = qz_icon_image(pomo_stop_button, QZ_ICON_X, 16, qz_color(QZ_TEXT));
+    if (stop_icon) lv_obj_align(stop_icon, LV_ALIGN_CENTER, -30, 0);
+
+    lv_obj_add_event_cb(screen, pomo_screen_loaded, LV_EVENT_SCREEN_LOADED, NULL);
 
     /* 建页时先对一次表：核心可能已经有一段在跑的番茄钟（语音开的） */
-    pomo_reload();
     pomo_refresh();
+    pomo_reload();
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1200,6 +1758,7 @@ static void device_row(lv_obj_t *parent, int index, int y)
     lv_obj_t *toggle = lv_switch_create(row);
     qz_style_switch(toggle);
     lv_obj_set_size(toggle, 60, 32);
+    qz_touch_target(toggle);
     lv_obj_align(toggle, LV_ALIGN_RIGHT_MID, -10, 0);
     if (device->has_state && device->state) lv_obj_add_state(toggle, LV_STATE_CHECKED);
     if (!device->online) lv_obj_add_state(toggle, LV_STATE_DISABLED);
@@ -1392,7 +1951,9 @@ static void build_compact_control(lv_obj_t *screen, lv_obj_t *toolbar)
         lv_obj_set_size(slider, CONTENT_W - 160, 26);
         lv_obj_align(slider, LV_ALIGN_TOP_LEFT, 54, y + 34);
         qz_style_slider(slider);
-        lv_obj_set_ext_click_area(slider, 5);
+        /* 拖拽条本体只有 20 实像素高，补到物理下限；行距 48 实像素，
+         * 两条滑条的命中区之间还留得下缝。 */
+        qz_touch_target(slider);
         lv_slider_set_range(slider, 0, 100);
         lv_slider_set_value(slider, *rows[i].value, LV_ANIM_OFF);
         char text[8];
@@ -1412,6 +1973,7 @@ static void build_compact_control(lv_obj_t *screen, lv_obj_t *toolbar)
     lv_obj_t *toggle = lv_switch_create(control_local_card);
     qz_style_switch(toggle);
     lv_obj_set_size(toggle, 60, 32);
+    qz_touch_target(toggle);
     lv_obj_align(toggle, LV_ALIGN_TOP_RIGHT, -CARD_PAD, 148);
     lv_obj_add_state(toggle, LV_STATE_CHECKED);
     control_core_value = qz_text(control_local_card, "顶部刷新可重新连接核心", 14,
@@ -1979,4 +2541,94 @@ void qz_applets_init(lv_obj_t *apps_screen)
 lv_obj_t *qz_applets_screen(qz_applet_t id)
 {
     return screens[id];
+}
+
+void qz_applets_set_back(lv_obj_t *screen)
+{
+    back_screen_ref = screen;
+}
+
+/** 这条提醒距离下一次响还有多少分钟；不会再响的（过期的一次性提醒）返回 -1。
+ *
+ *  与核心 `fire_due_reminders()` 同一套判断：每日提醒取今天或明天那一次，
+ *  写了日期的一次性提醒只在当天算数，没写日期的按"下一次时钟对上"算，
+ *  也就是今天还没到就今天、已经过了就明天。 */
+static int reminder_minutes_until(const reminder_t *reminder, const struct tm *now)
+{
+    int now_minutes = now->tm_hour * 60 + now->tm_min;
+    int target = reminder->hour * 60 + reminder->minute;
+
+    if (reminder->daily) {
+        int delta = target - now_minutes;
+        return delta > 0 ? delta : delta + 24 * 60;
+    }
+    if (reminder->date[0] != '\0') {
+        int year, month, day;
+        if (sscanf(reminder->date, "%4d-%2d-%2d", &year, &month, &day) != 3) return -1;
+        struct tm when;
+        memset(&when, 0, sizeof(when));
+        when.tm_year = year - 1900;
+        when.tm_mon = month - 1;
+        when.tm_mday = day;
+        when.tm_isdst = -1;
+        struct tm today = *now;
+        today.tm_hour = 0;
+        today.tm_min = 0;
+        today.tm_sec = 0;
+        today.tm_isdst = -1;
+        time_t today_at = mktime(&today);
+        time_t when_at = mktime(&when);
+        if (today_at == (time_t)-1 || when_at == (time_t)-1) return -1;
+        /* 用两个本地零点的差算天数：能跨过夏令时的 23/25 小时日。 */
+        long days = (long)((when_at - today_at) / (24 * 60 * 60));
+        if (days < 0) return -1;                     /* 那天已经过去 */
+        int delta = (int)days * 24 * 60 + target - now_minutes;
+        return delta > 0 ? delta : -1;               /* 今天的时间也已过 */
+    }
+    int delta = target - now_minutes;
+    return delta > 0 ? delta : delta + 24 * 60;
+}
+
+void qz_applets_glance(qz_applets_glance_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->focus_active = pomo_active;
+    out->focus_paused = pomo_paused;
+    out->focus_break = pomo_break;
+    out->focus_remaining = pomo_remaining;
+
+    time_t now = time(NULL);
+    struct tm local;
+    localtime_r(&now, &local);
+    int best = -1;
+    for (int i = 0; i < reminder_count; i++) {
+        if (!reminders[i].enabled) continue;
+        int minutes = reminder_minutes_until(&reminders[i], &local);
+        if (minutes < 0 || (best >= 0 && minutes >= best)) continue;
+        best = minutes;
+        out->has_reminder = true;
+        out->reminder_in_minutes = minutes;
+        out->reminder_hour = reminders[i].hour;
+        out->reminder_minute = reminders[i].minute;
+        /* 按完整字符截，半个汉字会以乱码出现在主页上。 */
+        size_t used = 0;
+        const char *text = reminders[i].label;
+        while (*text && used + 1 < sizeof(out->reminder_label)) {
+            unsigned char lead = (unsigned char)*text;
+            size_t width = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+            if (used + width + 1 > sizeof(out->reminder_label)) break;
+            memcpy(out->reminder_label + used, text, width);
+            used += width;
+            text += width;
+        }
+        out->reminder_label[used] = '\0';
+    }
+}
+
+qz_face_state_t qz_applets_focus_face(void)
+{
+    if (!pomo_active) return QZ_FACE_IDLE;
+    if (pomo_paused) return QZ_FACE_SLEEPY;
+    return pomo_break ? QZ_FACE_HAPPY : QZ_FACE_THINKING;
 }

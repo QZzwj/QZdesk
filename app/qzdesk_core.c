@@ -300,6 +300,11 @@ bool qzdesk_core_request_performance(void)
     return send_json("{\"type\":\"performance_request\"}");
 }
 
+bool qzdesk_core_request_bridge(void)
+{
+    return send_json("{\"type\":\"bridge_request\"}");
+}
+
 bool qzdesk_core_refresh_weather(void)
 {
     return send_json("{\"type\":\"weather_refresh\"}");
@@ -331,11 +336,10 @@ bool qzdesk_core_send_text(const char *text)
     int written;
     if (!text || text[0] == '\0') return false;
 
-    /* The cloud protocol only accepts audio as user input, so a typed message
-     * cannot go out as-is: the core synthesises it locally (sherpa-onnx) and
-     * sends the resulting speech through the same Opus path the microphone
-     * uses. The GUI's job is to hand the text over — `chat_text` is that
-     * hand-off, and the core answers with state messages while it works. */
+    /* The core sends typed text upstream directly as listen/detect/text. If the
+     * current cloud endpoint does not accept that message, it falls back to a
+     * local speech turn. The GUI only hands over the text and waits for the
+     * asynchronous command acknowledgement. */
     written = snprintf(json, sizeof(json),
                        "{\"type\":\"chat_text\",\"request_id\":%llu,\"text\":\"", ++text_request_id);
     if (written < 0 || (size_t)written >= sizeof(json)) return false;
@@ -441,6 +445,18 @@ static void dispatch_message(const char *json, qzdesk_core_event_cb_t callback, 
         json_string(json, "role", event.role, sizeof(event.role));
     } else if (strcmp(type, "activation") == 0) {
         event.type = QZDESK_CORE_EVENT_ACTIVATION;
+    } else if (strcmp(type, "asr") == 0) {
+        /* 「我听到的是这句」：刚识别出来的用户语音，界面用来核对识别结果。 */
+        event.type = QZDESK_CORE_EVENT_ASR;
+    } else if (strcmp(type, "emotion") == 0) {
+        /* 云端给本轮回复附加的表情。协议 ID 的含义由界面层映射，核心只搬运。 */
+        event.type = QZDESK_CORE_EVENT_EMOTION;
+    } else if (strcmp(type, "bridge") == 0) {
+        /* 手机输入桥的扫码地址：地址与端口都由核心算好，界面只负责画成二维码。
+         * ok=false 时 text 是原因（比如没连网），界面据此提示而不是画一个空码。 */
+        event.type = QZDESK_CORE_EVENT_BRIDGE;
+        const char *ok = qz_json_value(json, "ok");
+        event.ok = ok && strncmp(ok, "true", 4) == 0;
     } else if (strcmp(type, "weather") == 0) {
         /* 天气：核心已经把数值取整、把单位统一好，这里只做搬运。 */
         double number;
@@ -455,6 +471,9 @@ static void dispatch_message(const char *json, qzdesk_core_event_cb_t callback, 
         /* 有温度才代表这份快照带真实数据；其余字段缺了就保持 0。 */
         /* 0 是合法值（0% 降水、夜里的紫外线就是 0）：用 -1 表示「字段没来」 */
         weather->precipitation = -1;
+        /* 临近降水同理：0 = 正在下雨，-1 = 未来两小时没有雨。 */
+        weather->near_precipitation_minutes = -1;
+        weather->near_precipitation_probability = -1;
         weather->uv_x10 = -1;
         if (json_double(json, "temperature", &number)) {
             weather->has_data = true;
@@ -465,6 +484,8 @@ static void dispatch_message(const char *json, qzdesk_core_event_cb_t callback, 
         if (json_double(json, "high", &number)) weather->high = rounded(number);
         if (json_double(json, "low", &number)) weather->low = rounded(number);
         if (json_double(json, "precipitation", &number)) weather->precipitation = rounded(number);
+        json_int(json, "near_precipitation_minutes", &weather->near_precipitation_minutes);
+        json_int(json, "near_precipitation_probability", &weather->near_precipitation_probability);
         if (json_double(json, "uv", &number)) weather->uv_x10 = rounded(number * 10.0);
         json_string(json, "sunrise", weather->sunrise, sizeof(weather->sunrise));
         json_string(json, "sunset", weather->sunset, sizeof(weather->sunset));
@@ -535,11 +556,21 @@ static void dispatch_message(const char *json, qzdesk_core_event_cb_t callback, 
         return;
     }
     if (event.type == QZDESK_CORE_EVENT_ACTIVATION) json_string(json, "code", event.text, sizeof(event.text));
-    else if (event.type == QZDESK_CORE_EVENT_CHAT || event.type == QZDESK_CORE_EVENT_TOAST) {
+    else if (event.type == QZDESK_CORE_EVENT_BRIDGE) {
+        /* 成功时地址在 url，失败时原因在 text：界面只读 text 一个字段。 */
+        if (!json_string(json, "url", event.text, sizeof(event.text)))
+            json_string(json, "text", event.text, sizeof(event.text));
+    }
+    else if (event.type == QZDESK_CORE_EVENT_CHAT || event.type == QZDESK_CORE_EVENT_TOAST ||
+             event.type == QZDESK_CORE_EVENT_ASR) {
         json_string(json, "text", event.text, sizeof(event.text));
+    }
+    else if (event.type == QZDESK_CORE_EVENT_EMOTION) {
+        json_string(json, "emotion", event.emotion, sizeof(event.emotion));
     }
     /* 天气与性能自己没有 text 字段（或为空），不能按"空文本"丢掉。 */
     if (event.type == QZDESK_CORE_EVENT_WEATHER || event.type == QZDESK_CORE_EVENT_PERFORMANCE ||
+        event.type == QZDESK_CORE_EVENT_EMOTION ||
         event.text[0] != '\0') {
         deliver(&event, callback, user_data);
     }

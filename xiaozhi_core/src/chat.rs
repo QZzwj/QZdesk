@@ -124,7 +124,10 @@ impl ChatHub {
 
         {
             // 广播订阅者 panic 过也不该让聊天记录跟着失效，所以中毒时取回数据继续用。
-            let mut history = self.history.lock().unwrap_or_else(|error| error.into_inner());
+            let mut history = self
+                .history
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if history.len() >= HISTORY_LIMIT {
                 history.pop_front();
             }
@@ -137,7 +140,10 @@ impl ChatHub {
 
     /// 现有记录的快照（老的在前），给新打开的 web 页面补齐用。
     pub fn history(&self) -> Vec<ChatEntry> {
-        let history = self.history.lock().unwrap_or_else(|error| error.into_inner());
+        let history = self
+            .history
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         history.iter().cloned().collect()
     }
 
@@ -164,7 +170,8 @@ impl ChatHub {
 
 fn append_line(path: &Path, line: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|error| format!("无法创建 {}: {}", dir.display(), error))?;
+        fs::create_dir_all(dir)
+            .map_err(|error| format!("无法创建 {}: {}", dir.display(), error))?;
     }
     let mut file = OpenOptions::new()
         .create(true)
@@ -176,9 +183,12 @@ fn append_line(path: &Path, line: &str) -> Result<(), String> {
 
 /// 只留最近 `HISTORY_KEEP` 行，重写整个文件。
 fn compact(path: &Path) -> Result<(), String> {
-    let text =
-        fs::read_to_string(path).map_err(|error| format!("无法读取 {}: {}", path.display(), error))?;
-    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("无法读取 {}: {}", path.display(), error))?;
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     let keep = lines.len().saturating_sub(HISTORY_KEEP);
     let body = lines[keep..].join("\n");
     let temp = path.with_extension("jsonl.tmp");

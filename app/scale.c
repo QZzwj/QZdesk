@@ -55,3 +55,60 @@ void qz_scale_init_from_system(void)
     }
 #endif
 }
+
+/* 见 include/scale.h 的"触控命中区"一节。
+ *
+ * 尺寸从**样式**读，不从 coords 读：构造函数里 lv_obj_set_size() 之后 coords
+ * 还没算（lv_obj_get_width() 这时是 0），照 coords 算就会给每个控件无脑外扩
+ * 一半下限，相邻按钮互相抢点击。样式里写死的宽高在 set_size 之后立刻可读，
+ * 正好是调用点要的那个值；撑满父级 / 自适应内容（LV_COORD_IS_SPEC）的控件要
+ * 等一次布局才知道多大，那就退回 coords。
+ *
+ * ext_click_pad 是**物理像素**、四边同一个数（lv_obj_get_click_area 用
+ * lv_area_increase 对称外扩），所以这里算出的是一个 pad：取宽、高两个方向里
+ * 补得多的那一侧。 */
+static int32_t object_extent(lv_obj_t *obj, bool horizontal)
+{
+    lv_coord_t style = horizontal ? lv_obj_get_style_width(obj, LV_PART_MAIN)
+                                  : lv_obj_get_style_height(obj, LV_PART_MAIN);
+    if (!LV_COORD_IS_SPEC(style) && style > 0) return style;
+    return horizontal ? lv_obj_get_width(obj) : lv_obj_get_height(obj);
+}
+
+int32_t qz_touch_target(lv_obj_t *obj)
+{
+    if (!obj) return 0;
+
+    if (!lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICKABLE)) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    const int32_t min = qz_touch_min();
+    int32_t width = object_extent(obj, true);
+    int32_t height = object_extent(obj, false);
+    int32_t pad = 0;
+
+    if (width > 0 && width < min) {
+        int32_t needed = (min - width + 1) / 2;
+        if (needed > pad) pad = needed;
+    }
+    if (height > 0 && height < min) {
+        int32_t needed = (min - height + 1) / 2;
+        if (needed > pad) pad = needed;
+    }
+
+    /* 调用点若已经手工扩过，不要缩回去：先读回当前命中区（ext_click_pad 是
+     * 四边同一个数，左右取较大的一侧即可），只增不减。 */
+    lv_area_t coords, area;
+    lv_obj_get_coords(obj, &coords);
+    lv_obj_get_click_area(obj, &area);
+    int32_t current = 0;
+    if (area.x1 < coords.x1) current = coords.x1 - area.x1;
+    if (area.y1 < coords.y1 && coords.y1 - area.y1 > current) current = coords.y1 - area.y1;
+
+    if (pad > current) {
+        lv_obj_set_ext_click_area(obj, pad);
+        return pad;
+    }
+    return current;
+}

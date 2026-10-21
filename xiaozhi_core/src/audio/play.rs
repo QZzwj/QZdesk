@@ -1,11 +1,11 @@
+use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc;
-use anyhow::Result;
 
 use super::alsa_device;
+use super::audio_system::AudioConfig;
 use super::opus_codec::OpusDecoder;
 use super::stream_decoder::StreamDecoder;
-use super::audio_system::AudioConfig;
 use crate::audio_bridge::PlaybackData;
 
 /// Factory function: create a decoder based on the configured playback format.
@@ -74,75 +74,75 @@ pub fn play_thread(
             decoder = create_decoder(config, actual_rate, actual_channels)?;
             active_generation = current;
         }
-        match opus_rx.try_recv() {
-            Ok(audio_data) => {
-                let pcm_data = match audio_data {
-                    PlaybackData::Compressed { data, generation: packet_generation } => {
-                        if packet_generation != generation.load(Ordering::Acquire) { continue; }
-                        decoder.decode(&data)
-                    }
-                    PlaybackData::Flush(flush_generation) => {
-                        if flush_generation == active_generation { continue; }
+
+        // Match Echo-Mate's proven playback path: block on both the packet queue
+        // and ALSA. Polling an 80 ms packet queue every 5 ms added wakeups and
+        // turned ordinary buffer back-pressure into EAGAIN/EPIPE and dropped audio.
+        let Some(audio_data) = opus_rx.blocking_recv() else {
+            log::info!("Playback channel closed");
+            break;
+        };
+
+        match audio_data {
+            PlaybackData::Compressed {
+                data,
+                generation: packet_generation,
+            } => {
+                if packet_generation != generation.load(Ordering::Acquire) {
+                    continue;
+                }
+                let pcm_data = match decoder.decode(&data) {
+                    Ok(pcm_data) => pcm_data,
+                    Err(e) => {
+                        log::error!("Audio decode error: {}", e);
                         continue;
                     }
                 };
-                match pcm_data {
-                    Ok(pcm_data) => {
-                        if pcm_data.is_empty() {
-                            continue;
+                if pcm_data.is_empty() {
+                    continue;
+                }
+
+                let total_frames = pcm_data.len() / actual_channels as usize;
+                let mut frames_written = 0;
+                let mut retry_count = 0u32;
+
+                while frames_written < total_frames {
+                    if generation.load(Ordering::Acquire) != active_generation {
+                        break;
+                    }
+                    let offset = frames_written * actual_channels as usize;
+                    match io.writei(&pcm_data[offset..]) {
+                        Ok(n) => {
+                            frames_written += n;
+                            retry_count = 0;
                         }
-                        // Write decoded PCM to ALSA with retry loop to handle
-                        // short writes and XRUN recovery without losing frames.
-                        let total_frames = pcm_data.len() / actual_channels as usize;
-                        let mut frames_written = 0;
-                        let mut retry_count = 0u32;
-
-                        while frames_written < total_frames {
-                            if generation.load(Ordering::Acquire) != active_generation { break; }
-                            let offset = frames_written * actual_channels as usize;
-                            match io.writei(&pcm_data[offset..]) {
-                                Ok(n) => {
-                                    frames_written += n;
-                                    retry_count = 0; // 成功写入，重置重试计数
-                                }
-                                Err(e) if e.errno() == libc::EAGAIN => {
-                                    std::thread::sleep(std::time::Duration::from_millis(5));
-                                }
-                                Err(e) => {
-                                    log::warn!("ALSA XRUN or error: {}, recovering...", e);
-                                    retry_count += 1;
-
-                                    // 触发 ALSA 硬件恢复状态机
-                                    if let Err(e2) = pcm.prepare() {
-                                        log::error!(
-                                            "Failed to recover PCM playback: {}",
-                                            e2
-                                        );
-                                        break;
-                                    }
-
-                                    // 熔断器：底层持续跟不上写入速度时，丢弃剩余帧防止死循环
-                                    if retry_count >= 3 {
-                                        log::error!(
-                                            "Max recovery retries ({}) reached. Dropping {} unwritten frames to break dead-loop.",
-                                            retry_count,
-                                            total_frames - frames_written
-                                        );
-                                        break;
-                                    }
-                                }
+                        Err(e) => {
+                            log::warn!("ALSA playback error: {}, recovering...", e);
+                            retry_count += 1;
+                            if let Err(recover_error) = pcm.recover(e.errno(), true) {
+                                log::error!("Failed to recover PCM playback: {}", recover_error);
+                                break;
+                            }
+                            if retry_count >= 3 {
+                                log::error!(
+                                    "Max playback recovery retries reached; dropping {} frames",
+                                    total_frames - frames_written,
+                                );
+                                break;
                             }
                         }
                     }
-                    Err(e) => {
-                        log::error!("Audio decode error: {}", e);
-                    }
                 }
             }
-            Err(mpsc::error::TryRecvError::Empty) => std::thread::sleep(std::time::Duration::from_millis(5)),
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                log::info!("Playback channel closed");
-                break;
+            PlaybackData::Flush(flush_generation) => {
+                // A flush can arrive while the write side is idle. Reset here so
+                // the next packet is not delayed until another loop iteration.
+                if flush_generation != active_generation {
+                    pcm.drop()?;
+                    pcm.prepare()?;
+                    decoder = create_decoder(config, actual_rate, actual_channels)?;
+                    active_generation = flush_generation;
+                }
             }
         }
     }

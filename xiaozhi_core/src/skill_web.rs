@@ -1,12 +1,16 @@
 //! Small dependency-free web UI for managing user-installed Skills.
 
-use crate::mcp_gateway::skill::{SkillManager, SkillRole};
 use crate::chat::ChatHub;
+use crate::device_sync::{DeviceSyncService, SyncError};
+use crate::diagnostics::DiagnosticService;
+use crate::mcp_gateway::skill::{SkillManager, SkillRole};
 use crate::net_link::NetCommand;
+use crate::scenes::SceneService;
 use crate::timers::{PomodoroOptions, TimerStore};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -34,8 +38,33 @@ fn default_enabled() -> bool {
     true
 }
 
+const CORE_STARTING_MESSAGE: &str = "设备正在激活或连接，请等待完成";
+
+fn core_starting_json() -> String {
+    json!({
+        "ok": false,
+        "ready": false,
+        "error": CORE_STARTING_MESSAGE,
+    })
+    .to_string()
+}
+
+fn try_mark_skills_saved(
+    core_tx: &tokio::sync::mpsc::Sender<crate::controller::CoreCommand>,
+    core_ready: &AtomicBool,
+) -> Result<(), &'static str> {
+    if !core_ready.load(Ordering::Acquire) {
+        return Err(CORE_STARTING_MESSAGE);
+    }
+    core_tx
+        .try_send(crate::controller::CoreCommand::SkillsSaved)
+        .map_err(|_| "核心通道忙碌，请稍后重试")
+}
+
 #[derive(Deserialize)]
-struct ChatRequest { text: String }
+struct ChatRequest {
+    text: String,
+}
 
 /// 新建提醒。字段与 `set_timer.py` 的入参一致，语音与界面写的是同一套。
 #[derive(Deserialize)]
@@ -96,16 +125,41 @@ struct SmarthomeRequest {
     zigbee2mqtt_topic: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SceneRunRequest {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Deserialize)]
+struct DevicePairRequest {
+    address: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceSendRequest {
+    address: String,
+    #[serde(default)]
+    replace_existing: bool,
+}
+
 pub async fn run(
     manager: Arc<SkillManager>,
     net_tx: tokio::sync::mpsc::Sender<NetCommand>,
     chat_hub: ChatHub,
     core_tx: tokio::sync::mpsc::Sender<crate::controller::CoreCommand>,
+    core_ready: Arc<AtomicBool>,
     smarthome: Arc<crate::smarthome::SmartHomeHub>,
     weather: crate::weather::WeatherService,
     performance: crate::performance::PerformanceService,
     timers: TimerStore,
     companion: crate::companion::CompanionStore,
+    diagnostics: Arc<DiagnosticService>,
+    scenes: Arc<SceneService>,
+    device_sync: Arc<DeviceSyncService>,
 ) -> anyhow::Result<()> {
     let port = std::env::var("QZDESK_SKILL_WEB_PORT")
         .or_else(|_| std::env::var("XIAOZHI_SKILL_WEB_PORT"))
@@ -132,7 +186,7 @@ pub async fn run(
         }
         match listener {
             Some(value) => value,
-            None => return Err(last_error.expect("listener bind failed" ).into()),
+            None => return Err(last_error.expect("listener bind failed").into()),
         }
     };
     log::info!("Skill web manager listening on http://0.0.0.0:{}", port);
@@ -142,11 +196,15 @@ pub async fn run(
         let net_tx = net_tx.clone();
         let chat_hub = chat_hub.clone();
         let core_tx = core_tx.clone();
+        let core_ready = core_ready.clone();
         let smarthome = smarthome.clone();
         let weather = weather.clone();
         let performance = performance.clone();
         let timers = timers.clone();
         let companion = companion.clone();
+        let diagnostics = diagnostics.clone();
+        let scenes = scenes.clone();
+        let device_sync = device_sync.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_connection(
                 stream,
@@ -154,11 +212,15 @@ pub async fn run(
                 net_tx,
                 chat_hub,
                 core_tx,
+                core_ready,
                 smarthome,
                 weather,
                 performance,
                 timers,
                 companion,
+                diagnostics,
+                scenes,
+                device_sync,
             )
             .await
             {
@@ -176,20 +238,28 @@ async fn handle_connection(
     _net_tx: tokio::sync::mpsc::Sender<NetCommand>,
     chat_hub: ChatHub,
     core_tx: tokio::sync::mpsc::Sender<crate::controller::CoreCommand>,
+    core_ready: Arc<AtomicBool>,
     smarthome: Arc<crate::smarthome::SmartHomeHub>,
     weather: crate::weather::WeatherService,
     performance: crate::performance::PerformanceService,
     timers: TimerStore,
     companion: crate::companion::CompanionStore,
+    diagnostics: Arc<DiagnosticService>,
+    scenes: Arc<SceneService>,
+    device_sync: Arc<DeviceSyncService>,
 ) -> anyhow::Result<()> {
     let mut buffer = vec![0_u8; 8192];
     let mut request = Vec::new();
     let header_end;
     loop {
         let n = tokio::time::timeout(Duration::from_secs(15), stream.read(&mut buffer)).await??;
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
         request.extend_from_slice(&buffer[..n]);
-        if request.len() > MAX_REQUEST { return respond(&mut stream, 413, "请求过大", "text/plain; charset=utf-8").await; }
+        if request.len() > MAX_REQUEST {
+            return respond(&mut stream, 413, "请求过大", "text/plain; charset=utf-8").await;
+        }
         if let Some(position) = request.windows(4).position(|w| w == b"\r\n\r\n") {
             header_end = position + 4;
             break;
@@ -204,19 +274,36 @@ async fn handle_connection(
     let method = first_parts.next().unwrap_or("").to_string();
     let path = first_parts.next().unwrap_or("").to_string();
     if !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
-        let host = header.lines().find_map(|line| line.split_once(':')
-            .filter(|(key, _)| key.eq_ignore_ascii_case("host")).map(|(_, value)| value.trim()));
-        let origin = header.lines().find_map(|line| line.split_once(':')
-            .filter(|(key, _)| key.eq_ignore_ascii_case("origin")).map(|(_, value)| value.trim()));
+        let host = header.lines().find_map(|line| {
+            line.split_once(':')
+                .filter(|(key, _)| key.eq_ignore_ascii_case("host"))
+                .map(|(_, value)| value.trim())
+        });
+        let origin = header.lines().find_map(|line| {
+            line.split_once(':')
+                .filter(|(key, _)| key.eq_ignore_ascii_case("origin"))
+                .map(|(_, value)| value.trim())
+        });
         if let Some(origin) = origin {
-            let authority = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://"));
+            let authority = origin
+                .strip_prefix("http://")
+                .or_else(|| origin.strip_prefix("https://"));
             if authority != host {
-                return respond(&mut stream, 403, "不允许跨站写入", "text/plain; charset=utf-8").await;
+                return respond(
+                    &mut stream,
+                    403,
+                    "不允许跨站写入",
+                    "text/plain; charset=utf-8",
+                )
+                .await;
             }
         }
     }
     let content_length = lines
-        .find_map(|line| line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:")))
+        .find_map(|line| {
+            line.strip_prefix("Content-Length:")
+                .or_else(|| line.strip_prefix("content-length:"))
+        })
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(0);
     let upload_name = header.lines().find_map(|line| {
@@ -231,11 +318,17 @@ async fn handle_connection(
     }
     while request.len() < header_end + content_length {
         let n = tokio::time::timeout(Duration::from_secs(15), stream.read(&mut buffer)).await??;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         request.extend_from_slice(&buffer[..n]);
-        if request.len() > MAX_REQUEST { return respond(&mut stream, 413, "请求过大", "text/plain; charset=utf-8").await; }
+        if request.len() > MAX_REQUEST {
+            return respond(&mut stream, 413, "请求过大", "text/plain; charset=utf-8").await;
+        }
     }
-    let body = request.get(header_end..header_end.saturating_add(content_length)).unwrap_or(&[]);
+    let body = request
+        .get(header_end..header_end.saturating_add(content_length))
+        .unwrap_or(&[]);
     if method == "GET" && path == "/api/chat/stream" {
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n").await?;
         let mut receiver = chat_hub.subscribe();
@@ -247,7 +340,9 @@ async fn handle_connection(
                     if event.trim().is_empty() {
                         continue;
                     }
-                    stream.write_all(format!("data: {}\n\n", event).as_bytes()).await?;
+                    stream
+                        .write_all(format!("data: {}\n\n", event).as_bytes())
+                        .await?;
                 }
                 // 页面读得慢时广播会丢旧消息；丢掉的只是显示，不影响记录本身，
                 // 刷新页面会用 /api/chat/history 补齐。
@@ -259,10 +354,93 @@ async fn handle_connection(
         }
         return Ok(());
     }
+    /* Target-side sync protocol. These requests are machine-to-machine: the
+     * bearer token is bound to the pairing source IP by DeviceSyncService. */
+    if path.starts_with("/api/device-sync/target/") {
+        let (sync_path, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
+        let peer = stream.peer_addr()?.ip();
+        let token = bearer_token(&header);
+        let result: Result<(u16, Value), SyncError> = match (method.as_str(), sync_path) {
+            ("POST", "/api/device-sync/target/pair") => {
+                let input = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+                device_sync
+                    .target_pair(peer, &input)
+                    .map(|value| (200, value))
+            }
+            ("POST", "/api/device-sync/target/upload/init") => {
+                let input = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+                device_sync
+                    .upload_init(peer, token, &input)
+                    .map(|value| (201, value))
+            }
+            _ if method == "GET"
+                && sync_path.starts_with("/api/device-sync/target/upload/")
+                && sync_path.ends_with("/status") =>
+            {
+                let upload_id = &sync_path
+                    ["/api/device-sync/target/upload/".len()..sync_path.len() - "/status".len()];
+                device_sync
+                    .upload_status(peer, token, upload_id)
+                    .map(|value| (200, value))
+            }
+            _ if method == "PUT"
+                && sync_path.starts_with("/api/device-sync/target/upload/")
+                && sync_path.ends_with("/chunk") =>
+            {
+                let upload_id = &sync_path
+                    ["/api/device-sync/target/upload/".len()..sync_path.len() - "/chunk".len()];
+                match query_param(query, "offset").and_then(|value| value.parse::<usize>().ok()) {
+                    Some(offset) => device_sync
+                        .upload_chunk(peer, token, upload_id, offset, body)
+                        .await
+                        .map(|value| (200, value)),
+                    None => Err(SyncError {
+                        status: 400,
+                        message: "缺少有效的分块偏移 offset".to_string(),
+                        conflicts: Vec::new(),
+                    }),
+                }
+            }
+            ("POST", _)
+                if sync_path.starts_with("/api/device-sync/target/upload/")
+                    && sync_path.ends_with("/finish") =>
+            {
+                let upload_id = &sync_path
+                    ["/api/device-sync/target/upload/".len()..sync_path.len() - "/finish".len()];
+                let input = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+                device_sync
+                    .upload_finish(peer, token, upload_id, &input)
+                    .await
+                    .map(|value| (200, value))
+            }
+            _ => Err(SyncError {
+                status: 404,
+                message: "同步接口不存在".to_string(),
+                conflicts: Vec::new(),
+            }),
+        };
+        let (status, value) = match result {
+            Ok((status, value)) => (status, value),
+            Err(error) => (
+                error.status,
+                json!({"ok": false, "error": error.message, "conflicts": error.conflicts}),
+            ),
+        };
+        return respond(
+            &mut stream,
+            status,
+            &value.to_string(),
+            "application/json; charset=utf-8",
+        )
+        .await;
+    }
     if path.starts_with("/api/computer/") {
         let peer = stream.peer_addr()?.ip();
         let local = peer.is_loopback();
-        if header.lines().any(|line| line.to_ascii_lowercase().starts_with("origin:")) {
+        if header
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("origin:"))
+        {
             return respond(&mut stream, 403, "配对不接受浏览器请求", "text/plain").await;
         }
         let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
@@ -277,25 +455,102 @@ async fn handle_connection(
             Ok(value) => (200, value),
             Err(error) => (403, json!({"error":error})),
         };
-        return respond(&mut stream, status, &value.to_string(), "application/json; charset=utf-8").await;
+        return respond(
+            &mut stream,
+            status,
+            &value.to_string(),
+            "application/json; charset=utf-8",
+        )
+        .await;
+    }
+    if method == "GET" && path == "/api/skills/export" {
+        return match manager.export_bundle() {
+            Ok(bundle) => {
+                respond_bytes(
+                    &mut stream,
+                    200,
+                    &bundle,
+                    "application/zip",
+                    &[
+                        (
+                            "Content-Disposition",
+                            "attachment; filename=\"qzdesk-skills.zip\"",
+                        ),
+                        ("Cache-Control", "no-store"),
+                    ],
+                )
+                .await
+            }
+            Err(error) => {
+                respond(
+                    &mut stream,
+                    400,
+                    &json!({"ok": false, "error": error}).to_string(),
+                    "application/json; charset=utf-8",
+                )
+                .await
+            }
+        };
+    }
+    if method == "GET" && path == "/api/diagnostics/export" {
+        return match diagnostics.export() {
+            Ok(bundle) => {
+                respond_bytes(
+                    &mut stream,
+                    200,
+                    &bundle,
+                    "application/zip",
+                    &[
+                        (
+                            "Content-Disposition",
+                            "attachment; filename=\"qzdesk-diagnostics.zip\"",
+                        ),
+                        ("Cache-Control", "no-store"),
+                    ],
+                )
+                .await
+            }
+            Err(error) => {
+                respond(
+                    &mut stream,
+                    400,
+                    &json!({"ok": false, "error": error}).to_string(),
+                    "application/json; charset=utf-8",
+                )
+                .await
+            }
+        };
     }
     let (status, content_type, response) = match (method.as_str(), path.as_str()) {
-        ("GET", "/") | ("GET", "/index.html") => (200, "text/html; charset=utf-8", PAGE.to_string()),
+        ("GET", "/") | ("GET", "/index.html") => {
+            (200, "text/html; charset=utf-8", PAGE.to_string())
+        }
         /* 新打开的页面先拿一次现有记录，再接到 SSE 上：页面上看到的对话与设备
          * 屏幕上的一致，不会因为「谁先打开」而各说各话。 */
         ("POST", "/api/chat/abort") => {
-            let (reply, result) = tokio::sync::oneshot::channel();
-            if core_tx.try_send(crate::controller::CoreCommand::AbortTurn(reply)).is_err() {
-                (503, "application/json; charset=utf-8", json!({"ok":false,"local_stopped":false,"error":"核心通道忙碌，中断未排队"}).to_string())
+            if !core_ready.load(Ordering::Acquire) {
+                (503, "application/json; charset=utf-8", core_starting_json())
             } else {
-                match tokio::time::timeout(Duration::from_secs(3), result).await {
-                    Ok(Ok(result)) => {
-                        let ok = result.is_ok();
-                        (if ok { 200 } else { 503 }, "application/json; charset=utf-8",
-                            json!({"ok":ok,"local_stopped":true,"cloud_abort_sent":ok,
-                                "error":result.err(),"message":"取消在途工具等待，但已发出的电脑动作无法撤销"}).to_string())
+                let (reply, result) = tokio::sync::oneshot::channel();
+                if core_tx
+                    .try_send(crate::controller::CoreCommand::AbortTurn(reply))
+                    .is_err()
+                {
+                    (503, "application/json; charset=utf-8", json!({"ok":false,"local_stopped":false,"error":"核心通道忙碌，中断未排队"}).to_string())
+                } else {
+                    match tokio::time::timeout(Duration::from_secs(3), result).await {
+                        Ok(Ok(result)) => {
+                            let ok = result.is_ok();
+                            (if ok { 200 } else { 503 }, "application/json; charset=utf-8",
+                                json!({"ok":ok,"local_stopped":true,"cloud_abort_sent":ok,
+                                    "error":result.err(),"message":"取消在途工具等待，但已发出的电脑动作无法撤销"}).to_string())
+                        }
+                        _ => (
+                            503,
+                            "application/json; charset=utf-8",
+                            json!({"ok":false,"error":"核心中断未确认"}).to_string(),
+                        ),
                     }
-                    _ => (503, "application/json; charset=utf-8", json!({"ok":false,"error":"核心中断未确认"}).to_string()),
                 }
             }
         }
@@ -351,7 +606,11 @@ async fn handle_connection(
             smarthome.status_json().to_string(),
         ),
         ("POST", "/api/devices/discover") => match smarthome.discover().await {
-            Ok(()) => (200, "application/json; charset=utf-8", json!({"ok": true}).to_string()),
+            Ok(()) => (
+                200,
+                "application/json; charset=utf-8",
+                json!({"ok": true}).to_string(),
+            ),
             Err(error) => (
                 400,
                 "application/json; charset=utf-8",
@@ -360,7 +619,10 @@ async fn handle_connection(
         },
         ("POST", "/api/devices/command") => {
             match serde_json::from_slice::<DeviceCommandRequest>(body) {
-                Ok(input) => match smarthome.command(&input.id, &input.action, input.value).await {
+                Ok(input) => match smarthome
+                    .command(&input.id, &input.action, input.value)
+                    .await
+                {
                     Ok(result) => (200, "application/json; charset=utf-8", result.to_string()),
                     Err(error) => (
                         400,
@@ -406,13 +668,32 @@ async fn handle_connection(
                 json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
             ),
         },
-        ("GET", "/api/companion") => (200, "application/json; charset=utf-8", crate::companion::catalog().to_string()),
-        ("POST", "/api/companion/records") | ("POST", "/api/companion/care") => {
-            let result = serde_json::from_slice::<Value>(&body).map_err(|e| e.to_string())
-                .and_then(|input| if path.ends_with("/care") { companion.care(input) } else { companion.records(input) });
+        ("GET", "/api/companion") => (
+            200,
+            "application/json; charset=utf-8",
+            crate::companion::catalog().to_string(),
+        ),
+        ("POST", "/api/companion/records")
+        | ("POST", "/api/companion/care")
+        | ("POST", "/api/companion/memory") => {
+            let result = serde_json::from_slice::<Value>(&body)
+                .map_err(|e| e.to_string())
+                .and_then(|input| {
+                    if path.ends_with("/care") {
+                        companion.care(input)
+                    } else if path.ends_with("/memory") {
+                        companion.memory(input)
+                    } else {
+                        companion.records(input)
+                    }
+                });
             match result {
                 Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
-                Err(error) => (400, "application/json; charset=utf-8", json!({"error":error}).to_string()),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"error":error}).to_string(),
+                ),
             }
         }
         /* 核心日志：内存里那份环形缓冲，`?limit=` 控制条数。
@@ -442,26 +723,56 @@ async fn handle_connection(
         /* 提醒与番茄钟：核心是唯一权威，设备界面与网页读写这里，语音侧的同名
          * MCP 工具写的也是同一份（见 timers.rs 的模块说明）。 */
         ("GET", "/api/status") => {
-            let (reply, status) = tokio::sync::oneshot::channel();
-            if core_tx.try_send(crate::controller::CoreCommand::Status(reply)).is_err() {
-                (503, "application/json; charset=utf-8", json!({"error":"核心忙碌"}).to_string())
+            if !core_ready.load(Ordering::Acquire) {
+                (503, "application/json; charset=utf-8", core_starting_json())
             } else {
-                match tokio::time::timeout(Duration::from_secs(2), status).await {
-                    Ok(Ok(status)) => (200, "application/json; charset=utf-8", status.to_string()),
-                    _ => (503, "application/json; charset=utf-8", json!({"error":"核心状态未确认"}).to_string()),
+                let (reply, status) = tokio::sync::oneshot::channel();
+                if core_tx
+                    .try_send(crate::controller::CoreCommand::Status(reply))
+                    .is_err()
+                {
+                    (
+                        503,
+                        "application/json; charset=utf-8",
+                        json!({"error":"核心忙碌"}).to_string(),
+                    )
+                } else {
+                    match tokio::time::timeout(Duration::from_secs(2), status).await {
+                        Ok(Ok(status)) => {
+                            (200, "application/json; charset=utf-8", status.to_string())
+                        }
+                        _ => (
+                            503,
+                            "application/json; charset=utf-8",
+                            json!({"error":"核心状态未确认"}).to_string(),
+                        ),
+                    }
                 }
             }
         }
         ("POST", "/api/notifications/snooze") => {
             let result = serde_json::from_slice::<serde_json::Value>(body)
-                .map_err(|error| error.to_string()).and_then(|input| {
+                .map_err(|error| error.to_string())
+                .and_then(|input| {
                     let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("提醒");
-                    let minutes = input.get("minutes").and_then(|v| v.as_u64()).unwrap_or(5).clamp(1, 60);
+                    let minutes = input
+                        .get("minutes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(5)
+                        .clamp(1, 60);
                     timers.snooze(text, minutes)
                 });
             match result {
-                Ok(()) => (200, "application/json; charset=utf-8", json!({"ok":true}).to_string()),
-                Err(error) => (400, "application/json; charset=utf-8", json!({"ok":false,"error":error}).to_string()),
+                Ok(()) => (
+                    200,
+                    "application/json; charset=utf-8",
+                    json!({"ok":true}).to_string(),
+                ),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok":false,"error":error}).to_string(),
+                ),
             }
         }
         ("GET", "/api/timers") => (
@@ -501,17 +812,35 @@ async fn handle_connection(
             ),
         },
         _ if method == "PUT" && path.starts_with("/api/timers/") => {
-            let result = path["/api/timers/".len()..].parse::<u64>()
+            let result = path["/api/timers/".len()..]
+                .parse::<u64>()
                 .map_err(|_| "提醒 id 必须是数字".to_string())
-                .and_then(|id| serde_json::from_slice::<ReminderRequest>(body)
-                    .map_err(|error| error.to_string())
-                    .and_then(|input| timers.update_reminder(id, input.hour, input.minute,
-                        &input.label, input.daily, &input.date, input.enabled)));
+                .and_then(|id| {
+                    serde_json::from_slice::<ReminderRequest>(body)
+                        .map_err(|error| error.to_string())
+                        .and_then(|input| {
+                            timers.update_reminder(
+                                id,
+                                input.hour,
+                                input.minute,
+                                &input.label,
+                                input.daily,
+                                &input.date,
+                                input.enabled,
+                            )
+                        })
+                });
             match result {
-                Ok(reminder) => (200, "application/json; charset=utf-8",
-                    json!({"ok": true, "reminder": reminder}).to_string()),
-                Err(error) => (400, "application/json; charset=utf-8",
-                    json!({"ok": false, "error": error}).to_string()),
+                Ok(reminder) => (
+                    200,
+                    "application/json; charset=utf-8",
+                    json!({"ok": true, "reminder": reminder}).to_string(),
+                ),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": error}).to_string(),
+                ),
             }
         }
         _ if method == "DELETE" && path.starts_with("/api/timers/") => {
@@ -574,24 +903,219 @@ async fn handle_connection(
                 json!({ "ok": false, "error": format!("JSON 格式错误: {}", error) }).to_string(),
             ),
         },
-        ("GET", "/api/skills") => (200, "application/json; charset=utf-8", manager.list().to_string()),
+        ("GET", "/api/diagnostics/latest") => (
+            200,
+            "application/json; charset=utf-8",
+            diagnostics.latest().to_string(),
+        ),
+        ("GET", "/api/device-sync/status") => (
+            200,
+            "application/json; charset=utf-8",
+            device_sync.status_json().to_string(),
+        ),
+        ("POST", "/api/device-sync/discover") => match device_sync.discover().await {
+            Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
+            Err(error) => (
+                error.status,
+                "application/json; charset=utf-8",
+                json!({"ok": false, "error": error.message}).to_string(),
+            ),
+        },
+        ("POST", "/api/device-sync/code") => (
+            200,
+            "application/json; charset=utf-8",
+            device_sync.issue_pairing_code().to_string(),
+        ),
+        ("POST", "/api/device-sync/pair") => {
+            match serde_json::from_slice::<DevicePairRequest>(body) {
+                Ok(input) => match device_sync
+                    .pair_remote(input.address.trim(), input.code.trim())
+                    .await
+                {
+                    Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
+                    Err(error) => (
+                        error.status,
+                        "application/json; charset=utf-8",
+                        json!({"ok": false, "error": error.message}).to_string(),
+                    ),
+                },
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
+                ),
+            }
+        }
+        ("POST", "/api/device-sync/send") => {
+            match serde_json::from_slice::<DeviceSendRequest>(body) {
+                Ok(input) => match device_sync
+                    .send(input.address.trim(), input.replace_existing)
+                    .await
+                {
+                    Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
+                    Err(error) => (
+                        error.status,
+                        "application/json; charset=utf-8",
+                        json!({
+                            "ok": false,
+                            "error": error.message,
+                            "conflicts": error.conflicts
+                        })
+                        .to_string(),
+                    ),
+                },
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
+                ),
+            }
+        }
+        ("POST", "/api/diagnostics/run") => {
+            let report = diagnostics.run().await;
+            (
+                200,
+                "application/json; charset=utf-8",
+                json!({"ok": true, "report": report}).to_string(),
+            )
+        }
+        ("GET", "/api/scenes") => (
+            200,
+            "application/json; charset=utf-8",
+            scenes.list().to_string(),
+        ),
+        ("POST", "/api/scenes") => match serde_json::from_slice::<crate::scenes::Scene>(body) {
+            Ok(scene) => match scenes.save(scene) {
+                Ok(value) => (201, "application/json; charset=utf-8", value.to_string()),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": error}).to_string(),
+                ),
+            },
+            Err(error) => (
+                400,
+                "application/json; charset=utf-8",
+                json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
+            ),
+        },
+        _ if method == "PUT" && path.starts_with("/api/scenes/") && !path.ends_with("/run") => {
+            let id = &path["/api/scenes/".len()..];
+            match serde_json::from_slice::<crate::scenes::Scene>(body) {
+                Ok(mut scene) if !id.is_empty() && !id.contains('/') => {
+                    scene.id = id.to_string();
+                    match scenes.save(scene) {
+                        Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
+                        Err(error) => (
+                            400,
+                            "application/json; charset=utf-8",
+                            json!({"ok": false, "error": error}).to_string(),
+                        ),
+                    }
+                }
+                Ok(_) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": "场景 id 无效"}).to_string(),
+                ),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
+                ),
+            }
+        }
+        _ if method == "DELETE" && path.starts_with("/api/scenes/") => {
+            let id = &path["/api/scenes/".len()..];
+            if id.is_empty() || id.contains('/') {
+                (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": "场景 id 无效"}).to_string(),
+                )
+            } else {
+                match scenes.remove(id) {
+                    Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
+                    Err(error) => (
+                        404,
+                        "application/json; charset=utf-8",
+                        json!({"ok": false, "error": error}).to_string(),
+                    ),
+                }
+            }
+        }
+        _ if method == "POST" && path.starts_with("/api/scenes/") && path.ends_with("/run") => {
+            let id = &path["/api/scenes/".len()..path.len() - "/run".len()];
+            let dry_run = if body.is_empty() {
+                false
+            } else {
+                match serde_json::from_slice::<SceneRunRequest>(body) {
+                    Ok(input) => input.dry_run,
+                    Err(error) => {
+                        return respond(
+                            &mut stream,
+                            400,
+                            &json!({
+                                "ok": false,
+                                "error": format!("JSON 格式错误: {}", error)
+                            })
+                            .to_string(),
+                            "application/json; charset=utf-8",
+                        )
+                        .await;
+                    }
+                }
+            };
+            if id.is_empty() || id.contains('/') {
+                (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": "场景 id 无效"}).to_string(),
+                )
+            } else {
+                match scenes.run(id, dry_run).await {
+                    Ok(value) => (200, "application/json; charset=utf-8", value.to_string()),
+                    Err(error) => (
+                        404,
+                        "application/json; charset=utf-8",
+                        json!({"ok": false, "error": error}).to_string(),
+                    ),
+                }
+            }
+        }
+        ("GET", "/api/skills") => (
+            200,
+            "application/json; charset=utf-8",
+            manager.list().to_string(),
+        ),
         ("POST", "/api/skills") => match serde_json::from_slice::<InstallRequest>(body) {
             Ok(input) => match manager.install(&input.name, &input.content) {
                 Ok(()) => {
                     // 内容变了：索引失效并重建会话，保证立刻生效
                     manager.invalidate_index();
-                    match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                    match try_mark_skills_saved(&core_tx, &core_ready) {
                         Ok(()) => (200, "application/json; charset=utf-8",
                             json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
-                        Err(_) => (503, "application/json; charset=utf-8",
-                            json!({"ok": false, "saved": true, "error": "技能已保存，同步未排队，请稍后重试"}).to_string()),
+                        Err(error) => (503, "application/json; charset=utf-8",
+                            json!({"ok": false, "saved": true, "error": format!("技能已保存，{}", error)}).to_string()),
                     }
                 }
-                Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": error}).to_string(),
+                ),
             },
-            Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string()),
+            Err(error) => (
+                400,
+                "application/json; charset=utf-8",
+                json!({"ok": false, "error": format!("JSON 格式错误: {}", error)}).to_string(),
+            ),
         },
-        _ if method == "PUT" && path.starts_with("/api/skills/") && path.ends_with("/selection") => {
+        _ if method == "PUT"
+            && path.starts_with("/api/skills/")
+            && path.ends_with("/selection") =>
+        {
             let prefix = "/api/skills/";
             let name = &path[prefix.len()..path.len() - "/selection".len()];
             match serde_json::from_slice::<SelectionRequest>(body) {
@@ -602,11 +1126,11 @@ async fn handle_connection(
                         manager.set_role(name, role)
                     } {
                         Ok(()) => {
-                            match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                            match try_mark_skills_saved(&core_tx, &core_ready) {
                                 Ok(()) => (200, "application/json; charset=utf-8",
                                     json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
-                                Err(_) => (503, "application/json; charset=utf-8",
-                                    json!({"ok": false, "saved": true, "error": "选择已保存，同步未排队，请稍后重试"}).to_string()),
+                                Err(error) => (503, "application/json; charset=utf-8",
+                                    json!({"ok": false, "saved": true, "error": format!("选择已保存，{}", error)}).to_string()),
                             }
                         },
                         Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
@@ -629,8 +1153,9 @@ async fn handle_connection(
                 let name_end = 4usize.saturating_add(name_len);
                 if name_end <= body.len() {
                     match std::str::from_utf8(&body[4..name_end]) {
-                        Ok(value) if !value.trim().is_empty() =>
-                            (Some(value.trim().to_string()), &body[name_end..]),
+                        Ok(value) if !value.trim().is_empty() => {
+                            (Some(value.trim().to_string()), &body[name_end..])
+                        }
                         _ => (None, &body[..]),
                     }
                 } else {
@@ -640,45 +1165,113 @@ async fn handle_connection(
                 (upload_name, body)
             };
             match name {
-            Some(name) => match manager.install_zip(&name, zip).await {
-                Ok(()) => {
-                    manager.invalidate_index();
-                    match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                Some(name) => match manager.install_zip(&name, zip).await {
+                    Ok(()) => {
+                        manager.invalidate_index();
+                        match try_mark_skills_saved(&core_tx, &core_ready) {
                         Ok(()) => (200, "application/json; charset=utf-8",
                             json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
-                        Err(_) => (503, "application/json; charset=utf-8",
-                            json!({"ok": false, "saved": true, "error": "技能已保存，同步未排队，请稍后重试"}).to_string()),
+                        Err(error) => (503, "application/json; charset=utf-8",
+                            json!({"ok": false, "saved": true, "error": format!("技能已保存，{}", error)}).to_string()),
+                    }
+                    }
+                    Err(error) => (
+                        400,
+                        "application/json; charset=utf-8",
+                        json!({"ok": false, "error": error}).to_string(),
+                    ),
+                },
+                None => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": "缺少 Skill 名称"}).to_string(),
+                ),
+            }
+        }
+        ("POST", "/api/skills/import") => {
+            let replace_existing = header.lines().any(|line| {
+                line.split_once(':')
+                    .map(|(name, value)| {
+                        name.trim().eq_ignore_ascii_case("X-QZdesk-Replace") && value.trim() == "1"
+                    })
+                    .unwrap_or(false)
+            });
+            match manager.import_bundle(body, replace_existing).await {
+                Ok(result) => {
+                    manager.invalidate_index();
+                    match try_mark_skills_saved(&core_tx, &core_ready) {
+                        Ok(()) => (
+                            200,
+                            "application/json; charset=utf-8",
+                            json!({
+                                "ok": true,
+                                "saved": true,
+                                "effective": "next_turn",
+                                "result": result
+                            })
+                            .to_string(),
+                        ),
+                        Err(error) => (
+                            503,
+                            "application/json; charset=utf-8",
+                            json!({
+                                "ok": false,
+                                "saved": true,
+                                "result": result,
+                                "error": format!("技能包已导入，{}", error)
+                            })
+                            .to_string(),
+                        ),
                     }
                 }
-                Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
-            },
-            None => (400, "application/json; charset=utf-8", json!({"ok": false, "error": "缺少 Skill 名称"}).to_string()),
+                Err(error) if !error.conflicts.is_empty() => (
+                    409,
+                    "application/json; charset=utf-8",
+                    json!({
+                        "ok": false,
+                        "error": error.message,
+                        "conflicts": error.conflicts
+                    })
+                    .to_string(),
+                ),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": error.message}).to_string(),
+                ),
             }
-        },
+        }
         ("POST", "/api/chat/send") => match serde_json::from_slice::<ChatRequest>(body) {
             Ok(input) if !input.text.trim().is_empty() => {
-                /* 云端只接受音频输入，所以这条文字要先在本地合成成语音，再按麦克风
-                 * 同样的格式发出去。合成与发送都在核心侧完成（CoreCommand），这里
-                 * 只负责把请求转过去并立刻回执，避免浏览器等一次完整推理。 */
-                let text = input.text.trim().to_string();
-                let (reply, accepted) = tokio::sync::oneshot::channel();
-                match core_tx.try_send(crate::controller::CoreCommand::TextAsSpeech(text, reply)) {
-                    Ok(()) => match tokio::time::timeout(Duration::from_secs(3), accepted).await {
-                        Ok(Ok(Ok(()))) => (202, "application/json; charset=utf-8",
-                            json!({"ok": true, "accepted": true}).to_string()),
-                        Ok(Ok(Err(error))) => (409, "application/json; charset=utf-8",
-                            json!({"ok": false, "error": error}).to_string()),
-                        _ => (503, "application/json; charset=utf-8",
-                            json!({"ok": false, "error": "核心未确认接收，请检查聊天记录后重试"}).to_string()),
-                    },
-                    Err(error) => (
-                        503,
-                        "application/json; charset=utf-8",
-                        json!({"ok": false, "error": format!("核心无法接收消息: {}", error)}).to_string(),
-                    ),
+                /* 文字只通过 listen/detect/text 直发云端，不会改走本地 TTS。
+                 * 入口只负责把请求转过去并立刻回执，避免浏览器等一次完整推理。 */
+                if !core_ready.load(Ordering::Acquire) {
+                    (503, "application/json; charset=utf-8", core_starting_json())
+                } else {
+                    let text = input.text.trim().to_string();
+                    let (reply, accepted) = tokio::sync::oneshot::channel();
+                    match core_tx.try_send(crate::controller::CoreCommand::TextTurn(text, reply)) {
+                        Ok(()) => match tokio::time::timeout(Duration::from_secs(3), accepted).await {
+                            Ok(Ok(Ok(queued))) => (202, "application/json; charset=utf-8",
+                                json!({"ok": true, "accepted": true, "queued": queued}).to_string()),
+                            Ok(Ok(Err(error))) => (409, "application/json; charset=utf-8",
+                                json!({"ok": false, "error": error}).to_string()),
+                            _ => (503, "application/json; charset=utf-8",
+                                json!({"ok": false, "error": "核心未确认接收，请检查聊天记录后重试"}).to_string()),
+                        },
+                        Err(error) => (
+                            503,
+                            "application/json; charset=utf-8",
+                            json!({"ok": false, "error": format!("核心无法接收消息: {}", error)}).to_string(),
+                        ),
+                    }
                 }
             }
-            _ => (400, "application/json; charset=utf-8", json!({"ok": false, "error": "消息不能为空"}).to_string()),
+            _ => (
+                400,
+                "application/json; charset=utf-8",
+                json!({"ok": false, "error": "消息不能为空"}).to_string(),
+            ),
         },
         _ if method == "GET" && path.starts_with("/api/skills/") && path.ends_with("/content") => {
             let name = &path["/api/skills/".len()..path.len() - "/content".len()];
@@ -700,14 +1293,18 @@ async fn handle_connection(
             match manager.remove(name) {
                 Ok(()) => {
                     manager.invalidate_index();
-                    match core_tx.try_send(crate::controller::CoreCommand::SkillsSaved) {
+                    match try_mark_skills_saved(&core_tx, &core_ready) {
                         Ok(()) => (200, "application/json; charset=utf-8",
                             json!({"ok": true, "saved": true, "effective": "next_turn"}).to_string()),
-                        Err(_) => (503, "application/json; charset=utf-8",
-                            json!({"ok": false, "saved": true, "error": "技能已保存，同步未排队，请稍后重试"}).to_string()),
+                        Err(error) => (503, "application/json; charset=utf-8",
+                            json!({"ok": false, "saved": true, "error": format!("技能已保存，{}", error)}).to_string()),
                     }
                 }
-                Err(error) => (400, "application/json; charset=utf-8", json!({"ok": false, "error": error}).to_string()),
+                Err(error) => (
+                    400,
+                    "application/json; charset=utf-8",
+                    json!({"ok": false, "error": error}).to_string(),
+                ),
             }
         }
         _ => (404, "text/plain; charset=utf-8", "Not Found".to_string()),
@@ -715,12 +1312,76 @@ async fn handle_connection(
     respond(&mut stream, status, &response, content_type).await
 }
 
-async fn respond(stream: &mut TcpStream, status: u16, body: &str, content_type: &str) -> anyhow::Result<()> {
-    let reason = match status { 200 => "OK", 400 => "Bad Request", 404 => "Not Found", 413 => "Payload Too Large", 501 => "Not Implemented", _ => "Error" };
-    let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
-        status, reason, content_type, body.as_bytes().len(), body
+fn bearer_token(header: &str) -> Option<&str> {
+    header.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        let value = value.trim();
+        let (scheme, token) = value.split_once(' ')?;
+        if scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty() {
+            Some(token.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
+async fn respond(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &str,
+    content_type: &str,
+) -> anyhow::Result<()> {
+    respond_bytes(stream, status, body.as_bytes(), content_type, &[]).await
+}
+
+async fn respond_bytes(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &[u8],
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+) -> anyhow::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n",
+        status,
+        reason,
+        content_type,
+        body.len()
     );
-    stream.write_all(response.as_bytes()).await?;
+    for (name, value) in extra_headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
     Ok(())
 }

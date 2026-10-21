@@ -1,7 +1,10 @@
-use crate::config::Config;
-use tokio::sync::mpsc;
 use crate::audio::{AudioConfig, AudioSystem};
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use crate::config::Config;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::sync::mpsc;
 
 pub enum AudioEvent {
     AudioData(Vec<u8>),
@@ -16,6 +19,7 @@ pub struct AudioBridge {
     _audio_system: AudioSystem,
     play_tx: mpsc::Sender<PlaybackData>,
     generation: Arc<AtomicU64>,
+    capture_error: Option<String>,
 }
 
 impl AudioBridge {
@@ -28,7 +32,9 @@ impl AudioBridge {
             capture_device: config.capture_device.to_string(),
             playback_device: config.playback_device.to_string(),
             sample_rate: config.hello_sample_rate,
-            channels: 2, // ALSA device typically 2 channels
+            // The AI uplink is mono.  ALSA negotiation still falls back to a
+            // stereo hardware layout when this codec only exposes two channels.
+            channels: u32::from(config.hello_channels.max(1)),
             opus_sample_rate: config.hello_sample_rate,
             opus_channels: config.hello_channels as u32,
             opus_bitrate: 64000,
@@ -45,11 +51,16 @@ impl AudioBridge {
 
         log::info!(
             "AudioBridge: capture_device=\"{}\", playback_device=\"{}\"",
-            audio_config.capture_device, audio_config.playback_device,
+            audio_config.capture_device,
+            audio_config.playback_device,
         );
 
         let generation = Arc::new(AtomicU64::new(0));
         let audio_system = AudioSystem::start(audio_config, opus_tx, play_rx, generation.clone())?;
+        let capture_error = audio_system.capture_error().map(ToOwned::to_owned);
+        if let Some(error) = &capture_error {
+            log::error!("AudioBridge: microphone capture unavailable: {}", error);
+        }
 
         // Forward recording Opus data as AudioEvent
         tokio::spawn(async move {
@@ -64,14 +75,32 @@ impl AudioBridge {
             _audio_system: audio_system,
             play_tx,
             generation,
+            capture_error,
         })
+    }
+
+    /// Human-readable capture failure, including sustained all-zero samples.
+    pub fn capture_error(&self) -> Option<String> {
+        if let Some(error) = &self.capture_error {
+            return Some(error.clone());
+        }
+        if self._audio_system.persistent_silence() {
+            return Some(
+                "microphone is delivering all-zero samples; check MICBIAS, wiring, and the ALSA capture mixer"
+                    .to_string(),
+            );
+        }
+        None
     }
 
     /// Send an Opus packet for playback.
     pub async fn send_audio(&self, data: &[u8]) -> anyhow::Result<()> {
         let generation = self.generation.load(Ordering::Acquire);
         self.play_tx
-            .try_send(PlaybackData::Compressed { data: data.to_vec(), generation })
+            .try_send(PlaybackData::Compressed {
+                data: data.to_vec(),
+                generation,
+            })
             .map_err(|e| anyhow::anyhow!("Failed to send audio for playback: {}", e))
     }
 
@@ -79,5 +108,4 @@ impl AudioBridge {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let _ = self.play_tx.try_send(PlaybackData::Flush(generation));
     }
-
 }

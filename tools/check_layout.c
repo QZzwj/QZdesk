@@ -11,12 +11,14 @@
 #include "smarthome.h"
 #include "theme.h"
 #include "wifi.h"
+#include "web_client.h"
 #include "qzdesk_core.h"
 #include "notifications.h"
 #include "lvgl/src/display/lv_display_private.h"
 #include "lvgl/src/misc/lv_area_private.h"
 #include "lvgl/src/widgets/image/lv_image_private.h"
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,9 +32,38 @@ static unsigned char *pixels;
 static const char *output_dir;
 static lv_obj_t *assistant_screen;
 static lv_obj_t *apps_screen;
-static bool fixture_long_wifi, fixture_connected;
+static bool fixture_long_wifi, fixture_connected, fixture_link_up;
 static bool fixture_long_names;
+static qz_wifi_state_t fixture_wifi_state = QZ_WIFI_IDLE;
 static int fixture_skill_count = QZ_SKILL_MAX;
+static int timer_delete_count;
+typedef struct {
+    bool active;
+    bool paused;
+    bool auto_break;
+    char phase[16];
+    int remaining_seconds;
+    int completed_cycles;
+    int total_cycles;
+    int focus_minutes;
+    int break_minutes;
+    int start_count;
+    int pause_count;
+    int resume_count;
+    int stop_count;
+} layout_pomodoro_state_t;
+static layout_pomodoro_state_t pomodoro_fixture = {
+    .active = false,
+    .paused = false,
+    .auto_break = true,
+    .phase = "focus",
+    .remaining_seconds = 1500,
+    .completed_cycles = 0,
+    .total_cycles = 4,
+    .focus_minutes = 25,
+    .break_minutes = 5,
+};
+static pthread_mutex_t pomodoro_fixture_mutex = PTHREAD_MUTEX_INITIALIZER;
 static qzdesk_core_event_cb_t listeners[16];
 static void *listener_data[16];
 static int listener_count;
@@ -41,25 +72,33 @@ static const char *screen_names[32];
 static int named_screen_count;
 static qzdesk_core_event_cb_t poll_callback;
 static void *poll_data;
+static char backlight_fixture_path[256];
+static char fixture_home_path[] = "/tmp/qzdesk-layout-home-XXXXXX";
 
 /* No hardware, external services, saved settings or core process are changed
  * by these fixtures. Internal LVGL objects and callbacks remain unmodified. */
 bool __wrap_qz_wifi_ready(void) { return true; }
+bool __wrap_qz_wifi_link_up(void) { return fixture_link_up; }
 bool __wrap_qz_wifi_worker_start(void) { return true; }
 bool __wrap_qz_wifi_enable_async(bool enabled) { (void)enabled; return true; }
+bool __wrap_qz_wifi_autoconnect_async(void) { return true; }
 bool __wrap_qz_wifi_scan_async(void) { return true; }
 bool __wrap_qz_wifi_scan_pending(void) { return false; }
+bool __wrap_qz_wifi_is_saved_network(const char *ssid) { (void)ssid; return false; }
 void __wrap_qz_wifi_interface(char *out, unsigned int size) { snprintf(out, size, "wlan0"); }
 void __wrap_qz_wifi_current(char *out, unsigned int size)
 {
     snprintf(out, size, "%s", fixture_connected ? "Layout test network" : "");
 }
-void __wrap_qz_wifi_ipv4(char *out, unsigned int size) { snprintf(out, size, "192.168.100.200"); }
+void __wrap_qz_wifi_ipv4(char *out, unsigned int size)
+{
+    snprintf(out, size, "%s", fixture_connected ? "192.168.100.200" : "");
+}
 void __wrap_qz_wifi_mac(char *out, unsigned int size) { snprintf(out, size, "AA:BB:CC:DD:EE:FF"); }
 bool __wrap_qz_wifi_status(qz_wifi_status_t *out)
 {
     memset(out, 0, sizeof(*out));
-    out->state = fixture_connected ? QZ_WIFI_CONNECTED : QZ_WIFI_IDLE;
+    out->state = fixture_wifi_state;
     return true;
 }
 int __wrap_qz_wifi_scan_results(qz_wifi_ap_t *out, int maximum)
@@ -67,8 +106,15 @@ int __wrap_qz_wifi_scan_results(qz_wifi_ap_t *out, int maximum)
     int count = maximum < 12 ? maximum : 12;
     for (int i = 0; i < count; i++) {
         memset(&out[i], 0, sizeof(out[i]));
-        if (fixture_long_wifi) memset(out[i].ssid, 'W', sizeof(out[i].ssid) - 1);
-        else snprintf(out[i].ssid, sizeof(out[i].ssid), "Layout WiFi %02d", i + 1);
+        if (fixture_long_wifi) {
+            /* The scan buffer allows 64 bytes, but a 24-character no-space
+             * SSID already wraps at 320 px and keeps the row's clickable
+             * center inside the viewport. */
+            memset(out[i].ssid, 'W', 24);
+            out[i].ssid[24] = '\0';
+        } else {
+            snprintf(out[i].ssid, sizeof(out[i].ssid), "Layout WiFi %02d", i + 1);
+        }
         out[i].bars = 1 + i % 4;
         out[i].locked = true;
     }
@@ -95,10 +141,57 @@ int __wrap_qz_skills_fetch(qz_skill_t *out, int maximum, qz_skill_summary_t *sum
     }
     return count;
 }
+
+static void pomodoro_fixture_json_locked(char *out, size_t size)
+{
+    snprintf(out, size,
+             "{\"ok\":true,\"state\":{"
+             "\"active\":%s,\"paused\":%s,\"phase\":\"%s\","
+             "\"remaining_seconds\":%d,\"completed_cycles\":%d,"
+             "\"total_cycles\":%d,\"focus_minutes\":%d,"
+             "\"break_minutes\":%d,\"auto_break\":%s},"
+             "\"message\":\"layout fixture\"}",
+             pomodoro_fixture.active ? "true" : "false",
+             pomodoro_fixture.paused ? "true" : "false",
+             pomodoro_fixture.phase,
+             pomodoro_fixture.remaining_seconds,
+             pomodoro_fixture.completed_cycles,
+             pomodoro_fixture.total_cycles,
+             pomodoro_fixture.focus_minutes,
+             pomodoro_fixture.break_minutes,
+             pomodoro_fixture.auto_break ? "true" : "false");
+}
+
+static void pomodoro_fixture_snapshot(layout_pomodoro_state_t *out)
+{
+    pthread_mutex_lock(&pomodoro_fixture_mutex);
+    *out = pomodoro_fixture;
+    pthread_mutex_unlock(&pomodoro_fixture_mutex);
+}
+
+/* Tests use this to move the core straight to a phase that would otherwise take
+ * minutes to reach. It changes only the fake HTTP state, never the UI model. */
+static void pomodoro_fixture_set(bool active, bool paused, const char *phase,
+                                 int remaining_seconds, int completed_cycles,
+                                 int total_cycles, int focus_minutes,
+                                 int break_minutes, bool auto_break)
+{
+    pthread_mutex_lock(&pomodoro_fixture_mutex);
+    pomodoro_fixture.active = active;
+    pomodoro_fixture.paused = paused;
+    snprintf(pomodoro_fixture.phase, sizeof(pomodoro_fixture.phase), "%s", phase);
+    pomodoro_fixture.remaining_seconds = remaining_seconds;
+    pomodoro_fixture.completed_cycles = completed_cycles;
+    pomodoro_fixture.total_cycles = total_cycles;
+    pomodoro_fixture.focus_minutes = focus_minutes;
+    pomodoro_fixture.break_minutes = break_minutes;
+    pomodoro_fixture.auto_break = auto_break;
+    pthread_mutex_unlock(&pomodoro_fixture_mutex);
+}
+
 bool __wrap_qz_web_request(const char *method, const char *path, const char *body,
                             char *out, size_t size)
 {
-    (void)body;
     if (strcmp(path, "/api/companion/records") == 0) {
         if (strstr(body, "\"text\":\"失败测试\"")) {
             snprintf(out, size, "{\"error\":\"写盘失败，未保存\"}"); return false;
@@ -120,6 +213,11 @@ bool __wrap_qz_web_request(const char *method, const char *path, const char *bod
         snprintf(out, size, "{\"error\":\"保存失败，请重试\"}");
         return false;
     }
+    if (strcmp(method, "DELETE") == 0 && strncmp(path, "/api/timers/", 12) == 0) {
+        timer_delete_count++;
+        snprintf(out, size, "{\"ok\":true}");
+        return true;
+    }
     if (strcmp(path, "/api/timers") == 0) {
         char name[32];
         memset(name, 'W', sizeof(name) - 1);
@@ -133,6 +231,10 @@ bool __wrap_qz_web_request(const char *method, const char *path, const char *bod
         }
         if (used < size) snprintf(out + used, size - used, "]}");
     } else if (strcmp(path, "/api/skills") == 0) {
+        if (fixture_skill_count < 0) {
+            snprintf(out, size, "{\"error\":\"layout fixture: skill service offline\"}");
+            return false;
+        }
         size_t used = (size_t)snprintf(out, size, "{\"skills\":[");
         for (int i = 0; i < fixture_skill_count && used < size; i++) {
             char name[80];
@@ -155,8 +257,50 @@ bool __wrap_qz_web_request(const char *method, const char *path, const char *bod
         }
         if (used < size) snprintf(out + used, size - used, "]}");
     } else if (strcmp(path, "/api/pomodoro") == 0) {
-        snprintf(out, size, "{\"active\":false,\"paused\":false,\"remaining_seconds\":1500,"
-                  "\"focus_minutes\":25,\"break_minutes\":5,\"total_cycles\":4,\"completed_cycles\":0}");
+        pthread_mutex_lock(&pomodoro_fixture_mutex);
+        if (strcmp(method, "POST") == 0) {
+            char action[16] = "";
+            qz_json_string(body, "action", action, sizeof(action));
+            if (strcmp(action, "start") == 0) {
+                int focus_minutes = 25;
+                int break_minutes = 5;
+                int cycles = 4;
+                bool auto_break = true;
+                qz_json_int(body, "focus_minutes", &focus_minutes);
+                qz_json_int(body, "break_minutes", &break_minutes);
+                qz_json_int(body, "cycles", &cycles);
+                qz_json_bool(body, "auto_break", &auto_break);
+                if (focus_minutes < 1) focus_minutes = 1;
+                if (focus_minutes > 180) focus_minutes = 180;
+                if (break_minutes < 1) break_minutes = 1;
+                if (break_minutes > 180) break_minutes = 180;
+                if (cycles < 1) cycles = 1;
+                if (cycles > 12) cycles = 12;
+                pomodoro_fixture.active = true;
+                pomodoro_fixture.paused = false;
+                snprintf(pomodoro_fixture.phase, sizeof(pomodoro_fixture.phase), "focus");
+                pomodoro_fixture.remaining_seconds = focus_minutes * 60;
+                pomodoro_fixture.completed_cycles = 0;
+                pomodoro_fixture.total_cycles = cycles;
+                pomodoro_fixture.focus_minutes = focus_minutes;
+                pomodoro_fixture.break_minutes = break_minutes;
+                pomodoro_fixture.auto_break = auto_break;
+                pomodoro_fixture.start_count++;
+            } else if (strcmp(action, "pause") == 0 && pomodoro_fixture.active) {
+                pomodoro_fixture.paused = true;
+                pomodoro_fixture.pause_count++;
+            } else if (strcmp(action, "resume") == 0 && pomodoro_fixture.active) {
+                pomodoro_fixture.paused = false;
+                pomodoro_fixture.resume_count++;
+            } else if (strcmp(action, "stop") == 0) {
+                pomodoro_fixture.active = false;
+                pomodoro_fixture.paused = false;
+                pomodoro_fixture.remaining_seconds = 0;
+                pomodoro_fixture.stop_count++;
+            }
+        }
+        pomodoro_fixture_json_locked(out, size);
+        pthread_mutex_unlock(&pomodoro_fixture_mutex);
     } else snprintf(out, size, "{}");
     return true;
 }
@@ -191,6 +335,7 @@ bool __wrap_qzdesk_core_open(void) { return true; }
 bool __wrap_qzdesk_core_request_status(void) { return true; }
 bool __wrap_qzdesk_core_request_weather(void) { return true; }
 bool __wrap_qzdesk_core_request_performance(void) { return true; }
+bool __wrap_qzdesk_core_request_bridge(void) { return true; }
 void __wrap_qzdesk_core_poll(qzdesk_core_event_cb_t callback, void *data)
 {
     poll_callback = callback;
@@ -212,6 +357,102 @@ bool __wrap_qzdesk_core_subscribe(qzdesk_core_event_cb_t callback, void *data)
     listener_data[listener_count++] = data;
     return true;
 }
+
+static bool fixture_write_int(const char *path, int value)
+{
+    FILE *file = fopen(path, "w");
+    if (!file) return false;
+    bool ok = fprintf(file, "%d\n", value) > 0;
+    return fclose(file) == 0 && ok;
+}
+
+static int fixture_read_int(const char *path)
+{
+    FILE *file = fopen(path, "r");
+    int value = -1;
+    if (!file) return -1;
+    if (fscanf(file, "%d", &value) != 1) value = -1;
+    fclose(file);
+    return value;
+}
+
+static bool backlight_fixture_init(void)
+{
+    char dir[] = "/tmp/qzdesk-backlight-XXXXXX";
+    char maximum_path[256];
+    if (!mkdtemp(dir)) return false;
+    snprintf(maximum_path, sizeof(maximum_path), "%s/max_brightness", dir);
+    snprintf(backlight_fixture_path, sizeof(backlight_fixture_path), "%s/brightness", dir);
+    if (!fixture_write_int(maximum_path, 100) ||
+        !fixture_write_int(backlight_fixture_path, 40)) return false;
+    setenv("QZDESK_BACKLIGHT", backlight_fixture_path, 1);
+    return true;
+}
+
+static int backlight_fixture_level(void)
+{
+    return fixture_read_int(backlight_fixture_path);
+}
+
+static void backlight_watch_tick(uint32_t ms)
+{
+    lv_tick_inc(ms);
+    lv_timer_handler();
+}
+
+static void check_backlight_fade(lv_display_t *display)
+{
+    lv_display_trigger_activity(NULL);
+    backlight_watch_tick(100);
+    if (backlight_fixture_level() != 40) {
+        fprintf(stderr, "BACKLIGHT_FADE fixture did not start at 40%%\n");
+        failures++;
+        return;
+    }
+
+    /* Put the display just past the two-minute idle threshold. The first watch
+     * tick begins the fade without changing the panel in the same frame. */
+    display->last_activity_time = lv_tick_get() - 120000U;
+    backlight_watch_tick(100);
+    if (backlight_fixture_level() != 40) {
+        fprintf(stderr, "BACKLIGHT_FADE jumped on its first frame\n");
+        failures++;
+    }
+
+    for (int i = 0; i < 5; i++) backlight_watch_tick(100);
+    int early = backlight_fixture_level();
+    if (early < 38 || early >= 40) {
+        fprintf(stderr, "BACKLIGHT_FADE expected a subtle early step, got %d%%\n", early);
+        failures++;
+    }
+
+    for (int i = 0; i < 45; i++) backlight_watch_tick(100);
+    int middle = backlight_fixture_level();
+    if (middle < 18 || middle > 24) {
+        fprintf(stderr, "BACKLIGHT_FADE expected nonlinear midpoint, got %d%%\n", middle);
+        failures++;
+    }
+    if (middle >= early) {
+        fprintf(stderr, "BACKLIGHT_FADE did not decrease monotonically\n");
+        failures++;
+    }
+
+    for (int i = 0; i < 50; i++) backlight_watch_tick(100);
+    if (backlight_fixture_level() != 1) {
+        fprintf(stderr, "BACKLIGHT_FADE did not reach sleep level: %d%%\n",
+                backlight_fixture_level());
+        failures++;
+    }
+
+    lv_display_trigger_activity(NULL);
+    backlight_watch_tick(100);
+    if (backlight_fixture_level() != 40) {
+        fprintf(stderr, "BACKLIGHT_WAKE did not restore 40%%: %d%%\n",
+                backlight_fixture_level());
+        failures++;
+    }
+}
+
 void __wrap_qz_device_ip(char *out, unsigned int size) { snprintf(out, size, "192.168.100.200"); }
 void __wrap_qz_load_config(char *out, unsigned int size)
 {
@@ -296,6 +537,25 @@ static bool content_scroll_parent(lv_obj_t *parent)
            lv_obj_has_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 }
 
+/** 内容超出滚动容器不算越界：列表本来就靠滚动看剩下的部分。
+ *
+ *  只放过容器允许滚动的那个方向，另一半仍然照报 —— 纵向列表里横向溢出
+ *  是排版问题，不是滚动。 */
+static bool scroll_overflow_parent(lv_obj_t *parent, const lv_area_t *area,
+                                   const lv_area_t *parent_area)
+{
+    if (!parent || !lv_obj_has_flag(parent, LV_OBJ_FLAG_SCROLLABLE)) return false;
+    bool over_x = area->x1 < parent_area->x1 || area->x2 > parent_area->x2;
+    bool over_y = area->y1 < parent_area->y1 || area->y2 > parent_area->y2;
+    if (!over_x && !over_y) return false;
+    lv_dir_t dir = lv_obj_get_scroll_dir(parent);
+    if (over_x && !(dir & LV_DIR_HOR)) return false;
+    if (over_y && !(dir & LV_DIR_VER)) return false;
+    /* 真能滚才有话可说；装不下的内容一像素也不该跑出去。 */
+    return lv_obj_get_scroll_top(parent) + lv_obj_get_scroll_bottom(parent) +
+           lv_obj_get_scroll_left(parent) + lv_obj_get_scroll_right(parent) > 0;
+}
+
 static const char *object_text(lv_obj_t *object)
 {
     return lv_obj_has_class(object, &lv_label_class) ? lv_label_get_text(object) : "";
@@ -333,6 +593,8 @@ static void inspect(lv_obj_t *object, const char *path)
         bool fits = inside(&area, &parent_area);
         if (content_scroll_parent(parent))
             fits = area.x1 >= parent_area.x1 && area.x2 <= parent_area.x2;
+        else if (scroll_overflow_parent(parent, &area, &parent_area))
+            fits = true;
         if (!fits) {
             fprintf(stderr, "BOUNDARY %s [%d,%d,%d,%d] parent [%d,%d,%d,%d] %s\n",
                     path, area.x1, area.y1, area.x2, area.y2,
@@ -388,6 +650,59 @@ static void screenshot(lv_obj_t *screen, const char *name)
     fclose(file);
 }
 
+/* 触控命中区审计：仅当 QZ_LAYOUT_TOUCH_AUDIT 设置时输出，避免污染常规报告。
+ *
+ * 判定口径是**物理像素**的 40×40 下限（见 include/scale.h）。列出来的是候选，
+ * 不是失败：两类情况按设计接受，看到它们不用再改。
+ *   1. 整行目标（宽度 ≥ 200 实像素）：每行都够宽，手指有富余的横向容错，
+ *      例如设置页的行、Wi-Fi 列表、设备列表、提醒页的「添加提醒」。
+ *   2. 堆叠滑条（间距 < 40）：同一张卡里三条滑条的**行距只有 33 实像素**，
+ *      每行补到 40 会互相抢命中区；这类以整条拖动区（宽 185）为准。
+ *
+ * 另外这里打印的是对象**名义**命中区：LVGL 只在点在父级坐标内时才继续找子级
+ * （见 lv_indev_search_obj），所以套在矮行里的小开关实际被父级裁到行高，行本身
+ * 可点就够用。 */
+static int touch_audit_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("QZ_LAYOUT_TOUCH_AUDIT") != NULL ? 1 : 0;
+    return enabled;
+}
+
+/* 列出所有命中区偏小的可点对象（物理像素）。 */
+static void audit_touch(lv_obj_t *object, const char *path)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return;
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE)) {
+        lv_area_t area;
+        lv_obj_get_click_area(object, &area);
+        int w = lv_area_get_width(&area);
+        int h = lv_area_get_height(&area);
+        if (w < 40 || h < 40) {
+            const char *text = "";
+            if (lv_obj_has_class(object, &lv_label_class)) {
+                text = lv_label_get_text(object);
+            } else {
+                lv_obj_t *child = lv_obj_get_child(object, 0);
+                for (uint32_t i = 0; child && i < lv_obj_get_child_count(object); i++) {
+                    child = lv_obj_get_child(object, i);
+                    if (lv_obj_has_class(child, &lv_label_class)) {
+                        text = lv_label_get_text(child);
+                        break;
+                    }
+                }
+            }
+            fprintf(stderr, "TOUCH_AUDIT %s [%d,%d,%d,%d] %dx%d %s\n", path,
+                    area.x1, area.y1, area.x2, area.y2, w, h, text);
+        }
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        char child_path[256];
+        snprintf(child_path, sizeof(child_path), "%s/%u", path, i);
+        audit_touch(lv_obj_get_child(object, i), child_path);
+    }
+}
+
 static void check(lv_obj_t *screen, const char *name)
 {
     lv_screen_load(screen);
@@ -395,6 +710,7 @@ static void check(lv_obj_t *screen, const char *name)
     lv_timer_handler();
     lv_obj_update_layout(screen);
     inspect(screen, name);
+    if (touch_audit_enabled()) audit_touch(screen, name);
     screenshot(screen, name);
     cases++;
 }
@@ -411,6 +727,77 @@ static lv_obj_t *find_label(lv_obj_t *object, const char *text)
     return NULL;
 }
 
+static void settle(void);
+static lv_obj_t *find_icon_image(lv_obj_t *object, qz_icon_t icon, int32_t px);
+
+static lv_obj_t *find_label_prefix(lv_obj_t *object, const char *prefix)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return NULL;
+    if (lv_obj_has_class(object, &lv_label_class) &&
+        strncmp(lv_label_get_text(object), prefix, strlen(prefix)) == 0)
+        return object;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        lv_obj_t *found = find_label_prefix(lv_obj_get_child(object, i), prefix);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static lv_obj_t *find_clickable_user_data(lv_obj_t *object)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return NULL;
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_CLICKABLE) && lv_obj_get_user_data(object))
+        return object;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        lv_obj_t *found = find_clickable_user_data(lv_obj_get_child(object, i));
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static bool activate(lv_obj_t *object)
+{
+    if (!object || lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) ||
+        lv_obj_has_state(object, LV_STATE_DISABLED)) return false;
+    lv_obj_send_event(object, lv_obj_has_class(object, &lv_switch_class)
+                              ? LV_EVENT_RELEASED : LV_EVENT_CLICKED, NULL);
+    return true;
+}
+
+static lv_obj_t *pomodoro_row(lv_obj_t *panel, const char *title)
+{
+    lv_obj_t *label = find_label(panel, title);
+    return label ? lv_obj_get_parent(label) : NULL;
+}
+
+static bool pomodoro_step(lv_obj_t *panel, const char *title, bool increase)
+{
+    lv_obj_t *row = pomodoro_row(panel, title);
+    if (!row) return false;
+    if (increase) {
+        lv_obj_t *glyph = find_icon_image(row, QZ_ICON_PLUS, 15);
+        return activate(glyph ? lv_obj_get_parent(glyph) : NULL);
+    }
+    lv_obj_t *glyph = find_label(row, LV_SYMBOL_MINUS);
+    return activate(glyph ? lv_obj_get_parent(glyph) : NULL);
+}
+
+static bool pomodoro_row_value(lv_obj_t *panel, const char *title, const char *value)
+{
+    lv_obj_t *row = pomodoro_row(panel, title);
+    return row && find_label(row, value);
+}
+
+static void pomodoro_poll_now(void)
+{
+    /* Five one-second applet ticks force the five-second core reconciliation. */
+    for (int i = 0; i < 5; i++) {
+        lv_tick_inc(1000);
+        lv_timer_handler();
+        settle();
+    }
+}
+
 static void settle(void)
 {
     for (int i = 0; i < 30; i++) {
@@ -420,11 +807,71 @@ static void settle(void)
     }
 }
 
+static bool settle_until_label(lv_obj_t *screen, const char *text, int attempts)
+{
+    for (int i = 0; i < attempts; i++) {
+        settle();
+        if (find_label(screen, text)) {
+            /* A label can appear one frame before the queued reload replaces
+             * the page. Require a short stable window rather than returning on
+             * the first hit; 4 x 40 ms catches that hand-off without adding a
+             * full extra settle to every successful state check. */
+            bool stable = true;
+            for (int frame = 0; frame < 4 && stable; frame++) {
+                usleep(40000);
+                lv_tick_inc(40);
+                lv_timer_handler();
+                stable = find_label(screen, text) != NULL;
+            }
+            if (stable) return true;
+        }
+        usleep(5000);
+    }
+    return false;
+}
+
+/* WLAN intentionally reconnects before its first scan. Give the page the same
+ * 2.5 second poll window the device has, then let its queued async rebuild run. */
+static void wlan_fixture_advance_poll(void)
+{
+    lv_tick_inc(2600);
+    lv_timer_handler();
+    settle();
+}
+
 static bool click_text(lv_obj_t *screen, const char *text)
 {
     lv_obj_update_layout(screen);
-    lv_obj_t *object = find_label(screen, text);
-    if (object) {
+    lv_obj_t *fallback = NULL;
+    /*
+     * A screen may repeat a skill name in its overview and its list. Prefer
+     * the occurrence whose hit test resolves to an actual control; otherwise a
+     * decorative label wins the traversal and the click lands on the canvas.
+     */
+    lv_obj_t *stack[256];
+    int top = 0;
+    stack[top++] = screen;
+    while (top > 0) {
+        lv_obj_t *candidate = stack[--top];
+        if (lv_obj_has_flag(candidate, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (lv_obj_has_class(candidate, &lv_label_class) &&
+            strcmp(lv_label_get_text(candidate), text) == 0) {
+            lv_area_t area;
+            lv_obj_get_coords(candidate, &area);
+            lv_point_t point = { (area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2 };
+            lv_obj_t *hit = lv_indev_search_obj(screen, &point);
+            if (!fallback) fallback = hit;
+            if (hit && hit != screen && lv_obj_has_flag(hit, LV_OBJ_FLAG_CLICKABLE)) {
+                fallback = hit;
+                break;
+            }
+        }
+        uint32_t count = lv_obj_get_child_count(candidate);
+        for (uint32_t i = 0; i < count && top < (int)(sizeof(stack) / sizeof(stack[0])); i++)
+            stack[top++] = lv_obj_get_child(candidate, i);
+    }
+    lv_obj_t *object = fallback;
+    if (object && object != screen) {
         lv_area_t area;
         lv_obj_get_coords(object, &area);
         lv_point_t point = { (area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2 };
@@ -445,6 +892,69 @@ static lv_obj_t *find_type(lv_obj_t *object, const lv_obj_class_t *type)
         if (found) return found;
     }
     return NULL;
+}
+
+static int find_types(lv_obj_t *object, const lv_obj_class_t *type,
+                      lv_obj_t **out, int maximum)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return 0;
+    int count = 0;
+    if (lv_obj_has_class(object, type)) {
+        if (count < maximum) out[count] = object;
+        count++;
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        int child_count = find_types(lv_obj_get_child(object, i), type,
+                                     out + (count < maximum ? count : 0),
+                                     count < maximum ? maximum - count : 0);
+        count += child_count;
+    }
+    return count;
+}
+
+static bool activate_label_parent(lv_obj_t *screen, const char *text)
+{
+    lv_obj_t *label = find_label(screen, text);
+    lv_obj_t *parent = label ? lv_obj_get_parent(label) : NULL;
+    if (!parent || !activate(parent)) return false;
+    settle();
+    return true;
+}
+
+static lv_obj_t *find_icon_image(lv_obj_t *object, qz_icon_t icon, int32_t px)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return NULL;
+    if (lv_obj_has_class(object, &lv_image_class) &&
+        lv_image_get_src(object) == qz_icon(icon, qz_scale_px(px))) {
+        return object;
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        lv_obj_t *found = find_icon_image(lv_obj_get_child(object, i), icon, px);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static bool click_icon_button(lv_obj_t *screen, qz_icon_t icon, int32_t px)
+{
+    lv_obj_t *glyph = find_icon_image(screen, icon, px);
+    if (!glyph) return false;
+    lv_obj_t *button = lv_obj_get_parent(glyph);
+    if (!button || lv_obj_has_state(button, LV_STATE_DISABLED)) return false;
+    lv_obj_send_event(button, LV_EVENT_CLICKED, NULL);
+    settle();
+    return true;
+}
+
+static bool open_assistant_menu(lv_obj_t *screen, const char *case_name)
+{
+    if (click_icon_button(screen, QZ_ICON_LIST, qz_design_px(24))) {
+        lv_obj_update_layout(lv_layer_top());
+        if (find_label(lv_layer_top(), "新建聊天")) return true;
+    }
+    fprintf(stderr, "MISSING_ACTION %s trigger=more\n", case_name);
+    failures++;
+    return false;
 }
 
 static void name_screen(lv_obj_t *screen, const char *name)
@@ -485,36 +995,38 @@ static bool require_click(lv_obj_t *screen, const char *caption, const char *cas
 
 static void check_apps_scroll(lv_obj_t *screen)
 {
-    lv_obj_t *grid = lv_obj_get_child(screen, 1);
+    lv_obj_t *scroll = lv_obj_get_child(screen, 1);
     lv_obj_update_layout(screen);
-    if (!grid || !lv_obj_has_flag(grid, LV_OBJ_FLAG_SCROLLABLE) ||
-        lv_obj_get_scroll_dir(grid) != LV_DIR_VER || lv_obj_get_child_count(grid) != 7) {
-        fprintf(stderr, "APPS_SCROLL expected 6 tiles in a vertical scroll area\n");
+    lv_obj_t *stage = scroll ? lv_obj_get_child(scroll, 0) : NULL;
+    if (!scroll || !lv_obj_has_flag(scroll, LV_OBJ_FLAG_SCROLLABLE) ||
+        lv_obj_get_scroll_dir(scroll) != LV_DIR_VER || !stage ||
+        lv_obj_get_child_count(stage) != 7) {
+        fprintf(stderr, "APPS_SCROLL expected featured workspace plus six utilities in a vertical scroll area\n");
         failures++;
         return;
     }
     lv_screen_load(screen);
     for (int bottom = 0; bottom < 2; bottom++) {
-        lv_obj_scroll_to_y(grid, bottom ? lv_obj_get_scroll_bottom(grid) : 0, LV_ANIM_OFF);
+        lv_obj_scroll_to_y(scroll, bottom ? lv_obj_get_scroll_bottom(scroll) : 0, LV_ANIM_OFF);
         lv_obj_update_layout(screen);
         lv_area_t viewport;
-        lv_obj_get_coords(grid, &viewport);
+        lv_obj_get_coords(scroll, &viewport);
         int visible = 0;
         for (uint32_t i = 0; i < 7; i++) {
             lv_area_t tile;
-            lv_obj_get_coords(lv_obj_get_child(grid, i), &tile);
+            lv_obj_get_coords(lv_obj_get_child(stage, i), &tile);
             if (inside(&tile, &viewport)) visible++;
         }
-        int expected_visible = bottom ? 3 : 4;
-        if (visible != expected_visible || lv_obj_get_scroll_left(grid) > 0 || lv_obj_get_scroll_right(grid) > 0) {
-            fprintf(stderr, "APPS_SCROLL %s visible=%d, expected 4 without horizontal overflow\n",
-                    bottom ? "bottom" : "top", visible);
+        int expected_visible = lv_obj_get_width(screen) <= 320 ? 3 : (bottom ? 6 : 5);
+        if (visible != expected_visible || lv_obj_get_scroll_left(scroll) > 0 || lv_obj_get_scroll_right(scroll) > 0) {
+            fprintf(stderr, "APPS_SCROLL %s visible=%d, expected %d without horizontal overflow\n",
+                    bottom ? "bottom" : "top", visible, expected_visible);
             failures++;
         }
         check(screen, bottom ? "apps-scroll-bottom" : "apps-scroll-top");
     }
     require_click(screen, "设置", "apps-open-settings");
-    lv_obj_scroll_to_y(grid, 0, LV_ANIM_OFF);
+    lv_obj_scroll_to_y(scroll, 0, LV_ANIM_OFF);
 }
 
 static bool open_dialog(lv_obj_t *screen, const char *caption, const char *name)
@@ -527,6 +1039,14 @@ static bool open_dialog(lv_obj_t *screen, const char *caption, const char *name)
     }
     check(screen, name);
     return true;
+}
+
+static lv_obj_t *open_label_row_modal(lv_obj_t *screen, const char *caption)
+{
+    uint32_t before = lv_obj_get_child_count(screen);
+    if (!activate_label_parent(screen, caption) ||
+        lv_obj_get_child_count(screen) <= before) return NULL;
+    return lv_obj_get_child(screen, -1);
 }
 
 static bool require_click(lv_obj_t *screen, const char *caption, const char *case_name)
@@ -550,10 +1070,49 @@ static void emit_ascii_chat(const char *role)
     poll_callback(&event, poll_data);
 }
 
+/* 识别结果事件：界面据此把"我听到：…"写进字幕。 */
+static void emit_asr(const char *text)
+{
+    if (!poll_callback) {
+        fprintf(stderr, "MISSING_CALLBACK assistant core poll\n");
+        failures++;
+        return;
+    }
+    qzdesk_core_event_t event = { .type = QZDESK_CORE_EVENT_ASR };
+    snprintf(event.text, sizeof(event.text), "%s", text);
+    poll_callback(&event, poll_data);
+}
+
+static void emit_bridge(bool ok, const char *text)
+{
+    if (!poll_callback) {
+        fprintf(stderr, "MISSING_CALLBACK assistant core poll\n");
+        failures++;
+        return;
+    }
+    qzdesk_core_event_t event = { .type = QZDESK_CORE_EVENT_BRIDGE, .ok = ok };
+    snprintf(event.text, sizeof(event.text), "%s", text ? text : "");
+    poll_callback(&event, poll_data);
+}
+
+static void emit_state(int state)
+{
+    if (!poll_callback) {
+        fprintf(stderr, "MISSING_CALLBACK assistant core poll\n");
+        failures++;
+        return;
+    }
+    qzdesk_core_event_t event = { .type = QZDESK_CORE_EVENT_STATUS, .state = state };
+    poll_callback(&event, poll_data);
+}
+
 static void check_weather_states(lv_obj_t *desktop, lv_obj_t *weather)
 {
     if (!weather) return;
     qzdesk_core_event_t event = { .type = QZDESK_CORE_EVENT_WEATHER };
+    /* 0 是合法值（= 正在下雨）：先摆成"没有临近降水"，各用例再各自覆盖。 */
+    event.weather.near_precipitation_minutes = -1;
+    event.weather.near_precipitation_probability = -1;
     snprintf(event.weather.status, sizeof(event.weather.status), "error");
     snprintf(event.weather.city, sizeof(event.weather.city), "呼和浩特");
     snprintf(event.weather.message, sizeof(event.weather.message), "天气服务未连接，请稍后重试");
@@ -585,11 +1144,18 @@ static void check_weather_states(lv_obj_t *desktop, lv_obj_t *weather)
     emit(&event);
     check(desktop, "desktop-weather-long-cjk-city");
     check(weather, "weather-long-cjk-city");
+    /* 临近降水优先：描述行要换成长文案，最宽的那种（两位数分钟 + 百分比）。 */
+    event.weather.near_precipitation_minutes = 45;
+    event.weather.near_precipitation_probability = 100;
+    emit(&event);
+    check(desktop, "desktop-weather-imminent-rain");
 }
 
 static void seed_events(void)
 {
     qzdesk_core_event_t event = { .type = QZDESK_CORE_EVENT_WEATHER };
+    event.weather.near_precipitation_minutes = -1;
+    event.weather.near_precipitation_probability = -1;
     snprintf(event.weather.status, sizeof(event.weather.status), "ok");
     snprintf(event.weather.city, sizeof(event.weather.city), "呼和浩特");
     snprintf(event.weather.text, sizeof(event.weather.text), "多云转晴");
@@ -698,16 +1264,16 @@ int main(int argc, char **argv)
     lv_obj_t *clock_grid = lv_obj_get_child(apps, 1);
     lv_obj_update_layout(apps);
     lv_obj_scroll_to_y(clock_grid, lv_obj_get_scroll_bottom(clock_grid), LV_ANIM_OFF);
-    require_click(apps, "桌面时钟", "apps-open-clock");
+    require_click(apps, "时钟与天气", "apps-open-clock");
     settle();
     lv_obj_t *clock_screen = lv_screen_active();
     if (clock_screen == desktop || !find_label(clock_screen, "桌面气象站")) failures++;
     check(clock_screen, "desktop-clock-weather-station");
-    lv_obj_t *station_toolbar = lv_obj_get_child(clock_screen, 0);
-    lv_obj_t *station_back = lv_obj_get_child(station_toolbar, 0);
-    lv_obj_send_event(station_back, LV_EVENT_CLICKED, NULL);
-    settle();
-    if (lv_screen_active() != apps) failures++;
+    if (!click_icon_button(clock_screen, QZ_ICON_CHEVRON_LEFT, qz_design_px(QZ_TOUCH_BACK / 2)) ||
+        lv_screen_active() != apps) {
+        fprintf(stderr, "FAIL desktop-clock-weather-return\n");
+        failures++;
+    }
     check(apps, "desktop-clock-weather-return");
     lv_screen_load(performance);
     settle();
@@ -744,23 +1310,62 @@ int main(int argc, char **argv)
     require_click(control, "本机", "control-local-return");
     check(control, "control-local-return");
     lv_screen_load(assistant_screen);
-    require_click(assistant_screen, "表情", "assistant-face");
+    check(assistant_screen, "assistant-empty");
+    if (open_assistant_menu(assistant_screen, "assistant-menu")) {
+        check(assistant_screen, "assistant-menu");
+        const char *menu_items[] = { "新建聊天", "本地记忆", "停止回复", "表情模式" };
+        for (int i = 0; i < 4; i++) {
+            lv_obj_t *label = find_label(lv_layer_top(), menu_items[i]);
+            lv_obj_t *row = label ? lv_obj_get_parent(label) : NULL;
+            lv_area_t area;
+            if (!row) {
+                fprintf(stderr, "MISSING_MENU_ITEM assistant-menu %s\n", menu_items[i]);
+                failures++;
+                continue;
+            }
+            lv_obj_get_coords(row, &area);
+            if (lv_area_get_height(&area) < QZ_MIN_TOUCH_PX) {
+                fprintf(stderr, "TOUCH_MENU assistant-menu %s height=%d\n",
+                        menu_items[i], lv_area_get_height(&area));
+                failures++;
+            }
+        }
+        if (!click_text(lv_layer_top(), "表情模式")) {
+            fprintf(stderr, "MISSING_ACTION assistant-face trigger=mode-menu\n");
+            failures++;
+        }
+        if (find_label(lv_layer_top(), "新建聊天")) {
+            fprintf(stderr, "MENU_LEFT_OPEN assistant-face\n");
+            failures++;
+        }
+    }
     check(assistant_screen, "assistant-face");
-    require_click(assistant_screen, "聊天", "assistant-chat");
+    if (open_assistant_menu(assistant_screen, "assistant-chat")) {
+        if (!click_text(lv_layer_top(), "聊天模式")) {
+            fprintf(stderr, "MISSING_ACTION assistant-chat trigger=mode-menu\n");
+            failures++;
+        }
+        if (find_label(lv_layer_top(), "新建聊天")) {
+            fprintf(stderr, "MENU_LEFT_OPEN assistant-chat\n");
+            failures++;
+        }
+    }
     lv_tick_inc(1000);
     settle();
     check(assistant_screen, "assistant-chat");
-    require_click(assistant_screen, "本地记忆", "assistant-memory");
+    if (open_assistant_menu(assistant_screen, "assistant-memory")) {
+        if (!click_text(lv_layer_top(), "本地记忆")) {
+            fprintf(stderr, "MISSING_ACTION assistant-memory trigger=menu\n");
+            failures++;
+        }
+    }
     lv_obj_t *memory_page = lv_screen_active();
     check(memory_page, "assistant-memory");
-    lv_obj_t *memory_field = find_type(memory_page, &lv_textarea_class);
-    if (memory_field) {
-        lv_obj_send_event(memory_field, LV_EVENT_FOCUSED, NULL);
-        check(memory_page, "assistant-memory-keyboard");
-        lv_obj_t *memory_keys = find_type(memory_page, &lv_keyboard_class);
-        if (memory_keys) lv_obj_send_event(memory_keys, LV_EVENT_CANCEL, NULL);
-        check(memory_page, "assistant-memory-keyboard-closed");
-    } else failures++;
+    /* 设备上没有中文输入法，记忆页不再提供输入框：应该一个 textarea 都没有，
+     * 只有"回对话页说"的说明和入口。 */
+    if (find_type(memory_page, &lv_textarea_class) || find_type(memory_page, &lv_keyboard_class))
+        failures++;
+    check(memory_page, "assistant-memory-readonly");
     lv_screen_load(assistant_screen);
     emit_ascii_chat("assistant");
     check(assistant_screen, "assistant-ascii-reply");
@@ -785,10 +1390,84 @@ int main(int argc, char **argv)
         fprintf(stderr, "MISSING_INPUT assistant-keyboard\n");
         failures++;
     }
-    require_click(assistant_screen, "表情", "assistant-face-return");
+    if (open_assistant_menu(assistant_screen, "assistant-face-return")) {
+        if (!click_text(lv_layer_top(), "表情模式")) {
+            fprintf(stderr, "MISSING_ACTION assistant-face-return trigger=mode-menu\n");
+            failures++;
+        }
+    }
     check(assistant_screen, "assistant-face-return");
-    require_click(assistant_screen, "聊天", "assistant-chat-return");
+    /* 语音闭环：回复中语音键换成"打断重说"；识别结果写进字幕，长句子也不许
+     * 压到下面的语音键上。两条都只看表情模式 —— 聊天模式下识别结果是气泡。 */
+    emit_state(6);
+    if (!find_label(assistant_screen, "打断重说")) {
+        fprintf(stderr, "MISSING_LABEL assistant-face-interrupt\n");
+        failures++;
+    }
+    check(assistant_screen, "assistant-face-interrupt");
+    emit_asr("把明天下午三点的会改到四点，另外提醒我带充电器");
+    check(assistant_screen, "assistant-face-heard");
+    emit_state(3);
+    if (open_assistant_menu(assistant_screen, "assistant-chat-return")) {
+        if (!click_text(lv_layer_top(), "聊天模式")) {
+            fprintf(stderr, "MISSING_ACTION assistant-chat-return trigger=mode-menu\n");
+            failures++;
+        }
+    }
     check(assistant_screen, "assistant-chat-return");
+
+    /* 手机输入桥：输入栏里的手机键要能打开二维码；核心成功时画码，失败时
+     * 原样显示原因。两条都要在关闭后不把浮层留给后续用例。 */
+    lv_obj_t *bridge_icon = find_icon_image(assistant_screen, QZ_ICON_DEVICE_MOBILE,
+                                            qz_design_px(34));
+    if (!bridge_icon) {
+        fprintf(stderr, "MISSING_ACTION assistant-bridge trigger=phone\n");
+        failures++;
+    } else {
+        lv_obj_send_event(lv_obj_get_parent(bridge_icon), LV_EVENT_CLICKED, NULL);
+        settle();
+        if (!find_label(lv_layer_top(), "手机输入")) {
+            fprintf(stderr, "MISSING_BRIDGE assistant-bridge-open\n");
+            failures++;
+        }
+        emit_bridge(true, "http://192.168.100.200:8080/#chat");
+        settle();
+        lv_obj_update_layout(lv_layer_top());
+        if (!find_type(lv_layer_top(), &lv_qrcode_class) ||
+            !find_label(lv_layer_top(), "手机扫码，打开对话页直接在手机上打字") ||
+            !find_label(lv_layer_top(), "http://192.168.100.200:8080/#chat")) {
+            fprintf(stderr, "MISSING_BRIDGE assistant-bridge-url\n");
+            failures++;
+        }
+        inspect(lv_layer_top(), "assistant-bridge");
+        check(assistant_screen, "assistant-bridge");
+        if (!click_text(lv_layer_top(), "关闭")) {
+            fprintf(stderr, "MISSING_BRIDGE assistant-bridge-close\n");
+            failures++;
+        }
+        if (find_label(lv_layer_top(), "手机输入")) {
+            fprintf(stderr, "BRIDGE_LEFT_OPEN assistant-bridge-close\n");
+            failures++;
+        }
+
+        lv_obj_send_event(lv_obj_get_parent(bridge_icon), LV_EVENT_CLICKED, NULL);
+        settle();
+        emit_bridge(false, "设备当前没有局域网地址，请先连接 WiFi");
+        settle();
+        lv_obj_update_layout(lv_layer_top());
+        if (find_type(lv_layer_top(), &lv_qrcode_class) ||
+            !find_label(lv_layer_top(), "设备当前没有局域网地址，请先连接 WiFi")) {
+            fprintf(stderr, "MISSING_BRIDGE assistant-bridge-error\n");
+            failures++;
+        }
+        inspect(lv_layer_top(), "assistant-bridge-error");
+        check(assistant_screen, "assistant-bridge-error");
+        if (!click_text(lv_layer_top(), "关闭")) {
+            fprintf(stderr, "MISSING_BRIDGE assistant-bridge-error-close\n");
+            failures++;
+        }
+    }
+
     input = find_type(assistant_screen, &lv_textarea_class);
     if (input) {
         lv_obj_send_event(input, LV_EVENT_FOCUSED, NULL);
@@ -869,34 +1548,478 @@ int main(int argc, char **argv)
     if (open_dialog(reminders, "08:30", "reminder-edit")) {
         click_text(reminders, "取消");
     }
+    {
+        lv_obj_t *delete_button = find_clickable_user_data(reminders);
+        if (!delete_button) {
+            fprintf(stderr, "MISSING_ACTION reminder-delete\n");
+            failures++;
+        } else {
+            lv_area_t area;
+            lv_obj_send_event(delete_button, LV_EVENT_CLICKED, NULL);
+            settle();
+            if (!find_label(reminders, "再点一次删除可确认（5秒内）")) {
+                fprintf(stderr, "REMINDER_DELETE confirmation banner missing\n");
+                failures++;
+            }
+            lv_obj_get_coords(delete_button, &area);
+            lv_point_t point = { (area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2 };
+            lv_obj_t *hit = lv_indev_search_obj(reminders, &point);
+            if (!hit || !lv_obj_has_flag(hit, LV_OBJ_FLAG_CLICKABLE)) {
+                fprintf(stderr, "REMINDER_DELETE confirmation hit blocked\n");
+                failures++;
+            } else {
+                lv_obj_send_event(hit, LV_EVENT_CLICKED, NULL);
+                settle();
+                if (timer_delete_count != 1) {
+                    fprintf(stderr, "REMINDER_DELETE second tap did not delete\n");
+                    failures++;
+                }
+            }
+        }
+    }
     lv_obj_t *pomodoro = qz_applets_screen(QZ_APPLET_POMODORO);
     lv_screen_load(pomodoro);
-    require_click(pomodoro, "25/5·4轮", "pomodoro-preset");
-    check(pomodoro, "pomodoro-preset-change");
-    lv_obj_t *preset_label = find_label(pomodoro, "45/10·2轮");
-    if (preset_label) {
-        lv_obj_send_event(lv_obj_get_parent(preset_label), LV_EVENT_LONG_PRESSED, NULL);
-        settle();
-        if (!find_label(lv_layer_top(), "自动开始休息")) {
-            fprintf(stderr, "MISSING_CUSTOM_POMODORO\n");
+    settle();
+    if (!find_label(pomodoro, "25:00") || find_label(pomodoro, "00:00") ||
+        !find_label(pomodoro, "准备专注") || !find_label(pomodoro, "开始专注") ||
+        !find_label(pomodoro, "已完成 0 / 4 轮") ||
+        !find_label(pomodoro, "开始后计算结束时刻")) {
+        fprintf(stderr, "POMODORO_IDLE expected 25:00 focus defaults\n");
+        failures++;
+    }
+    check(pomodoro, "pomodoro-idle");
+
+    if (!click_icon_button(pomodoro, QZ_ICON_SETTINGS, 16)) {
+        fprintf(stderr, "MISSING_ACTION pomodoro-settings trigger=header\n");
+        failures++;
+    } else {
+        lv_obj_t *panel = pomodoro;
+        if (!find_label(panel, "节律编辑") || !find_label(panel, "专注分钟") ||
+            !find_label(panel, "休息分钟") || !find_label(panel, "轮次") ||
+            !find_label(panel, "自动开始休息")) {
+            fprintf(stderr, "MISSING_PANEL pomodoro-settings\n");
             failures++;
         }
-        inspect(lv_layer_top(), "pomodoro-custom");
-        check(pomodoro, "pomodoro-custom");
-        lv_obj_t *custom_input = find_type(lv_layer_top(), &lv_textarea_class);
-        if (custom_input) {
-            lv_textarea_set_text(custom_input, "0");
-            click_text(lv_layer_top(), "保存");
-            if (!find_label(lv_layer_top(), "专注：1-120分钟")) failures++;
-            check(pomodoro, "pomodoro-invalid-input");
-            lv_textarea_set_text(custom_input, "30");
-            if (!click_text(lv_layer_top(), "保存") ||
-                !find_label(pomodoro, "30/10·2轮")) failures++;
-        } else failures++;
-        click_text(lv_layer_top(), "取消");
-    } else { fprintf(stderr, "MISSING_CUSTOM_PRESET_TRIGGER\n"); failures++; }
+        lv_obj_t *auto_switch = find_type(panel, &lv_switch_class);
+        if (!auto_switch || !lv_obj_has_state(auto_switch, LV_STATE_CHECKED)) {
+            fprintf(stderr, "POMODORO_SETTINGS switch should start checked\n");
+            failures++;
+        }
+        inspect(lv_layer_top(), "pomodoro-settings");
+        check(pomodoro, "pomodoro-settings");
 
+        for (int i = 0; i < 190; i++) pomodoro_step(panel, "专注分钟", true);
+        for (int i = 0; i < 190; i++) pomodoro_step(panel, "休息分钟", true);
+        for (int i = 0; i < 20; i++) pomodoro_step(panel, "轮次", true);
+        if (!pomodoro_row_value(panel, "专注分钟", "180") ||
+            !pomodoro_row_value(panel, "休息分钟", "180") ||
+            !pomodoro_row_value(panel, "轮次", "12")) {
+            fprintf(stderr, "POMODORO_STEPPER upper bounds not clamped\n");
+            failures++;
+        }
+        inspect(lv_layer_top(), "pomodoro-settings-limits");
+        check(pomodoro, "pomodoro-settings-limits");
+        for (int i = 0; i < 190; i++) pomodoro_step(panel, "专注分钟", false);
+        for (int i = 0; i < 190; i++) pomodoro_step(panel, "休息分钟", false);
+        for (int i = 0; i < 20; i++) pomodoro_step(panel, "轮次", false);
+        if (!pomodoro_row_value(panel, "专注分钟", "1") ||
+            !pomodoro_row_value(panel, "休息分钟", "1") ||
+            !pomodoro_row_value(panel, "轮次", "1")) {
+            fprintf(stderr, "POMODORO_STEPPER lower bounds not clamped\n");
+            failures++;
+        }
+        if (!click_text(panel, "25/5/4")) {
+            fprintf(stderr, "MISSING_ACTION pomodoro-preset\n");
+            failures++;
+        }
+        if (auto_switch) {
+            activate(auto_switch);
+            settle();
+            if (lv_obj_has_state(auto_switch, LV_STATE_CHECKED)) {
+                fprintf(stderr, "POMODORO_SETTINGS switch did not toggle\n");
+                failures++;
+            }
+            activate(auto_switch);
+            settle();
+            if (!lv_obj_has_state(auto_switch, LV_STATE_CHECKED)) {
+                fprintf(stderr, "POMODORO_SETTINGS switch did not restore\n");
+                failures++;
+            }
+        }
+        bool preset_clicked = click_text(panel, "45/10/2");
+        bool preset_values = pomodoro_row_value(panel, "专注分钟", "45") &&
+                             pomodoro_row_value(panel, "休息分钟", "10") &&
+                             pomodoro_row_value(panel, "轮次", "2");
+        bool saved = click_text(panel, "保存");
+        bool idle_clock = find_label(pomodoro, "45:00") != NULL;
+        bool saved_notice = find_label(pomodoro, "节律已更新") != NULL;
+        if (!preset_clicked || !preset_values || !saved || !idle_clock || !saved_notice) {
+            fprintf(stderr,
+                    "POMODORO_PRESET save did not update idle focus "
+                    "click=%d values=%d save=%d clock=%d notice=%d\n",
+                    preset_clicked, preset_values, saved, idle_clock, saved_notice);
+            failures++;
+        }
+    }
+
+    if (!click_icon_button(pomodoro, QZ_ICON_SETTINGS, 16)) {
+        fprintf(stderr, "MISSING_ACTION pomodoro-settings-reopen\n");
+        failures++;
+    } else {
+        lv_obj_t *panel = pomodoro;
+        lv_obj_t *auto_switch = find_type(panel, &lv_switch_class);
+        if (!auto_switch || !lv_obj_has_state(auto_switch, LV_STATE_CHECKED)) {
+            fprintf(stderr, "POMODORO_SETTINGS switch lost checked state after preset\n");
+            failures++;
+        }
+        click_text(panel, "15/5/4");
+        if (auto_switch) {
+            activate(auto_switch);
+            settle();
+        }
+        if (!click_text(panel, "保存") || !find_label(pomodoro, "15:00")) {
+            fprintf(stderr, "POMODORO_SETTINGS second save failed\n");
+            failures++;
+        }
+    }
+    check(pomodoro, "pomodoro-customized-idle");
+
+    if (!click_text(pomodoro, "开始专注")) {
+        fprintf(stderr, "MISSING_ACTION pomodoro-start\n");
+        failures++;
+    } else {
+        layout_pomodoro_state_t state;
+        pomodoro_fixture_snapshot(&state);
+        if (!state.active || state.paused || state.focus_minutes != 15 ||
+            state.break_minutes != 5 || state.total_cycles != 4 ||
+            state.auto_break || state.start_count != 1) {
+            fprintf(stderr, "POMODORO_START wrong request state focus=%d break=%d cycles=%d auto=%d\n",
+                    state.focus_minutes, state.break_minutes, state.total_cycles,
+                    state.auto_break);
+            failures++;
+        }
+        if (!find_label(pomodoro, "专注") || !find_label(pomodoro, "暂停") ||
+            !find_label_prefix(pomodoro, "预计 ")) {
+            fprintf(stderr, "POMODORO_FOCUS missing live time state\n");
+            failures++;
+        }
+        check(pomodoro, "pomodoro-focus");
+
+        if (!click_text(pomodoro, "暂停")) {
+            fprintf(stderr, "MISSING_ACTION pomodoro-pause\n");
+            failures++;
+        } else {
+            pomodoro_fixture_snapshot(&state);
+            if (!state.paused || state.pause_count != 1 ||
+                !find_label(pomodoro, "专注已暂停") ||
+                !find_label(pomodoro, "继续专注") ||
+                !find_label(pomodoro, "继续后计算结束时刻")) {
+                fprintf(stderr, "POMODORO_PAUSE incorrect focus pause state\n");
+                failures++;
+            }
+            check(pomodoro, "pomodoro-focus-paused");
+            if (!click_text(pomodoro, "继续专注")) {
+                fprintf(stderr, "MISSING_ACTION pomodoro-resume\n");
+                failures++;
+            } else {
+                pomodoro_fixture_snapshot(&state);
+                if (state.paused || state.resume_count != 1 ||
+                    !find_label(pomodoro, "专注") || !find_label(pomodoro, "暂停")) {
+                    fprintf(stderr, "POMODORO_RESUME did not return to focus\n");
+                    failures++;
+                }
+            }
+        }
+    }
+
+    if (!click_icon_button(pomodoro, QZ_ICON_SETTINGS, 16)) {
+        fprintf(stderr, "MISSING_ACTION pomodoro-settings-active\n");
+        failures++;
+    } else {
+        lv_obj_t *panel = pomodoro;
+        click_text(panel, "45/10/2");
+        lv_obj_t *auto_switch = find_type(panel, &lv_switch_class);
+        if (auto_switch && !lv_obj_has_state(auto_switch, LV_STATE_CHECKED)) {
+            activate(auto_switch);
+            settle();
+        }
+        if (!click_text(panel, "保存") ||
+            !find_label(pomodoro, "已保存，将在下一次开始时生效") ||
+            !find_label(pomodoro, "第 1 / 4 轮")) {
+            fprintf(stderr, "POMODORO_ACTIVE_SAVE changed the running phase\n");
+            failures++;
+        }
+    }
+    if (!click_text(pomodoro, "结束") || !find_label(pomodoro, "45:00") ||
+        !find_label(pomodoro, "准备专注")) {
+        fprintf(stderr, "POMODORO_STOP did not restore idle configuration\n");
+        failures++;
+    }
+    {
+        layout_pomodoro_state_t state;
+        pomodoro_fixture_snapshot(&state);
+        if (state.active || state.paused || state.stop_count != 1) {
+            fprintf(stderr, "POMODORO_STOP wrong fixture state\n");
+            failures++;
+        }
+    }
+
+    if (!click_text(pomodoro, "开始专注")) {
+        fprintf(stderr, "MISSING_ACTION pomodoro-restart\n");
+        failures++;
+    } else {
+        layout_pomodoro_state_t state;
+        pomodoro_fixture_snapshot(&state);
+        if (!state.active || state.focus_minutes != 45 ||
+            state.break_minutes != 10 || state.total_cycles != 2 ||
+            !state.auto_break || state.start_count != 2) {
+            fprintf(stderr, "POMODORO_NEXT_START did not use saved config\n");
+            failures++;
+        }
+    }
+    pomodoro_fixture_set(true, false, "break", 300, 1, 2, 45, 10, true);
+    pomodoro_poll_now();
+    if (!find_label(pomodoro, "休息") || !find_label(pomodoro, "暂停") ||
+        !find_label(pomodoro, "已完成 1 / 2 轮") ||
+        !find_label_prefix(pomodoro, "预计 ")) {
+        fprintf(stderr, "POMODORO_REST missing break state\n");
+        failures++;
+    }
+    check(pomodoro, "pomodoro-rest");
+
+    pomodoro_fixture_set(true, true, "break", 300, 1, 2, 45, 10, false);
+    pomodoro_poll_now();
+    if (!find_label(pomodoro, "休息已暂停") || !find_label(pomodoro, "继续休息") ||
+        !find_label(pomodoro, "继续后开始休息")) {
+        fprintf(stderr, "POMODORO_REST_PAUSED missing pending break copy\n");
+        failures++;
+    }
+    check(pomodoro, "pomodoro-rest-paused");
+    if (!click_text(pomodoro, "继续休息")) {
+        fprintf(stderr, "MISSING_ACTION pomodoro-resume-break\n");
+        failures++;
+    } else {
+        layout_pomodoro_state_t state;
+        pomodoro_fixture_snapshot(&state);
+        if (state.paused || !state.active || strcmp(state.phase, "break") != 0 ||
+            state.resume_count != 2) {
+            fprintf(stderr, "POMODORO_RESUME_BREAK failed\n");
+            failures++;
+        }
+    }
+    if (!click_text(pomodoro, "结束")) {
+        fprintf(stderr, "MISSING_ACTION pomodoro-stop-rest\n");
+        failures++;
+    }
+
+    bool backlight_ready = backlight_fixture_init();
+    bool fixture_home_ready = mkdtemp(fixture_home_path) != NULL;
+    if (fixture_home_ready) setenv("HOME", fixture_home_path, 1);
     qz_notifications_init();
+    if (!fixture_home_ready) {
+        fprintf(stderr, "NOTIFICATION_FIXTURE_HOME_FAILED\n");
+        failures++;
+    } else {
+        if (!qz_notifications_set_dnd(true)) {
+            fprintf(stderr, "DND_FIXTURE_MANUAL_SET_FAILED\n");
+            failures++;
+        }
+        if (!find_label(settings, "手动开启")) {
+            fprintf(stderr, "MISSING_DND_SUMMARY manual\n");
+            failures++;
+        }
+        if (!qz_notifications_schedule_set(true, 22 * 60, 8 * 60)) {
+            fprintf(stderr, "DND_FIXTURE_SCHEDULE_SET_FAILED\n");
+            failures++;
+        }
+        lv_obj_send_event(settings, LV_EVENT_SCREEN_LOADED, NULL);
+        if (!find_label(settings, "每天 22:00-08:00 · 手动")) {
+            fprintf(stderr, "MISSING_DND_SUMMARY schedule-and-manual\n");
+            failures++;
+        }
+        if (!qz_notifications_schedule_set(false, 22 * 60, 8 * 60)) {
+            fprintf(stderr, "DND_FIXTURE_SCHEDULE_RESET_FAILED\n");
+            failures++;
+        }
+        if (!qz_notifications_set_dnd(false)) {
+            fprintf(stderr, "DND_FIXTURE_MANUAL_RESET_FAILED\n");
+            failures++;
+        }
+        lv_obj_send_event(settings, LV_EVENT_SCREEN_LOADED, NULL);
+        if (!find_label(settings, "未启用")) {
+            fprintf(stderr, "MISSING_DND_SUMMARY disabled\n");
+            failures++;
+        }
+
+        lv_obj_t *schedule_rollers[8];
+        lv_obj_t *schedule_switches[4];
+        int roller_count = 0;
+        int switch_count = 0;
+        lv_screen_load(settings);
+        settle();
+        lv_obj_t *schedule_modal = open_label_row_modal(settings, "安静时段");
+        if (!schedule_modal) {
+            fprintf(stderr, "MISSING_ACTION dnd-schedule-open\n");
+            failures++;
+        } else {
+            lv_obj_update_layout(schedule_modal);
+            roller_count = find_types(schedule_modal, &lv_roller_class,
+                                      schedule_rollers, 8);
+            switch_count = find_types(schedule_modal, &lv_switch_class,
+                                      schedule_switches, 4);
+            if (roller_count != 4 || switch_count != 1 ||
+                !find_label(schedule_modal, "安静时段") ||
+                !find_label(schedule_modal, "到点自动开启，跨天会自动识别") ||
+                !find_label(schedule_modal, "启用定时安静时段") ||
+                !find_label(schedule_modal, "开始") ||
+                !find_label(schedule_modal, "结束") ||
+                !find_label(schedule_modal, "取消") ||
+                !find_label(schedule_modal, "保存")) {
+                fprintf(stderr,
+                        "DND_SCHEDULE_UI rollers=%d switches=%d missing controls\n",
+                        roller_count, switch_count);
+                failures++;
+            }
+            check(settings, "dnd-schedule");
+            inspect(schedule_modal, "dnd-schedule");
+
+            /* Cancelling a draft must not change persisted state or the row. */
+            if (switch_count != 1 ||
+                !activate(schedule_switches[0]) ||
+                roller_count != 4) {
+                fprintf(stderr, "MISSING_ACTION dnd-schedule-draft\n");
+                failures++;
+            } else {
+                lv_roller_set_selected(schedule_rollers[0], 21, LV_ANIM_OFF);
+                lv_roller_set_selected(schedule_rollers[1], 10, LV_ANIM_OFF);
+                lv_roller_set_selected(schedule_rollers[2], 6, LV_ANIM_OFF);
+                lv_roller_set_selected(schedule_rollers[3], 45, LV_ANIM_OFF);
+                if (!click_text(schedule_modal, "取消")) {
+                    fprintf(stderr, "MISSING_ACTION dnd-schedule-cancel\n");
+                    failures++;
+                }
+                bool enabled = true;
+                int start = 0;
+                int end = 0;
+                qz_notifications_schedule_get(&enabled, &start, &end);
+                if (enabled || start != 22 * 60 || end != 8 * 60 ||
+                    !find_label(settings, "未启用")) {
+                    fprintf(stderr,
+                            "DND_SCHEDULE_CANCEL changed state enabled=%d start=%d end=%d\n",
+                            enabled, start, end);
+                    failures++;
+                }
+            }
+        }
+
+        /* Save a cross-midnight window, then verify the modal restores it. */
+        schedule_modal = open_label_row_modal(settings, "安静时段");
+        if (schedule_modal) {
+            lv_obj_update_layout(schedule_modal);
+            roller_count = find_types(schedule_modal, &lv_roller_class,
+                                      schedule_rollers, 8);
+            switch_count = find_types(schedule_modal, &lv_switch_class,
+                                      schedule_switches, 4);
+            if (switch_count != 1 || !activate(schedule_switches[0]) ||
+                roller_count != 4) {
+                fprintf(stderr, "MISSING_ACTION dnd-schedule-enable\n");
+                failures++;
+            } else {
+                lv_roller_set_selected(schedule_rollers[0], 23, LV_ANIM_OFF);
+                lv_roller_set_selected(schedule_rollers[1], 30, LV_ANIM_OFF);
+                lv_roller_set_selected(schedule_rollers[2], 7, LV_ANIM_OFF);
+                lv_roller_set_selected(schedule_rollers[3], 15, LV_ANIM_OFF);
+                if (!click_text(schedule_modal, "保存")) {
+                    fprintf(stderr, "MISSING_ACTION dnd-schedule-save\n");
+                    failures++;
+                }
+                bool enabled = false;
+                int start = 0;
+                int end = 0;
+                qz_notifications_schedule_get(&enabled, &start, &end);
+                if (!enabled || start != 23 * 60 + 30 || end != 7 * 60 + 15 ||
+                    !find_label(settings, "每天 23:30-07:15")) {
+                    fprintf(stderr,
+                            "DND_SCHEDULE_SAVE wrong state enabled=%d start=%d end=%d\n",
+                            enabled, start, end);
+                    failures++;
+                }
+            }
+        } else {
+            fprintf(stderr, "MISSING_ACTION dnd-schedule-reopen\n");
+            failures++;
+        }
+
+        schedule_modal = open_label_row_modal(settings, "安静时段");
+        if (schedule_modal) {
+            lv_obj_update_layout(schedule_modal);
+            roller_count = find_types(schedule_modal, &lv_roller_class,
+                                      schedule_rollers, 8);
+            switch_count = find_types(schedule_modal, &lv_switch_class,
+                                      schedule_switches, 4);
+            if (roller_count != 4 || switch_count != 1 ||
+                !lv_obj_has_state(schedule_switches[0], LV_STATE_CHECKED) ||
+                lv_roller_get_selected(schedule_rollers[0]) != 23 ||
+                lv_roller_get_selected(schedule_rollers[1]) != 30 ||
+                lv_roller_get_selected(schedule_rollers[2]) != 7 ||
+                lv_roller_get_selected(schedule_rollers[3]) != 15) {
+                fprintf(stderr, "DND_SCHEDULE_REOPEN lost saved values\n");
+                failures++;
+            }
+
+            /* Equal times are ambiguous: keep the modal open with an inline
+             * error instead of silently doing nothing or saving a 24-hour DND. */
+            if (roller_count != 4) {
+                fprintf(stderr, "MISSING_ACTION dnd-schedule-equal-time-draft\n");
+                failures++;
+            } else {
+                lv_roller_set_selected(schedule_rollers[2], 23, LV_ANIM_OFF);
+                lv_roller_set_selected(schedule_rollers[3], 30, LV_ANIM_OFF);
+                if (!click_text(schedule_modal, "保存") ||
+                    !find_label(schedule_modal, "开始和结束不能相同")) {
+                    fprintf(stderr, "DND_SCHEDULE_EQUAL_TIMES saved or hid error\n");
+                    failures++;
+                }
+                inspect(schedule_modal, "dnd-schedule-equal-times");
+                if (!click_text(schedule_modal, "取消")) {
+                    fprintf(stderr, "MISSING_ACTION dnd-schedule-error-cancel\n");
+                    failures++;
+                }
+                bool enabled = false;
+                int start = 0;
+                int end = 0;
+                qz_notifications_schedule_get(&enabled, &start, &end);
+                if (!enabled || start != 23 * 60 + 30 || end != 7 * 60 + 15 ||
+                    !find_label(settings, "每天 23:30-07:15")) {
+                    fprintf(stderr, "DND_SCHEDULE_EQUAL_TIMES changed saved state\n");
+                    failures++;
+                }
+            }
+        } else {
+            fprintf(stderr, "MISSING_ACTION dnd-schedule-restore-check\n");
+            failures++;
+        }
+
+        /* Keep later notification tests deterministic regardless of the clock. */
+        if (!qz_notifications_schedule_set(false, 23 * 60 + 30, 7 * 60 + 15) ||
+            !qz_notifications_set_dnd(false)) {
+            fprintf(stderr, "DND_FIXTURE_FINAL_RESET_FAILED\n");
+            failures++;
+        }
+        lv_obj_send_event(settings, LV_EVENT_SCREEN_LOADED, NULL);
+        if (!find_label(settings, "未启用")) {
+            fprintf(stderr, "DND_FIXTURE_FINAL_SUMMARY_FAILED\n");
+            failures++;
+        }
+
+        char fixture_file[256];
+        snprintf(fixture_file, sizeof(fixture_file), "%s/.qzdesk-dnd", fixture_home_path);
+        unlink(fixture_file);
+        snprintf(fixture_file, sizeof(fixture_file), "%s/.qzdesk-dnd-schedule", fixture_home_path);
+        unlink(fixture_file);
+        rmdir(fixture_home_path);
+    }
+    if (backlight_ready) check_backlight_fade(display);
     qzdesk_core_event_t notification = { .type = QZDESK_CORE_EVENT_TOAST };
     snprintf(notification.role, sizeof(notification.role), "timer");
     snprintf(notification.text, sizeof(notification.text), "专注完成，起身喝水，休息一下");
@@ -929,6 +2052,34 @@ int main(int argc, char **argv)
         if (!click_text(lv_layer_top(), "完成")) failures++;
     }
 
+    /* 顶部下拉出来的通知中心：刚才那几条都留在历史里，清空之后回到空状态。 */
+    qz_notifications_open_panel();
+    settle();
+    lv_obj_update_layout(lv_layer_top());
+    if (!find_label(lv_layer_top(), "通知") || !find_label(lv_layer_top(), "免打扰") ||
+        !find_label(lv_layer_top(), "第二条提醒：喝水")) {
+        fprintf(stderr, "MISSING_PANEL notification-center\n");
+        failures++;
+    }
+    inspect(lv_layer_top(), "notification-center");
+    check(pomodoro, "notification-center");
+    lv_obj_t *trash = find_icon_image(lv_layer_top(), QZ_ICON_TRASH, 15);
+    if (!trash) {
+        fprintf(stderr, "MISSING_ACTION notification-center-clear\n");
+        failures++;
+    } else {
+        lv_obj_send_event(lv_obj_get_parent(trash), LV_EVENT_CLICKED, NULL);
+        settle();
+        if (!find_label(lv_layer_top(), "暂无通知") ||
+            find_label(lv_layer_top(), "第二条提醒：喝水")) {
+            fprintf(stderr, "STALE_HISTORY notification-center-clear\n");
+            failures++;
+        }
+        check(pomodoro, "notification-center-empty");
+    }
+    qz_notifications_close_panel();
+    settle();
+
     lv_obj_t *general = find_screen(display, "通用设置");
     if (general) {
         if (open_dialog(general, "时间", "time-modal")) click_text(general, "取消");
@@ -947,13 +2098,34 @@ int main(int argc, char **argv)
         check_pages(wlan, "wifi");
         fixture_long_wifi = true;
         lv_obj_send_event(wlan, LV_EVENT_SCREEN_LOADED, NULL);
+        wlan_fixture_advance_poll();
         check_pages(wlan, "wifi-long");
         for (int i = 0; i < 16 && click_text(wlan, "上一页"); i++) {}
-        char ssid[64]; memset(ssid, 'W', 63); ssid[63] = 0;
+        /* Long enough to wrap at 320 px, but short enough that the row's
+         * clickable center remains inside the list viewport. The fixture SSID
+         * above intentionally matches this trigger. */
+        char ssid[64]; memset(ssid, 'W', 24); ssid[24] = 0;
         if (open_dialog(wlan, ssid, "wifi-password")) {
             click_text(wlan, "取消");
         }
+        /* A previous lease can outlive carrier. It must not turn the page into
+         * a connected view or lock the enable switch. */
         fixture_connected = true;
+        fixture_link_up = false;
+        fixture_wifi_state = QZ_WIFI_IDLE;
+        lv_obj_send_event(wlan, LV_EVENT_SCREEN_LOADED, NULL);
+        lv_obj_update_layout(wlan);
+        lv_obj_t *wlan_switch = find_type(wlan, &lv_switch_class);
+        if (find_label_prefix(wlan, "Wi-Fi 已连接") ||
+            find_label(wlan, "搜索其他 WiFi") ||
+            !find_label(wlan, "请选择 Wi-Fi 网络") ||
+            !wlan_switch || lv_obj_has_state(wlan_switch, LV_STATE_DISABLED)) {
+            fprintf(stderr, "STALE_WIFI_LINK wifi-stale-lease\n");
+            failures++;
+        }
+        check(wlan, "wifi-stale-lease");
+        fixture_link_up = true;
+        fixture_wifi_state = QZ_WIFI_CONNECTED;
         lv_obj_send_event(wlan, LV_EVENT_SCREEN_LOADED, NULL);
         if (open_dialog(wlan, "Layout test network", "wifi-details")) {
             /* Clicking the scrim avoids sending a real disconnect command. */
@@ -964,10 +2136,44 @@ int main(int argc, char **argv)
     }
     fixture_skill_count = 0;
     lv_obj_send_event(skills, LV_EVENT_SCREEN_LOADED, NULL);
+    if (!settle_until_label(skills, "还没有安装 Skill", 80) ||
+        !find_label(skills, "从浏览器控制台添加，设备端随开随用") ||
+        !find_label(skills, "重试")) {
+        fprintf(stderr, "MISSING_SKILLS_STATE skills-empty\n");
+        failures++;
+    }
+    /* A queued reload must not replace the empty state after it has settled. */
+    settle();
+    if (!find_label(skills, "还没有安装 Skill") ||
+        find_label(skills, "正在读取技能服务")) {
+        fprintf(stderr, "UNSTABLE_SKILLS_STATE skills-empty\n");
+        failures++;
+    }
     check(skills, "skills-empty");
     fixture_skill_count = -1;
     lv_obj_send_event(skills, LV_EVENT_SCREEN_LOADED, NULL);
+    if (!settle_until_label(skills, "本地服务未连接", 80) ||
+        !find_label(skills, "请确认 QZdesk 核心正在运行") ||
+        !find_label(skills, "本地 Skill 服务未响应")) {
+        fprintf(stderr, "MISSING_SKILLS_STATE skills-service-error\n");
+        failures++;
+    }
+    settle();
+    if (!find_label(skills, "本地服务未连接") ||
+        find_label(skills, "还没有安装 Skill")) {
+        fprintf(stderr, "UNSTABLE_SKILLS_STATE skills-service-error\n");
+        failures++;
+    }
     check(skills, "skills-service-error");
+
+    /* 每个 qz_icon() 请求都必须命中一个烘好的精确档位：不然 LVGL 的最近邻
+     * 缩图会把线性图标拉成灰边，小屏上尤其明显。漏档就在这里红。 */
+    int icon_misses = qz_icon_size_misses();
+    if (icon_misses != 0) {
+        fprintf(stderr, "ICON_SIZE_MISS: %d 次取图没有精确档位，"
+                        "按调用点补 tools/mk_icon_assets.py 的 SIZES\n", icon_misses);
+        failures++;
+    }
     fprintf(stderr, "LAYOUT %dx%d: %d cases, %d failures, %d text-mode warnings\n",
             panel_width, panel_height, cases, failures, warnings);
     return failures ? 1 : 0;

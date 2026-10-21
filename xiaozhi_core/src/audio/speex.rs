@@ -27,8 +27,10 @@ const SPEEX_RESAMPLER_QUALITY_DEFAULT: c_int = 4;
 const RESAMPLER_ERR_SUCCESS: c_int = 0;
 
 unsafe extern "C" {
-    fn speex_preprocess_state_init(frame_size: c_int, sampling_rate: c_int)
-        -> *mut SpeexPreprocessState;
+    fn speex_preprocess_state_init(
+        frame_size: c_int,
+        sampling_rate: c_int,
+    ) -> *mut SpeexPreprocessState;
     fn speex_preprocess_state_destroy(st: *mut SpeexPreprocessState);
     fn speex_preprocess_run(st: *mut SpeexPreprocessState, x: *mut i16) -> c_int;
     fn speex_preprocess_ctl(
@@ -68,9 +70,8 @@ unsafe impl Send for Preprocessor {}
 impl Preprocessor {
     /// Create a new preprocessor for a given frame size (in samples) and sample rate.
     pub fn new(frame_size: usize, sample_rate: u32) -> anyhow::Result<Self> {
-        let state = unsafe {
-            speex_preprocess_state_init(frame_size as c_int, sample_rate as c_int)
-        };
+        let state =
+            unsafe { speex_preprocess_state_init(frame_size as c_int, sample_rate as c_int) };
         if state.is_null() {
             anyhow::bail!("Failed to initialize speex preprocessor");
         }

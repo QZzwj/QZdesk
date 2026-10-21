@@ -26,14 +26,17 @@
 #include "scale.h"
 
 #define QZ_GUTTER 14
-#define QZ_STATUS_H 30
+#define QZ_STATUS_H 52
 #define QZ_TOOLBAR_H 44
+/** 全宽页头的高度：五个页面与各二级页统一用这一条。52 = 44 的返回键 + 上下各
+ *  4 的呼吸位，正好让返回键的圆落在页头里而不贴到发丝线上。 */
+#define QZ_HEADER_H 52
 
-/* Radii: cards use an absolute pixel corner (iOS grouped style ≈ 10), icon
- * tiles use a percentage of their size (≈ 22%, the squircle-ish ratio). */
-#define QZ_RADIUS_CARD 10
-#define QZ_RADIUS_ICON 22
-#define QZ_ROW_ICON 30   /**< icon tile size in a grouped list row */
+/* Signal-workstation geometry: utility surfaces stay nearly square, while
+ * icon tiles keep a small mechanical radius rather than a squircle. */
+#define QZ_RADIUS_CARD 6
+#define QZ_RADIUS_ICON 18
+#define QZ_ROW_ICON 34   /**< icon tile size in a grouped list row */
 
 /* ------------------------------------------------------------------------- *
  * Design tokens
@@ -68,8 +71,8 @@ typedef enum {
     QZ_TEXT_TERTIARY,
     QZ_SHADOW,
     QZ_FACE_BUBBLE,
-    QZ_KNOB,        /**< slider / switch knob fill on top of glass */
-    QZ_GLASS_RIM,   /**< specular rim on glass chrome */
+    QZ_KNOB,        /**< slider / switch knob fill on top of the track */
+    QZ_GLASS_RIM,   /**< hairline around raised chrome */
     /* accents & semantics — same hue in both themes, the dark step is brighter
      * on dark so accent text still clears 4.5:1 on the dark plate. */
     QZ_ACCENT,
@@ -80,18 +83,45 @@ typedef enum {
     QZ_GREEN,
     QZ_ORANGE,
     QZ_RED,
+    QZ_COLOR_COUNT,
 } qz_color_token_t;
+
+/* Four complete palettes rather than a light/dark switch. The first two are
+ * the original mineral pair and stay the compatibility defaults; the other two
+ * give the device visibly different working moods without changing layout. */
+typedef enum {
+    QZ_THEME_MINERAL = 0,
+    QZ_THEME_NIGHT,
+    QZ_THEME_PAPER,
+    QZ_THEME_EMBER,
+    QZ_THEME_COUNT,
+} qz_theme_id_t;
 
 /** Look up the current colour for a token. Thread safe; only reads g_dark. */
 lv_color_t qz_color(qz_color_token_t token);
+/** Look up a token for a specific mode. Used by theme previews, which must keep
+ *  showing the real light and dark palettes at the same time. */
+lv_color_t qz_color_mode(qz_color_token_t token, bool dark);
+/** Look up a token in one of the four complete palettes. */
+lv_color_t qz_color_theme(qz_color_token_t token, qz_theme_id_t theme);
+
+/** Active palette and its metadata. Invalid values fall back to MINERAL. */
+qz_theme_id_t qz_theme_get_id(void);
+bool qz_theme_id_is_dark(qz_theme_id_t theme);
+const char *qz_theme_id_key(qz_theme_id_t theme);
+const char *qz_theme_id_name(qz_theme_id_t theme);
+const char *qz_theme_id_caption(qz_theme_id_t theme);
+bool qz_theme_parse(const char *value, qz_theme_id_t *theme);
 
 /** True when the interface is in dark mode. */
 bool qz_theme_is_dark(void);
+/** Switch to a complete palette. Persistence is the caller's job. */
+bool qz_theme_set(qz_theme_id_t theme);
 /**
  * Switch the active theme. The new palette is applied to every screen and
- * widget immediately (the active screen is reloaded with a cross fade so the
- * change reads as a single motion). Returns true if the state actually
- * changed.
+ * widget immediately. Unless reduced motion is requested, a short accent wash
+ * bridges the two palettes without rebuilding or cross-fading the screen.
+ * Returns true if the state actually changed.
  *
  * Persistence is the caller's job — this only updates the live UI.
  */
@@ -105,8 +135,8 @@ bool qz_theme_set_dark(bool dark);
  * flag when they are styled; the tag is what makes a live change reach them
  * without rebuilding the screen.
  * ------------------------------------------------------------------------- */
-#define QZ_MATERIAL_PERCENT_DEFAULT 68
-#define QZ_RIM_OPA 230
+#define QZ_MATERIAL_PERCENT_DEFAULT 100
+#define QZ_RIM_OPA 210
 
 /** Read the env vars once, before any screen is built. */
 void qz_style_init(void);
@@ -136,6 +166,12 @@ void qz_obj_set_bg_grad_color(lv_obj_t *obj, qz_color_token_t token, lv_style_se
 void qz_obj_set_text_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
 void qz_obj_set_border_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
 void qz_obj_set_shadow_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
+void qz_obj_set_image_recolor(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
+void qz_obj_set_line_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
+void qz_obj_set_arc_color(lv_obj_t *obj, qz_color_token_t token, lv_style_selector_t sel);
+/** Chart series live outside object styles, so track their colour separately. */
+void qz_obj_set_chart_series_color(lv_obj_t *chart, lv_chart_series_t *series,
+                                   qz_color_token_t token);
 
 /* ------------------------------------------------------------------------- *
  * Typography
@@ -155,20 +191,21 @@ bool qz_reduce_motion(void);
  * Widget builders
  * ------------------------------------------------------------------------- */
 void qz_style_screen(lv_obj_t *obj);
+/** 全宽页头：玻璃材质、直角贴边、底部一根发丝线。 */
+void qz_style_header(lv_obj_t *obj);
+/** 建一条标准页头（高 QZ_HEADER_H），标题靠左排在返回键右边；调用方再往上
+ *  加返回键与右侧动作。返回的就是页头对象本身。 */
+lv_obj_t *qz_page_header(lv_obj_t *screen, const char *title);
 void qz_style_toolbar(lv_obj_t *obj);
 void qz_style_row(lv_obj_t *obj);
 void qz_style_slider(lv_obj_t *obj);
 void qz_style_switch(lv_obj_t *obj);
 void qz_style_primary_button(lv_obj_t *obj);
 void qz_style_textarea(lv_obj_t *obj);
-/** iOS looking on-screen keyboard: white keys, grey function keys. */
+/** Workstation keyboard: flat keys, function keys differentiated by fill. */
 void qz_style_keyboard(lv_obj_t *obj);
 void qz_add_press_feedback(lv_obj_t *obj);
-/**
- * Specular highlight that follows the finger: a soft glint drawn in the top
- * layer at the touch point while the object is held. This is how the "light
- * moves across the glass" cue is reproduced without real-time refraction.
- */
+/** A precise top-layer highlight that follows the finger. */
 void qz_add_touch_glint(lv_obj_t *obj);
 
 lv_obj_t *qz_text(lv_obj_t *parent, const char *text, int32_t px, lv_color_t text_color);
@@ -183,6 +220,8 @@ lv_obj_t *qz_symbol(lv_obj_t *parent, const char *symbol, int32_t px, lv_color_t
  */
 lv_obj_t *qz_icon_image(lv_obj_t *parent, qz_icon_t icon, int32_t px, lv_color_t color);
 lv_obj_t *qz_button(lv_obj_t *parent, const char *caption, int width, int height);
+/** 消息页/记录页的"点一下就发"建议 chip：浅底、圆角胶囊、强调色文字。 */
+lv_obj_t *qz_chip(lv_obj_t *parent, const char *caption, int width, int height);
 lv_obj_t *qz_icon_button(lv_obj_t *parent, const char *icon, int size);
 /** Grouped plate: opaque surface, no border, no shadow. */
 void qz_style_plate(lv_obj_t *obj);
@@ -207,14 +246,13 @@ void qz_make_scrollable(lv_obj_t *obj);
 void qz_grid_metrics(int32_t *tile_w, int32_t *tile_h);
 /** 2 列网格里第 (col,row) 格的左上角坐标（相对内容区）。col/row 从 0 起。 */
 void qz_grid_pos(int32_t col, int32_t row, int32_t *x, int32_t *y);
-/** The floating material: translucent surface, specular rim, neutral shadow.
- * Only for chrome that sits above content (toolbars, composer, overlays). */
+/** Flat raised chrome: solid surface and one hairline, no blur or shadow. */
 void qz_style_glass(lv_obj_t *obj);
-/** Flat squircles icon tile in one colour — no gradient. */
+/** Flat icon tile in one colour, no gradient. */
 lv_obj_t *qz_squircle(lv_obj_t *parent, int size, qz_color_token_t color);
 /** Rounded vertical/horizontal hairline. */
 lv_obj_t *qz_separator(lv_obj_t *parent, int length, bool vertical);
-/** Thin iOS disclosure chevron pointing right. */
+/** Thin disclosure chevron pointing right. */
 lv_obj_t *qz_chevron(lv_obj_t *parent, lv_color_t color, int32_t size);
 /** Thin top-half arc, used for locks and mic cradles. */
 lv_obj_t *qz_arc_piece(lv_obj_t *parent, int32_t width, int32_t height, int32_t start,
@@ -225,6 +263,12 @@ lv_obj_t *qz_arc_piece(lv_obj_t *parent, int32_t width, int32_t height, int32_t 
  * ------------------------------------------------------------------------- */
 lv_obj_t *qz_overlay_create(lv_obj_t *parent);
 void qz_overlay_attach_dismiss(lv_obj_t *overlay);
+/** 遮罩上弹出的面板：不透明材质 + 6px 圆角 + 发丝边框，全应用统一。 */
+void qz_style_sheet(lv_obj_t *panel);
+/** 现在有没有遮罩/弹层盖在页面上：手势据此把返回让给弹层自己处理。 */
+bool qz_overlay_open(void);
+/** 关闭当前可见的最上层弹层；没有可关闭的弹层时返回 false。 */
+bool qz_overlay_close_top(void);
 
 /* ------------------------------------------------------------------------- *
  * Motion
@@ -234,8 +278,9 @@ void qz_overlay_attach_dismiss(lv_obj_t *overlay);
 #define QZ_DUR_SMALL 180  /**< chips, tooltips (125-200ms) */
 #define QZ_DUR_PANEL 220  /**< panels and popovers (150-250ms) */
 #define QZ_DUR_MODAL 250  /**< modal + scrim, animated as one surface */
-#define QZ_DUR_SCREEN 260 /**< page transition */
+#define QZ_DUR_SCREEN 200 /**< page transition: fast, eased, never jump-cut */
 #define QZ_DUR_TOAST 240  /**< toast in/out */
+#define QZ_DUR_THEME 260  /**< palette wash: brief accent in, soft settle out */
 
 /** Strong ease-out, cubic-bezier(0.23, 1, 0.32, 1): entering / exiting. */
 void qz_anim_ease_out(lv_anim_t *anim);
@@ -252,5 +297,9 @@ void qz_animate_entrance(lv_obj_t *obj, uint32_t delay_ms);
 /** Fade + slide in, used when swapping a page section. */
 void qz_animate_pop_in(lv_obj_t *obj);
 void qz_screen_load(lv_obj_t *screen, lv_scr_load_anim_t anim, uint32_t duration_ms);
+/** 退回上一页；没有可退的页就什么都不做。 */
+void qz_screen_back(void);
+/** 让某一页接管返回（例如对话页要先收键盘），侧滑返回会先问它。 */
+void qz_screen_set_back_handler(lv_obj_t *screen, void (*handler)(void));
 
 #endif

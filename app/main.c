@@ -8,8 +8,10 @@
 #include "settings.h"
 #include "weather_page.h"
 #include "theme.h"
+#include "gestures.h"
 #include "notifications.h"
 #include "qzdesk_core_process.h"
+#include "wifi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +59,7 @@ int main(void)
     lv_theme_default_init(lv_display_get_default(), qz_color(QZ_ACCENT),
                           qz_color(QZ_ACCENT_DARK), false, qz_font());
     qz_notifications_init();
+    qz_global_gestures_init();
     lv_obj_t *desktop = qz_desktop_create(server);
     lv_obj_t *apps = qz_apps_create();
     lv_obj_t *assistant = qz_assistant_create();
@@ -91,6 +94,9 @@ int main(void)
             fclose(fp);
         }
     }
+    /* 首帧已经出来，再把保存过的 Wi-Fi 交给 worker 恢复；所有外部命令都在
+     * 后台线程执行，网络晚就绪也不会卡住界面或核心启动。 */
+    qz_wifi_autoconnect_async();
     /* 免触摸调试口：QZDESK_OPEN=camera|pomodoro|apps… 启动后直接打开对应页，
      * 无头截图 / 自动化验证用。取 applet 枚举小写名，桌面/助手页也认。 */
     {

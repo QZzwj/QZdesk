@@ -14,6 +14,24 @@ typedef enum {
     QZDESK_CORE_EVENT_WEATHER,
     /** 性能监控快照：核心每 2 秒采一次，设备页与网页控制台读的是同一份。 */
     QZDESK_CORE_EVENT_PERFORMANCE,
+    /**
+     * 刚识别出来的一句用户语音（`text` 为识别文本）。
+     *
+     * 只在这种情况发：麦克风收到的话，而不是打字上行的回显。聊天记录里
+     * 同一句话还会作为 `role=user` 的 `CHAT` 事件再来一条 —— 这条的用途是
+     * 让看不到聊天列表的界面（表情模式字幕）也能核对"它听成了什么"。
+     */
+    QZDESK_CORE_EVENT_ASR,
+    /**
+     * 手机输入桥的扫码地址（`text` 为 `http://<设备IP>:<网页端口>/#chat`）。
+     *
+     * 设备上只有拉丁键盘，中文打不出来；手机扫码打开网页控制台的对话页，
+     * 在手机上打字，核心再合成语音上行。地址由核心算 —— 它是唯一知道局域网
+     * IP 与网页端口的地方（`ok=false` 时 `text` 是失败原因）。
+     */
+    QZDESK_CORE_EVENT_BRIDGE,
+    /** 服务端给本轮回复附加的表情协议 ID。 */
+    QZDESK_CORE_EVENT_EMOTION,
 } qzdesk_core_event_type_t;
 
 /** 指标等级：核心已按阈值判好，界面只做「颜色 + 文字」映射，不各算一套。 */
@@ -126,6 +144,11 @@ typedef struct {
     int high;           /* 今日最高 */
     int low;            /* 今日最低 */
     int precipitation;  /* 今日降水概率上限（%） */
+    /** 临近降水：未来两小时内第一次可能下雨还有多少分钟（0 = 正在下）。
+     *  `-1` 表示这两小时里没有要下的雨 —— 0 是合法值，不能拿它当"没有"。 */
+    int near_precipitation_minutes;
+    /** 上面那个时段的降水概率（%）；核心没给就是 -1。 */
+    int near_precipitation_probability;
     int uv_x10;         /* 紫外线指数 ×10：界面层不碰浮点 */
     char sunrise[8];    /* 日出 HH:MM（拿不到为空串） */
     char sunset[8];     /* 日落 HH:MM */
@@ -142,6 +165,8 @@ typedef struct {
     char command[24];
     /** 聊天记录的角色："user" / "assistant" / "system"（其他事件为空串）。 */
     char role[12];
+    /** 仅 `QZDESK_CORE_EVENT_EMOTION` 有效：服务端表情 ID 或别名。 */
+    char emotion[8];
     /**
      * Event text (chat message, toast, activation code).
      *
@@ -174,11 +199,10 @@ bool qzdesk_core_new_chat(void);
 /**
  * Hand a typed message to the core as `{"type":"chat_text","text":"..."}`.
  *
- * The cloud only accepts audio as user input, so the core synthesises this text
- * into speech (讯飞在线语音合成) and uploads it through the same Opus path the
- * microphone uses. Returns false only when the message could not be handed over
- * (the core process is not reachable) — a failed synthesis is reported back as a
- * toast, not by this return value.
+ * The core first sends the text directly as `listen/detect/text`. If the current
+ * cloud endpoint does not accept that form, it automatically falls back to local
+ * speech synthesis and the normal Opus upload path. Returns false only when the
+ * message could not be handed over (the core process is not reachable).
  */
 bool qzdesk_core_send_text(const char *text);
 unsigned long long qzdesk_core_text_request_id(void);
@@ -238,6 +262,14 @@ bool qzdesk_core_refresh_weather(void);
  * waiting for the next tick.
  */
 bool qzdesk_core_request_performance(void);
+/**
+ * Ask the core for the current phone-bridge URL (`{"type":"bridge_request"}`).
+ *
+ * The core answers with a `QZDESK_CORE_EVENT_BRIDGE` event; the address is
+ * computed on demand, so switching networks and asking again is enough to get
+ * the new one instead of a stale address baked in at startup.
+ */
+bool qzdesk_core_request_bridge(void);
 void qzdesk_core_close(void);
 
 #endif

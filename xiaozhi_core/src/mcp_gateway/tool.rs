@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use super::config::{ExecutionMode, ExternalToolConfig, NotifyMethod, ToolTransport};
 
@@ -30,12 +30,8 @@ impl DynamicTool {
             ToolTransport::Subprocess { executable, args } => {
                 Self::exec_subprocess(executable, args, params).await
             }
-            ToolTransport::Http { url, method } => {
-                Self::exec_http(url, method, params).await
-            }
-            ToolTransport::Tcp { address } => {
-                Self::exec_tcp(address, params).await
-            }
+            ToolTransport::Http { url, method } => Self::exec_http(url, method, params).await,
+            ToolTransport::Tcp { address } => Self::exec_tcp(address, params).await,
         }
     }
 
@@ -46,7 +42,11 @@ impl DynamicTool {
         params: Value,
     ) -> Result<Value, String> {
         let args_json = serde_json::to_string(&params).unwrap_or_default();
-        log::info!("Executing subprocess tool: {}, args: {}", executable, args_json);
+        log::info!(
+            "Executing subprocess tool: {}, args: {}",
+            executable,
+            args_json
+        );
 
         let mut child = Command::new(executable)
             .args(args)
@@ -57,7 +57,10 @@ impl DynamicTool {
             .map_err(|e| format!("Failed to spawn {}: {}", executable, e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(args_json.as_bytes()).await.unwrap_or_default();
+            stdin
+                .write_all(args_json.as_bytes())
+                .await
+                .unwrap_or_default();
         }
 
         let output = child
@@ -148,41 +151,62 @@ impl McpTool for DynamicTool {
                 log::info!(">>> 后台任务已启动: {}", config_clone.name);
                 let timeout_duration = Duration::from_millis(timeout_ms);
 
-                let _result = match timeout(
-                    timeout_duration,
-                    Self::execute_inner(&config_clone, params),
-                )
-                .await
-                {
-                    Ok(Ok(value)) => {
-                        let msg = value.as_str().unwrap_or(&value.to_string()).to_string();
-                        let mcp_output = json!({
-                            "content": [{
-                                "type": "text",
-                                "text": msg
-                            }]
-                        });
-                        log::info!("✓ 后台任务 [{}] 执行完成 | MCP输出: {}", config_clone.name, mcp_output.to_string());
-                        log::info!("✓ 后台任务 [{}] 执行完成 | 脚本输出: {}", config_clone.name, msg);
-                        Ok(msg)
-                    }
-                    Ok(Err(err)) => {
-                        log::error!("✗ 后台任务 [{}] 执行失败 | 错误信息: {}", config_clone.name, err);
-                        Err(err)
-                    }
-                    Err(_) => {
-                        log::error!("⏱ 后台任务 [{}] 执行超时 ({}ms)", config_clone.name, timeout_ms);
-                        Err(format!("后台任务超时 ({}ms)", timeout_ms))
-                    }
-                };
+                let _result =
+                    match timeout(timeout_duration, Self::execute_inner(&config_clone, params))
+                        .await
+                    {
+                        Ok(Ok(value)) => {
+                            let msg = value.as_str().unwrap_or(&value.to_string()).to_string();
+                            let mcp_output = json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": msg
+                                }]
+                            });
+                            log::info!(
+                                "✓ 后台任务 [{}] 执行完成 | MCP输出: {}",
+                                config_clone.name,
+                                mcp_output.to_string()
+                            );
+                            log::info!(
+                                "✓ 后台任务 [{}] 执行完成 | 脚本输出: {}",
+                                config_clone.name,
+                                msg
+                            );
+                            Ok(msg)
+                        }
+                        Ok(Err(err)) => {
+                            log::error!(
+                                "✗ 后台任务 [{}] 执行失败 | 错误信息: {}",
+                                config_clone.name,
+                                err
+                            );
+                            Err(err)
+                        }
+                        Err(_) => {
+                            log::error!(
+                                "⏱ 后台任务 [{}] 执行超时 ({}ms)",
+                                config_clone.name,
+                                timeout_ms
+                            );
+                            Err(format!("后台任务超时 ({}ms)", timeout_ms))
+                        }
+                    };
 
                 match &config_clone.notify {
                     NotifyMethod::Disabled => {
-                        log::info!("📝 后台任务 [{}] 完成结果已通过日志和标准错误输出记录", config_clone.name);
+                        log::info!(
+                            "📝 后台任务 [{}] 完成结果已通过日志和标准错误输出记录",
+                            config_clone.name
+                        );
                     }
                     #[allow(unreachable_patterns)]
                     other => {
-                        log::warn!("⚠️ 后台任务 [{}] 配置了未实现的通知方式: {:?}", config_clone.name, other);
+                        log::warn!(
+                            "⚠️ 后台任务 [{}] 配置了未实现的通知方式: {:?}",
+                            config_clone.name,
+                            other
+                        );
                     }
                 }
             });
